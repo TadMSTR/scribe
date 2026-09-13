@@ -1,0 +1,48 @@
+# Secrets — first, and deliberately broad. This repo's whole subject matter is transcripts
+# that have been shown to contain credentials (8,015 secret-shaped values across a 429-file
+# corpus), so an accidentally-committed sample is a live disclosure, not a tidiness problem.
+*.env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.secrets/
+*credentials*
+*.jsonl
+!tests/fixtures/*.jsonl
+
+# Core dumps can contain in-memory secrets
+core
+core.*
+*.core
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Test and tool caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local data
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Scan artefacts — a findings file must never land in the scanned tree.
+_gitleaks_report.json
+gitleaks-report*.json

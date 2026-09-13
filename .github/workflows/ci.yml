@@ -1,0 +1,37 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The extractor is stdlib-only and reads files written by whatever Python the host
+        # runs, so the version matrix is the cheapest guard against a stdlib behaviour
+        # change silently altering extraction on one of them.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # ruff's version comes from the `dev` extra, where it is pinned exactly. Pinning it
+      # a second time here would be a second source of truth for one fact, and the two
+      # would eventually disagree.
+      - run: pip install -e ".[dev]"
+
+      # src/ AND tests/. Linting only src/ leaves every rule unenforced across half the
+      # repository, which is where the assertions live.
+      - run: ruff check src/ tests/
+      - run: ruff format --check src/ tests/
+
+      # Coverage is MEASURED here, not merely configured. --cov-fail-under is not passed
+      # as a literal; the floor comes from [tool.coverage.report] so the number lives in
+      # exactly one place.
+      - run: pytest -v --cov --cov-report=term

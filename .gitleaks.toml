@@ -1,0 +1,28 @@
+[extend]
+useDefault = true
+
+# ALLOWLIST — read the constraint before widening this.
+#
+# This repository's test suite has to contain credential-shaped strings, because the
+# component under test is a redactor and the only honest way to test one is to feed it
+# something that looks like a secret. Every such literal is synthetic and carries the
+# marker FAKE or NOTREAL.
+#
+# THIS IS DELIBERATELY MARKER-SCOPED, NOT PATH-SCOPED. The first version of this file
+# also listed `paths = ['tests/test_redact\.py', ...]`, which reads as the narrower,
+# more careful option and is the opposite. gitleaks ORs `paths` with `regexes`: any
+# finding inside an allowlisted path is excused regardless of what it looks like, so a
+# real credential pasted into a test file would not have been caught. The probe in
+# `tests/check_gitleaks_gate.py` that plants an unmarked secret into a file named
+# `tests/test_redact.py` is what surfaced this, and it stays in the suite as the guard
+# against reintroducing it.
+#
+# Scoping to the marker instead means the exemption travels with the synthetic value
+# rather than with the filename: a fixture credential is excused anywhere, and a real
+# one is caught everywhere.
+[allowlist]
+description = "Synthetic credentials required by the redaction test suite"
+regexTarget = "match"
+regexes = [
+    '''(FAKE|NOTREAL)''',
+]
