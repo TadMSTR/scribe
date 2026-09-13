@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 
 from scribe.config import Config, ProviderConfig, StageConfig
-from scribe.pipeline import output_root, process_session, run_once, summarize_run
+from scribe.extract.models import EventLog
+from scribe.pipeline import (
+    output_root,
+    process_session,
+    run_once,
+    session_when,
+    summarize_run,
+)
 from scribe.state import STATUS_FAILED, STATUS_SUMMARIZED, Store
 from scribe.summarize.providers import Completion, Provider, ProviderError
 
@@ -343,3 +350,90 @@ def test_qc_grades_the_scrubbed_text_not_the_raw_model_output(env) -> None:
     (written,) = list(output_root(cfg).rglob("*.md"))
     assert r.qc_ok is not None
     assert "ghp_FAKE" not in written.read_text()
+
+
+# --- vikunja#847: the digest's date is the session's, not the run's ------------------------
+
+PAST_START = datetime(2026, 8, 17, 23, 40, tzinfo=UTC)
+
+
+@pytest.fixture
+def past_env(env):
+    """The same environment, with a transcript whose session ran on 2026-08-17.
+
+    The fixture deliberately spans midnight -- 23:40 on the 17th through 00:20 on the 18th --
+    so it separates all three candidate anchors: the run clock (`WHEN`, 2026-09-13),
+    `ended_at` (the 18th) and `started_at` (the 17th). A fixture sitting wholly inside one
+    past day would prove only that the clock is unused, and would pass just as happily with
+    the wrong one of the two session timestamps. That is the same shape of hole that let 367
+    green tests miss this: every other fixture here is dated today.
+    """
+    cfg, store, target = env
+    past = target.parent / "past.jsonl"
+    past.write_bytes((FIXTURES / "transcript-past-dated.jsonl").read_bytes())
+    os.utime(past, (1_000_000.0 - 3600, 1_000_000.0 - 3600))
+    row = store.upsert_observed(
+        str(past), size_bytes=past.stat().st_size, mtime_ns=1, agent="research"
+    )
+    return cfg, store, row
+
+
+def test_a_digest_is_filed_under_the_session_date_not_the_run_date(past_env) -> None:
+    """The backfill defect: 429 sessions would otherwise collapse into one file."""
+    cfg, store, row = past_env
+    r = process_session(row, cfg, store, provider=Stub(), now=WHEN)
+    assert r.written is True
+    assert (output_root(cfg) / "research" / "2026-08-17.md").exists()
+    assert not (output_root(cfg) / "research" / f"{WHEN:%Y-%m-%d}.md").exists()
+
+
+def test_a_midnight_spanning_session_is_filed_under_the_day_it_began(past_env) -> None:
+    """`started_at`, not `ended_at`. See `session_when` for why the start loses less."""
+    cfg, store, row = past_env
+    process_session(row, cfg, store, provider=Stub(), now=WHEN)
+    # Asserting the absence of the 18th alone would pass under the pre-fix wall-clock
+    # behaviour too, which writes to neither day. The positive half is what makes this
+    # test specific to the start-vs-end choice.
+    assert (output_root(cfg) / "research" / "2026-08-17.md").exists()
+    assert not (output_root(cfg) / "research" / "2026-08-18.md").exists()
+
+
+def test_both_headings_come_from_the_session_not_the_clock(past_env) -> None:
+    """The filename alone is not enough -- `writeback` derives two headings from `when` too."""
+    cfg, store, row = past_env
+    process_session(row, cfg, store, provider=Stub(), now=WHEN)
+    text = (output_root(cfg) / "research" / "2026-08-17.md").read_text()
+    assert "# 2026-08-17" in text
+    assert "## Session 23:40" in text
+    assert "### 23:40" in text
+    assert f"{WHEN:%H:%M}" not in text
+
+
+def test_session_when_prefers_the_start_then_the_end_then_the_clock() -> None:
+    log = EventLog(session_id="s", transcript_path="t")
+    assert session_when(log, WHEN) == WHEN
+
+    log.ended_at = "2026-08-18T00:20:30Z"
+    assert session_when(log, WHEN) == datetime(2026, 8, 18, 0, 20, 30, tzinfo=UTC)
+
+    log.started_at = "2026-08-17T23:40:00Z"
+    assert session_when(log, WHEN) == PAST_START
+
+
+def test_an_unparseable_session_timestamp_falls_back_rather_than_raising() -> None:
+    """A malformed timestamp must not abort the sweep -- one bad transcript, not fourteen."""
+    log = EventLog(session_id="s", transcript_path="t", started_at="not-a-date", ended_at="")
+    assert session_when(log, WHEN) == WHEN
+
+
+def test_a_naive_session_timestamp_is_read_as_utc() -> None:
+    """Comparing a naive datetime against an aware one raises; the fallback must not be reached
+    by accident, and the result must be formattable."""
+    log = EventLog(session_id="s", transcript_path="t", started_at="2026-08-17T23:40:00")
+    assert session_when(log, WHEN) == PAST_START
+
+
+def test_an_offset_session_timestamp_is_normalised_to_utc() -> None:
+    """00:40 on the 18th at +01:00 is 23:40 on the 17th in UTC -- and the corpus is UTC."""
+    log = EventLog(session_id="s", transcript_path="t", started_at="2026-08-18T00:40:00+01:00")
+    assert session_when(log, WHEN) == PAST_START
