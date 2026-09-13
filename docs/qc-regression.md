@@ -70,7 +70,8 @@ into uselessness, so both directions are asserted:
 
 Grounding is checked against `EventLog.grounding_text()` -- the serialized event log, which is
 **the same document the model was shown** -- by three widening routes: the derived category
-set, verbatim presence, then all-token presence for a composed span.
+set, verbatim presence, then all-token co-occurrence within a bounded window for a composed
+span.
 
 The category sets (`rollup.commands`, `files_read`, ...) were never the model's input; they
 are a summary of part of it. A claim absent from them but present in the corpus was always a
@@ -78,8 +79,27 @@ true claim wrongly flagged. Asking "was the model shown this?" is the definition
 groundedness, so this is a correction rather than a relaxation -- and the checks that must
 still bite do:
 
-- `systemctl restart nginx` is three ordinary words and is still rejected, because all-token
-  overlap requires *all* tokens and the corpus is the model's input, not the transcript.
+- `systemctl restart nginx` is three ordinary words and is rejected, because the composed-span
+  route requires *all* tokens **and** requires them to co-occur within 120 characters.
+
+  The proximity half was missing in the first version and the audit caught it: scattered words
+  alone grounded the claim, and the commit message asserted otherwise on the strength of a
+  fixture where the words simply did not appear. Measured across the five real sessions with
+  fabricated commands built only from words each session genuinely contains, unbounded overlap
+  grounds 9 of 35 and a 120-character window grounds 1.
+
+  That remaining one is real and is left alone deliberately: `docker compose down` against a
+  session that plausibly did discuss exactly that. Shrinking the window until nothing fails
+  would be the original defect wearing the opposite sign. A fabrication whose words genuinely
+  appear together in the log still passes, and that is the irreducible cost of admitting
+  compressions at all.
+
+  "Together" means the width of the smallest stretch of corpus containing every token, not
+  distance from an anchor token. The anchored form is asymmetric — with tokens A and C 200
+  apart but each within 120 of B, anchoring on B admits the claim and anchoring on A rejects
+  it — and the anchor was chosen by iterating a set, so the verdict moved with the
+  interpreter's hash seed. `test_co_occurrence_is_a_span_not_a_distance_from_an_anchor` and
+  `test_the_verdict_does_not_depend_on_token_order` pin that.
 - Tickets match exactly and their corpus check is boundary-anchored, so `#65` cannot ride on
   a log that mentions `#655`.
 - File paths and tickets keep the narrow treatment. That is where the one real finding came

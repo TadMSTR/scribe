@@ -14,10 +14,14 @@ from pathlib import Path
 import pytest
 
 from scribe.extract import extract
+from scribe.extract.models import EventLog, Turn
 from scribe.qc import (
     DEFAULT_COVERAGE_FLOOR,
+    Report,
+    _tokens_co_occur,
     check_digest,
     check_freshness,
+    check_groundedness,
     classify_span,
     grounding_terms,
 )
@@ -339,11 +343,70 @@ def test_the_two_regression_digests_differ_only_in_the_conflated_reference() -> 
 def test_token_overlap_does_not_ground_an_invention(log) -> None:
     """The widest grounding route must still reject a fabricated command.
 
-    `systemctl restart nginx` is three ordinary words; if all-token overlap were a majority
-    vote, or if the corpus were the transcript rather than the model's input, this would pass.
+    Note what this does and does not prove: the fixture log does not contain these words at
+    all, so it only shows the route is reachable and rejects. The structural property -- that
+    scattered words are not enough -- is
+    `test_a_fabrication_is_not_grounded_by_its_words_appearing_separately` below.
     """
     report = check_digest("**Done:**\n- Ran `systemctl restart nginx`\n", log)
     assert any("systemctl restart nginx" in f.detail for f in report.findings)
+
+
+def _scattered_log() -> EventLog:
+    """A log containing every word of `systemctl restart nginx`, never together."""
+    log = EventLog(session_id="s", transcript_path="t")
+    first = Turn(turn_uuid="a", index=0)
+    first.user_text = "Can we restart the deployment please"
+    first.assistant_text = ["I checked the nginx config and it looks fine."]
+    second = Turn(turn_uuid="b", index=1)
+    second.assistant_text = ["No systemctl issues found on the host."]
+    log.turns = [first, second]
+    return log
+
+
+def test_a_fabrication_is_not_grounded_by_its_words_appearing_separately() -> None:
+    """The scribe-shadow-fixes-2026-09 audit finding, as a test.
+
+    The first version of `_tokens_co_occur` asked only that each token appear *somewhere* in
+    the ~180 KB corpus, so a fabricated command graded clean whenever its individual words
+    turned up in unrelated sentences -- routine in any session touching several topics. The
+    commit that introduced it claimed this exact command was "still rejected", which held only
+    against a fixture where the words are absent. That made the guarantee a property of the
+    test data rather than of the code, which is what this test exists to prevent.
+    """
+    report = Report()
+    check_groundedness("Ran `systemctl restart nginx` to fix it.", _scattered_log(), report)
+    assert [f.detail for f in report.findings] != []
+    assert any("systemctl restart nginx" in f.detail for f in report.findings)
+
+
+def test_a_genuine_compression_survives_the_proximity_requirement() -> None:
+    """The other direction: tokens that really do appear together must still ground.
+
+    Without this, the fix could be tightened until nothing passes -- which is the original
+    defect wearing the opposite sign.
+    """
+    log = EventLog(session_id="s", transcript_path="t")
+    turn = Turn(turn_uuid="a", index=0)
+    turn.assistant_text = [
+        'Called subprocess.Popen(["claude", "-p"], env=child_env) from the worker.'
+    ]
+    log.turns = [turn]
+    report = Report()
+    check_groundedness('Ran `popen(["claude","-p"], env=child_env)`.', log, report)
+    assert [f.detail for f in report.findings] == []
+
+
+def test_the_proximity_window_is_what_separates_the_two() -> None:
+    """Pin the mechanism, not just the two outcomes.
+
+    Both cases above would pass with an unbounded window; only the fabricated one changes
+    behaviour with it. Asserting that directly means a future change to the window cannot
+    quietly restore the defect while both outcome tests still read as green.
+    """
+    corpus = _scattered_log().grounding_text().lower()
+    assert _tokens_co_occur("systemctl restart nginx", corpus, window=10**9) is True
+    assert _tokens_co_occur("systemctl restart nginx", corpus) is False
 
 
 def test_a_ticket_claim_is_not_excused_by_a_longer_number(qc_log) -> None:
@@ -413,3 +476,32 @@ def test_a_malformed_event_log_is_not_reported_as_a_failed_gate(payload, tmp_pat
     digest = tmp_path / "d.md"
     digest.write_text("**Asked:** anything\n")
     assert qc_main(["--digest", str(digest), "--events", str(events)]) == 2
+
+
+def test_co_occurrence_is_a_span_not_a_distance_from_an_anchor() -> None:
+    """Three tokens where the outer two are further apart than the window, but each is within
+    it of the middle one.
+
+    An anchored implementation answers this differently depending on which token it anchors
+    on -- and since the anchor came from iterating a set, the verdict moved with the
+    interpreter's hash seed. Measuring the enclosing span instead is symmetric, so there is
+    one right answer: the claim spans more than the window, so it is not grounded.
+    """
+    corpus = "alpha" + ("." * 120) + "beta" + ("." * 120) + "gamma"
+    assert _tokens_co_occur("alpha beta", corpus, window=130) is True
+    assert _tokens_co_occur("beta gamma", corpus, window=130) is True
+    # alpha..gamma spans ~250 characters, so the three together must not ground at 130.
+    assert _tokens_co_occur("alpha beta gamma", corpus, window=130) is False
+    assert _tokens_co_occur("alpha beta gamma", corpus, window=260) is True
+
+
+def test_the_verdict_does_not_depend_on_token_order() -> None:
+    """The same claim written in any order must grade identically.
+
+    This is the property the hash-seed bug violated. Asserting it directly means a future
+    reintroduction of an anchored implementation fails here rather than intermittently in CI.
+    """
+    corpus = "alpha" + ("." * 120) + "beta" + ("." * 120) + "gamma"
+    orders = ["alpha beta gamma", "gamma beta alpha", "beta gamma alpha", "beta alpha gamma"]
+    verdicts = {_tokens_co_occur(o, corpus, window=130) for o in orders}
+    assert len(verdicts) == 1

@@ -254,24 +254,84 @@ def _in_category(claim: str, allowed: set[str]) -> bool:
     return any(claim in term or term in claim for term in allowed)
 
 
-def _tokens_in_corpus(claim: str, corpus: str) -> bool:
-    """Every significant token of a claim appears somewhere in the corpus.
+#: How close together a claim's tokens must appear to count as co-occurring, in characters of
+#: serialized corpus. Chosen by measurement, not taste: across the five real sessions,
+#: unbounded overlap grounded 9 of 35 fabricated commands built from words the session really
+#: contained, and a 120-character window grounds 1. Both true compressions this route exists
+#: to admit survive it comfortably, and they still pass at 40. Widening it past ~200 restores
+#: the original defect.
+CO_OCCURRENCE_WINDOW = 120
+
+
+def _tokens_co_occur(claim: str, corpus: str, *, window: int = CO_OCCURRENCE_WINDOW) -> bool:
+    """Every significant token of a claim appears in the corpus, and appears *together*.
 
     This is what lets a faithful *compression* through without letting an invention through.
     `popen(["claude","-p"], env=child_env)` appears verbatim nowhere -- the log holds
-    `subprocess.Popen(`, `["claude", "-p",` and `child_env` in three different places -- and
-    a digest that reassembles them is summarizing, not inventing. Likewise
+    `subprocess.Popen(`, `["claude", "-p",` and `child_env` in three nearby places -- and a
+    digest that reassembles them is summarizing, not inventing. Likewise
     `approved -> in-progress -> completed` composes three real statuses into one span.
 
-    Requiring **all** tokens rather than a majority is what stops this becoming a rubber
-    stamp: a single fabricated identifier anywhere in the span fails the whole claim. Spans
-    of fewer than two significant tokens get nothing from this path -- verbatim containment
-    already covers them, and a one-token overlap test would ground almost anything.
+    **The proximity requirement is the whole point, and it was missing.** The first version of
+    this asked only that each token appear *somewhere* in the ~180 KB corpus, which grounds a
+    fabricated command whenever its individual words happen to occur in unrelated sentences --
+    a routine situation in any session touching several topics. The scribe-shadow-fixes-2026-09
+    audit reproduced exactly that: a digest claiming `systemctl restart nginx` graded clean
+    against a log whose three words sat in three unrelated turns. Worse, the commit that
+    introduced the check asserted that this specific command "is still rejected", which was
+    true only of the one fixture where those words are absent -- a property of the test data,
+    not of the code. Requiring the tokens to co-occur makes it a property of the code.
+
+    **"Together" is defined as a span, not as distance from an anchor.** The obvious
+    implementation -- pick one token, require the others within +/-window of it -- is not
+    symmetric: with tokens A, B, C where A and C are 200 apart but each within 120 of B,
+    anchoring on B admits the claim and anchoring on A rejects it. Since the anchor was chosen
+    by iterating a set, the verdict changed with the interpreter's hash seed, and the gate
+    returned different answers for the same input on different runs. A non-deterministic gate
+    cannot be falsified, which is worse than a loose one. So the test is the width of the
+    smallest stretch of corpus containing every token: well-defined, symmetric, and identical
+    on every run.
+
+    Requiring **all** tokens rather than a majority is the other half: a single fabricated
+    identifier anywhere in the span fails the whole claim. Spans of fewer than two significant
+    tokens get nothing from this path -- verbatim containment already covers them, and a
+    one-token overlap test would ground almost anything.
+
+    This does not make coincidence impossible, only unlikely enough to be worth the trade. A
+    fabrication whose words genuinely appear together in the log will still pass, and that is
+    the irreducible cost of admitting compressions at all.
     """
     tokens = {t.lower() for t in _TOKEN_RE.findall(claim)}
     if len(tokens) < 2:
         return False
-    return all(t in corpus for t in tokens)
+
+    spans: list[tuple[int, int, str]] = []
+    for token in tokens:
+        found = [(m.start(), m.end(), token) for m in re.finditer(re.escape(token), corpus)]
+        if not found:
+            return False
+        spans.extend(found)
+    spans.sort()
+
+    # Smallest stretch of corpus containing every token, by sliding window over the merged
+    # occurrences. `seen` counts how many of each token are inside the window; `distinct` is
+    # how many token types are, so the window is a candidate exactly when it reaches len(tokens).
+    seen: dict[str, int] = {}
+    distinct = 0
+    left = 0
+    for right, (_, end, token) in enumerate(spans):
+        if not seen.get(token):
+            distinct += 1
+        seen[token] = seen.get(token, 0) + 1
+        while distinct == len(tokens):
+            if end - spans[left][0] <= window:
+                return True
+            lt = spans[left][2]
+            seen[lt] -= 1
+            if not seen[lt]:
+                distinct -= 1
+            left += 1
+    return False
 
 
 def _ticket_in_corpus(claim: str, corpus: str) -> bool:
@@ -308,11 +368,12 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     """Flag every concrete claim the model could not have drawn from what it was shown.
 
     Three routes to grounded, in widening order: the derived category set, verbatim presence
-    in the corpus, then all-token presence for a composed span. The corpus is the serialized
-    event log -- **the same document the model received** -- so this asks "was the model shown
-    this?", which is the actual definition of groundedness. It is not a loosening: the
-    category sets were never the model's input, only a summary of part of it, so a claim
-    absent from them but present in the corpus was always a true claim wrongly flagged.
+    in the corpus, then all-token co-occurrence within a bounded window for a composed span.
+    The corpus is the serialized event log -- **the same document the model received** -- so
+    this asks "was the model shown this?", which is the actual definition of groundedness. It
+    is not a loosening: the category sets were never the model's input, only a summary of
+    part of it, so a claim absent from them but present in the corpus was always a true claim
+    wrongly flagged.
 
     Tickets and file paths keep the narrower treatment, because that is where the one real
     finding came from.
@@ -341,7 +402,7 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
         if (
             not _in_category(claim, allowed["commands"])
             and claim not in corpus
-            and not _tokens_in_corpus(claim, corpus)
+            and not _tokens_co_occur(claim, corpus)
         ):
             report.add("groundedness", f"command not in the event log: {claim!r}")
 
@@ -350,7 +411,7 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     # corpus is the only honest ground truth, and it is the right one.
     for kind in (CLAIM_CODE, CLAIM_IDENTIFIER):
         for claim in sorted(claimed[kind]):
-            if claim not in corpus and not _tokens_in_corpus(claim, corpus):
+            if claim not in corpus and not _tokens_co_occur(claim, corpus):
                 report.add("groundedness", f"{kind} not in the event log: {claim!r}")
 
 
