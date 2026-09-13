@@ -1,0 +1,45 @@
+# scribe configuration. Copy to scribe.toml and edit.
+
+[extract]
+quiet_period_minutes = 15
+# Byte budget before degradation. Measured across a 429-transcript corpus: at 200000, 74%
+# of sessions need no degradation at all and the largest reaches ~68K tokens, which fits
+# mistral-small's context with room for the prompt. This is a CONTEXT-WINDOW control, not a
+# cost control -- post-extraction the whole corpus summarizes for ~$2/month.
+max_session_bytes = 200000
+
+[discovery]
+project_globs = ["~/.claude/projects/*/"]
+exclude       = [".memsearch"]
+state_path    = "~/.local/state/scribe/scribe.sqlite3"
+output_dir    = "~/.local/share/scribe/digests"
+
+[summarize.session]
+# Post-extraction the task is formatting a structured log, not inference, so `small` is
+# sufficient and ~10x cheaper than `medium`. It also keeps the GPU free.
+provider = "mistral"
+model    = "mistral-small-latest"
+
+[summarize.daily]
+# Low volume (~1 per agent per day) and the one place cross-session synthesis matters.
+provider = "claude-cli"
+
+[providers.mistral]
+type     = "openai-compatible"
+base_url = "https://api.mistral.ai/v1"
+# An env REFERENCE, never a literal. scribe refuses to load a config with a literal value:
+# documenting the rule is what was in place when a live key was committed once already.
+api_key  = { env = "MISTRAL_API_KEY" }
+
+[providers.ollama]
+type     = "openai-compatible"
+base_url = "http://127.0.0.1:11435/v1"   # ollama-queue-proxy
+api_key  = { env = "OLLAMA_API_KEY" }
+model    = "summarize:latest"
+
+[providers.claude-cli]
+type = "claude-cli"
+
+[service]
+host = "127.0.0.1"
+port = 8499

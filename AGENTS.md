@@ -45,7 +45,14 @@ stripped log is indistinguishable from a session that did nothing.
 Not on `(session_id, HH:MM)`. That collided 62 times across 3,539 blocks in the pipeline this
 replaces.
 
-**8. Output ends with a newline.**
+**8. A session declared complete can come back.**
+Completion is inferred from an idle timer, because the Stop hook fires per *turn* and there is
+no session-end signal. Claude Code appends to an existing transcript when a session resumes,
+so state records how far the file was READ (`last_offset`), not merely that it was handled.
+`upsert_observed` must never regress that offset: an observation says what is on disk, not
+what has been processed, and conflating the two makes a rescan re-summarize finished work.
+
+**9. Output ends with a newline.**
 A missing one glued ~1,030 headings together in the memory files downstream.
 
 ## Porting notes
@@ -80,6 +87,14 @@ temporary directory, neuter the function body while keeping its signature, and c
 suite fails. Mutate a copy, never the working tree — an interrupted run leaves a survivor
 behind, and a silently-neutered redactor in a repo about redaction is the worst possible
 place for one.
+
+**Force `PYTHONPATH` when you do.** Copying the tree copies `.venv`, whose editable install
+holds an ABSOLUTE path back to the original checkout, so `/tmp/mutant/.venv/bin/pytest`
+happily tests the unmutated original and every mutant survives. That happened here: four
+mutations in a row reported the exact baseline pass count, which is the tell — a mutation run
+whose failure count never moves is a broken harness, not a strong suite. Run
+`PYTHONPATH=/tmp/mutant/src /tmp/mutant/.venv/bin/python -m pytest`, and assert your patch
+anchor matched, because a `replace` that hit nothing looks identical to a survivor.
 
 Verified this way at Phase 1: neutering `Redactor.scrub` fails 17 tests, skipping `tool_use`
 blocks (the original defect) fails 9, and removing the `isMeta` guard fails 7.
