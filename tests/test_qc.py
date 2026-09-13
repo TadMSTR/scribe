@@ -14,7 +14,14 @@ from pathlib import Path
 import pytest
 
 from scribe.extract import extract
-from scribe.qc import DEFAULT_COVERAGE_FLOOR, check_digest, check_freshness, grounding_terms
+from scribe.qc import (
+    DEFAULT_COVERAGE_FLOOR,
+    check_digest,
+    check_freshness,
+    classify_span,
+    grounding_terms,
+)
+from scribe.qc_cli import _log_from_dict
 from scribe.qc_cli import main as qc_main
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -270,3 +277,114 @@ def test_python_m_scribe_qc_actually_runs_the_gate() -> None:
     )
     assert proc.returncode == 1, f"gate did not fail: {proc.stdout} {proc.stderr}"
     assert "FAIL" in proc.stdout
+
+
+# --- vikunja#848: the classifier must separate a digest's vocabulary from its commands -----
+#
+# The regression set is SYNTHETIC, not the five live sessions the plan names. Those
+# transcripts are ~12 MB of Ted's real work, are 0600 on purpose, and are the unredacted
+# source of the 146 secret-shaped strings the extractor scrubbed on that run -- committing
+# them would move all of that into git history and onto every CI runner that clones the repo.
+# `transcript-qc-regression.jsonl` instead reproduces each structural shape the live run
+# exposed: a bare id that is not an identifier, a `#N` the extractor's ref-collection drops,
+# and the status/model/config vocabulary that was being reported as fabricated commands.
+# The real-corpus replay stays reproducible outside the repo -- see docs/qc-regression.md.
+
+QC_REGRESSION = FIXTURES / "transcript-qc-regression.jsonl"
+
+
+@pytest.fixture
+def qc_log():
+    return extract(QC_REGRESSION)
+
+
+def test_the_vocabulary_of_a_good_digest_is_not_reported_as_hallucination(qc_log) -> None:
+    """70 of 73 findings on the first live run were this: statuses, model names, config keys
+    and field names, each demanded to appear in `rollup.commands`."""
+    report = check_digest((FIXTURES / "digest-qc-composed.md").read_text(), qc_log)
+    assert report.findings == [], [f.detail for f in report.findings]
+    assert report.ok is True
+
+
+def test_a_vikunja_id_rendered_as_an_identifier_is_still_caught(qc_log) -> None:
+    """The one true positive, and the reason the gate must not simply be loosened.
+
+    `#417` is a real ticket -- just not this one. Vikunja's id 417 is identifier #398, so the
+    reference reads as ordinary and points somewhere else entirely.
+    """
+    report = check_digest((FIXTURES / "digest-qc-id-conflation.md").read_text(), qc_log)
+    assert report.ok is False
+    assert len(report.findings) == 1, [f.detail for f in report.findings]
+    detail = report.findings[0].detail
+    assert "#417" in detail
+    assert "internal id" in detail
+
+
+def test_the_two_regression_digests_differ_only_in_the_conflated_reference() -> None:
+    """The pair is a differential: one character apart, opposite verdicts.
+
+    Without this, the two fixtures could drift until they differed in several ways and the
+    verdict could no longer be attributed to the conflation alone -- the pair would still
+    look like it was testing something.
+    """
+    good = (FIXTURES / "digest-qc-composed.md").read_text().splitlines()
+    bad = (FIXTURES / "digest-qc-id-conflation.md").read_text().splitlines()
+    assert len(good) == len(bad)
+    differing = [(a, b) for a, b in zip(good, bad, strict=True) if a != b]
+    assert len(differing) == 1
+    assert differing[0][0].endswith("#398")
+    assert differing[0][1].endswith("#417")
+
+
+def test_token_overlap_does_not_ground_an_invention(log) -> None:
+    """The widest grounding route must still reject a fabricated command.
+
+    `systemctl restart nginx` is three ordinary words; if all-token overlap were a majority
+    vote, or if the corpus were the transcript rather than the model's input, this would pass.
+    """
+    report = check_digest("**Done:**\n- Ran `systemctl restart nginx`\n", log)
+    assert any("systemctl restart nginx" in f.detail for f in report.findings)
+
+
+def test_a_ticket_claim_is_not_excused_by_a_longer_number(qc_log) -> None:
+    """Tickets are matched exactly. Containment would let `#65` ride on the log's `#655`."""
+    report = check_digest("**Tickets:**\n- Closed #65 today\n", qc_log)
+    assert any("#65" in f.detail for f in report.findings)
+
+
+@pytest.mark.parametrize(
+    ("span", "expected"),
+    [
+        ("set -euo pipefail", "command"),
+        ("git -C /repo checkout -b feat/thing", "command"),
+        ("systemctl restart nginx", "command"),
+        ("cat a.txt | grep b", "command"),
+        ('popen(["claude","-p"], env=child_env)', "code"),
+        ("max_retries=2", "code"),
+        ("parked", "identifier"),
+        ("mistral-small-latest", "identifier"),
+        ("credentials: source: env", "identifier"),
+        ("approved → in-progress → completed", "identifier"),
+        ("src/tools/queue.py:43", "identifier"),
+        ("", "identifier"),
+    ],
+)
+def test_spans_are_classified_by_shape_not_by_backticks(span, expected) -> None:
+    assert classify_span(span) == expected
+
+
+def test_the_cli_and_the_pipeline_grade_a_digest_identically(qc_log, tmp_path) -> None:
+    """`_log_from_dict` used to drop `user_text` and `assistant_text`, so the same digest and
+    the same log graded stricter through `python -m scribe.qc` than through the pipeline.
+
+    Two paths disagreeing about whether a digest is grounded is its own false signal -- the
+    CLI is what CI runs, so it is the one that would have reported the phantom findings.
+    """
+    events = tmp_path / "events.json"
+    events.write_text(json.dumps(qc_log.to_dict()), encoding="utf-8")
+    rebuilt = _log_from_dict(json.loads(events.read_text()))
+    assert rebuilt.grounding_text() == qc_log.grounding_text()
+
+    digest = tmp_path / "d.md"
+    digest.write_text((FIXTURES / "digest-qc-composed.md").read_text(), encoding="utf-8")
+    assert qc_main(["--digest", str(digest), "--events", str(events)]) == 0

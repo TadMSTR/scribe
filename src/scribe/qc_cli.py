@@ -16,36 +16,57 @@ from .extract.models import EventLog, Rollup, Stats, ToolEvent, Turn
 from .qc import DEFAULT_COVERAGE_FLOOR, check_digest
 
 
+def _rebuild(cls, data: dict, **overrides):
+    """Reconstruct one dataclass from its own `to_dict` output, field by field.
+
+    Driven by `__dataclass_fields__` rather than a hand-written list. The hand-written
+    version drifted: it rebuilt the rollup and the event skeleton but dropped `user_text`,
+    `assistant_text` and `result_digest`, so this CLI graded the *same* digest against the
+    *same* log more strictly than the pipeline did -- the model's own turns and every tool
+    result were missing from the corpus, and true claims drawn from them read as ungrounded.
+    Since the CLI is what CI runs, that is the path that would have reported the phantom
+    findings. Deriving the field list from the dataclass means adding a field to the schema
+    cannot silently reintroduce it.
+    """
+    kwargs = {}
+    for name, spec in cls.__dataclass_fields__.items():
+        if name in overrides:
+            kwargs[name] = overrides[name]
+            continue
+        if name not in data:
+            continue
+        value = data[name]
+        want = spec.type if isinstance(spec.type, str) else ""
+        if want.startswith("list["):
+            kwargs[name] = [str(x) for x in value] if isinstance(value, list) else []
+        elif want.startswith("int"):
+            kwargs[name] = int(value)
+        elif want.startswith("str"):
+            kwargs[name] = str(value)
+        else:
+            kwargs[name] = value
+    return cls(**kwargs)
+
+
 def _log_from_dict(data: dict) -> EventLog:
     """Rebuild an `EventLog` from a serialized event log.
 
-    Only the fields the gates read are reconstructed. Anything else would be dead weight
-    that has to be kept in step with the schema for no benefit.
+    Everything `EventLog.grounding_text()` reads must be reconstructed, because that text is
+    the ground truth the groundedness gate checks against. See `_rebuild`.
     """
-    log = EventLog(
-        session_id=str(data.get("session_id", "")),
-        transcript_path=str(data.get("transcript_path", "")),
+    turns = []
+    for t in data.get("turns") or []:
+        turn: Turn = _rebuild(Turn, t, rollup=_rebuild(Rollup, t.get("rollup") or {}), events=[])
+        for e in t.get("events") or []:
+            turn.events.append(_rebuild(ToolEvent, e))
+        turns.append(turn)
+    return _rebuild(
+        EventLog,
+        data,
+        turns=turns,
+        rollup=_rebuild(Rollup, data.get("rollup") or {}),
         stats=Stats(),
     )
-    rollup = data.get("rollup") or {}
-    known = set(Rollup.__dataclass_fields__)
-    log.rollup = Rollup(
-        **{k: [str(x) for x in v] for k, v in rollup.items() if k in known and isinstance(v, list)}
-    )
-    for t in data.get("turns") or []:
-        turn = Turn(turn_uuid=str(t.get("turn_uuid", "")), index=int(t.get("index", 0)))
-        for e in t.get("events") or []:
-            turn.events.append(
-                ToolEvent(
-                    seq=int(e.get("seq", 0)),
-                    tool=str(e.get("tool", "")),
-                    kind=str(e.get("kind", "")),
-                    target=str(e.get("target", "")),
-                    ok=e.get("ok"),
-                )
-            )
-        log.turns.append(turn)
-    return log
 
 
 def main(argv: list[str] | None = None) -> int:

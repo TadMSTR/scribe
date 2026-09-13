@@ -62,6 +62,101 @@ _TOOL_RE = re.compile(
 )
 _CMD_RE = re.compile(r"`([^`\n]{3,200})`")
 
+#: Claim classes for a backticked span. The split IS vikunja#848: the gate used to call every
+#: one of these a `command` and demand a match in `rollup.commands`, so the ordinary
+#: vocabulary of a good digest -- statuses, model names, config keys, field names -- was
+#: reported as a fabricated command. On the first live run that was 70 of 73 findings, and
+#: `groundedness_rate` read 0.0 for five digests that were materially better than the
+#: incumbent's.
+CLAIM_COMMAND = "command"
+CLAIM_CODE = "code"
+CLAIM_IDENTIFIER = "identifier"
+
+_SHELL_META = ("|", "&&", "||", ">", "<", ";", "$(")
+_CODE_CHARS = frozenset("()[]{}=")
+#: Deliberately short. It exists to catch the common invocations whose first token carries no
+#: other syntactic signal (`systemctl restart nginx` has no flag and no operator); anything
+#: with a flag or an operator is classified on shape and needs no entry here. A list that
+#: tried to be exhaustive would rot, and a miss is not a failure -- it downgrades a claim to
+#: `code` or `identifier`, which is checked against the same corpus by a different route.
+_BINARIES = frozenset(
+    [
+        "apt",
+        "awk",
+        "bash",
+        "cat",
+        "chmod",
+        "chown",
+        "cp",
+        "curl",
+        "df",
+        "docker",
+        "du",
+        "echo",
+        "find",
+        "git",
+        "grep",
+        "head",
+        "jq",
+        "kill",
+        "ln",
+        "ls",
+        "make",
+        "mkdir",
+        "mv",
+        "node",
+        "npm",
+        "pip",
+        "pkill",
+        "pm2",
+        "pnpm",
+        "python",
+        "python3",
+        "pytest",
+        "rg",
+        "rm",
+        "rsync",
+        "ruff",
+        "sed",
+        "sort",
+        "ssh",
+        "sudo",
+        "systemctl",
+        "tail",
+        "tar",
+        "uv",
+        "wc",
+    ]
+)
+#: 3+ characters, so that joining words (`in`, `to`, `of`) never carry a claim on their own.
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{2,}|\d{2,}")
+#: `417` written as an internal id rather than as a `#` identifier. See `_ticket_detail`.
+_ID_CONTEXT = r'(?:"id"\s*:\s*|\bid\s*[:=]?\s*|/)'
+
+
+def classify_span(span: str) -> str:
+    """Which kind of claim a backticked span makes: command, code, or identifier.
+
+    Shape, not backticks. A digest writes `parked`, `mistral-small-latest` and
+    `credentials: source: env` because those are the words for what happened; none is a
+    command, and demanding each appear in the command log fails a true claim. A gate that
+    cries wolf 70 times out of 73 is one that gets switched off.
+    """
+    text = span.strip()
+    if not text:
+        return CLAIM_IDENTIFIER
+    tokens = text.split()
+    head = tokens[0]
+    if any(meta in text for meta in _SHELL_META):
+        return CLAIM_COMMAND
+    if head in _BINARIES:
+        return CLAIM_COMMAND
+    if len(tokens) > 1 and tokens[1].startswith("-") and head.replace("-", "_").isidentifier():
+        return CLAIM_COMMAND
+    if _CODE_CHARS & set(text):
+        return CLAIM_CODE
+    return CLAIM_IDENTIFIER
+
 
 @dataclass
 class Finding:
@@ -129,34 +224,134 @@ def grounding_terms(log: EventLog) -> dict[str, set[str]]:
 
 
 def _claims(text: str) -> dict[str, set[str]]:
-    """Concrete, checkable assertions in a digest."""
-    return {
+    """Concrete, checkable assertions in a digest, keyed by claim class.
+
+    Backticked spans are split three ways by `classify_span` rather than all being called
+    commands -- see vikunja#848.
+    """
+    out: dict[str, set[str]] = {
         "paths": {m.group(0).strip().lower() for m in _PATH_RE.finditer(text)},
-        "commands": {_norm(m.group(1)) for m in _CMD_RE.finditer(text)},
         "tools": {m.group(0).strip("`").lower() for m in _TOOL_RE.finditer(text)},
         "tickets": {f"#{m.group(1)}".lower() for m in _TICKET_RE.finditer(text)},
+        CLAIM_COMMAND: set(),
+        CLAIM_CODE: set(),
+        CLAIM_IDENTIFIER: set(),
     }
+    for m in _CMD_RE.finditer(text):
+        span = m.group(1)
+        out[classify_span(span)].add(_norm(span))
+    return out
 
 
-def _grounded(claim: str, allowed: set[str]) -> bool:
-    """A claim is grounded if it appears in, or is contained by, an allowed term.
+def _in_category(claim: str, allowed: set[str]) -> bool:
+    """Bidirectional substring containment against a derived category set.
 
-    Substring containment in both directions is deliberate. A digest may legitimately name
-    `src/scribe/parser.py` where the log holds the absolute path, and may quote the head of a
-    long command. Requiring equality would fail true claims, and a gate that cries wolf is
-    one that gets switched off.
+    A digest may legitimately name `src/scribe/parser.py` where the log holds the absolute
+    path, and may quote the head of a long command. Requiring equality would fail true claims.
     """
     if claim in allowed:
         return True
     return any(claim in term or term in claim for term in allowed)
 
 
+def _tokens_in_corpus(claim: str, corpus: str) -> bool:
+    """Every significant token of a claim appears somewhere in the corpus.
+
+    This is what lets a faithful *compression* through without letting an invention through.
+    `popen(["claude","-p"], env=child_env)` appears verbatim nowhere -- the log holds
+    `subprocess.Popen(`, `["claude", "-p",` and `child_env` in three different places -- and
+    a digest that reassembles them is summarizing, not inventing. Likewise
+    `approved -> in-progress -> completed` composes three real statuses into one span.
+
+    Requiring **all** tokens rather than a majority is what stops this becoming a rubber
+    stamp: a single fabricated identifier anywhere in the span fails the whole claim. Spans
+    of fewer than two significant tokens get nothing from this path -- verbatim containment
+    already covers them, and a one-token overlap test would ground almost anything.
+    """
+    tokens = {t.lower() for t in _TOKEN_RE.findall(claim)}
+    if len(tokens) < 2:
+        return False
+    return all(t in corpus for t in tokens)
+
+
+def _ticket_in_corpus(claim: str, corpus: str) -> bool:
+    """Is this exact `#N` present, as a whole reference?
+
+    Plain substring containment is wrong here and nowhere else: every other claim class gets
+    more accurate as the matched span grows, but `#65` is a *substring* of `#655` while being
+    a different ticket. The trailing boundary is the whole point.
+    """
+    return re.search(re.escape(claim) + r"\b", corpus) is not None
+
+
+def _ticket_detail(claim: str, corpus: str) -> str:
+    """The message for an ungrounded `#N`, naming the id-vs-identifier conflation by name.
+
+    This is the finding the whole gate earns its keep on. On the live run a digest wrote
+    `#417` for something the log only ever calls `id 417`; Vikunja's id 417 is identifier
+    #398, so `#417` points at a real but unrelated ticket. It reads as an ordinary
+    cross-reference and no human reviewer would catch it. A generic "not in the event log"
+    leaves the reader to rediscover that, so when the bare number turns up in an id-shaped
+    context we say so.
+    """
+    number = claim.lstrip("#")
+    if re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus):
+        return (
+            f"ticket {claim!r} is not in the event log, which contains {number!r} only as an "
+            f"internal id -- a Vikunja id is not its #identifier, so this points at a "
+            f"different ticket"
+        )
+    return f"ticket not in the event log: {claim!r}"
+
+
 def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
+    """Flag every concrete claim the model could not have drawn from what it was shown.
+
+    Three routes to grounded, in widening order: the derived category set, verbatim presence
+    in the corpus, then all-token presence for a composed span. The corpus is the serialized
+    event log -- **the same document the model received** -- so this asks "was the model shown
+    this?", which is the actual definition of groundedness. It is not a loosening: the
+    category sets were never the model's input, only a summary of part of it, so a claim
+    absent from them but present in the corpus was always a true claim wrongly flagged.
+
+    Tickets and file paths keep the narrower treatment, because that is where the one real
+    finding came from.
+    """
     allowed = grounding_terms(log)
-    for category, claims in _claims(digest_text).items():
-        for claim in sorted(claims):
-            if not _grounded(claim, allowed[category]):
-                report.add("groundedness", f"{category[:-1]} not in the event log: {claim!r}")
+    corpus = log.grounding_text().lower()
+    claimed = _claims(digest_text)
+
+    for claim in sorted(claimed["paths"]):
+        if not _in_category(claim, allowed["paths"]) and claim not in corpus:
+            report.add("groundedness", f"path not in the event log: {claim!r}")
+
+    for claim in sorted(claimed["tools"]):
+        if not _in_category(claim, allowed["tools"]) and claim not in corpus:
+            report.add("groundedness", f"tool not in the event log: {claim!r}")
+
+    # Exact, not containment: `#41` must not be excused by a log that mentions `#417`. The
+    # `#` is part of the identifier, so the corpus check is for the sigil form too -- which
+    # is exactly what separates `#639` (written as `#655/#639` in the log, and true) from
+    # `#417` (written only as `id 417`, and false).
+    for claim in sorted(claimed["tickets"]):
+        if claim not in allowed["tickets"] and not _ticket_in_corpus(claim, corpus):
+            report.add("groundedness", _ticket_detail(claim, corpus))
+
+    for claim in sorted(claimed[CLAIM_COMMAND]):
+        if (
+            not _in_category(claim, allowed["commands"])
+            and claim not in corpus
+            and not _tokens_in_corpus(claim, corpus)
+        ):
+            report.add("groundedness", f"command not in the event log: {claim!r}")
+
+    # No category set exists for these, and none should be invented: there is no authoritative
+    # list of the statuses, model names, config keys and field names a session touched. The
+    # corpus is the only honest ground truth, and it is the right one.
+    for kind in (CLAIM_CODE, CLAIM_IDENTIFIER):
+        for claim in sorted(claimed[kind]):
+            if claim not in corpus and not _tokens_in_corpus(claim, corpus):
+                report.add("groundedness", f"{kind} not in the event log: {claim!r}")
 
 
 def check_event_coverage(
