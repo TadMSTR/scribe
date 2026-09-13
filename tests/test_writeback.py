@@ -50,9 +50,13 @@ def test_every_write_ends_with_a_newline(tmp_path) -> None:
 
 
 def test_a_body_that_already_ends_with_a_newline_is_not_doubled(tmp_path) -> None:
+    """Retargeted when the F-04 terminator landed: the body is no longer the last thing in
+    the file, so the assertion moved to the body's own boundary rather than the file's."""
     path, _ = _append(tmp_path, body="- ends cleanly\n")
-    assert path.read_text().endswith("- ends cleanly\n")
-    assert not path.read_text().endswith("\n\n")
+    text = path.read_text()
+    assert "- ends cleanly\n<!-- /scribe" in text
+    assert "\n\n<!-- /scribe" not in text
+    assert not text.endswith("\n\n")
 
 
 def test_the_anchor_carries_session_turn_and_transcript(tmp_path) -> None:
@@ -70,7 +74,10 @@ def test_appending_the_same_turn_twice_is_a_no_op(tmp_path) -> None:
     path, first = _append(tmp_path, turn="u1")
     _path, second = _append(tmp_path, turn="u1")
     assert (first, second) == (True, False)
-    assert path.read_text().count("turn:u1") == 1
+    # One anchor and one terminator, not two blocks. Counting the bare string `turn:u1`
+    # would now be 2 for a single correct block, so count the anchors specifically.
+    assert path.read_text().count("<!-- session:") == 1
+    assert path.read_text().count("<!-- /scribe turn:u1 -->") == 1
 
 
 def test_a_different_turn_appends(tmp_path) -> None:
@@ -122,3 +129,51 @@ def test_agents_get_separate_files(tmp_path, agent: str) -> None:
     path, _ = _append(tmp_path, agent=agent)
     assert path.parent.name == agent
     assert path.exists()
+
+
+# --- F-04: torn writes must be detectable ------------------------------------------
+
+
+def test_a_complete_block_carries_a_terminator(tmp_path) -> None:
+    path, _ = _append(tmp_path, turn="u1")
+    assert "<!-- /scribe turn:u1 -->" in path.read_text()
+
+
+def test_a_torn_block_is_not_reported_as_done(tmp_path) -> None:
+    """The whole point of F-04. A crash mid-append leaves an anchor above a truncated body;
+    without the terminator both dedup guards call that turn done and the session is lost
+    permanently."""
+    path, _ = _append(tmp_path, turn="u1", body="- first\n")
+    _append(tmp_path, turn="u2", body="- second block that will be torn\n")
+    full = path.read_text()
+    path.write_text(full[: full.index("- second block") + 12])  # cut mid-body
+    turns = existing_turns(path)
+    assert "u1" in turns, "the intact block must still count"
+    assert "u2" not in turns, "the torn block must not count as done"
+
+
+def test_a_torn_block_is_rewritten_on_the_next_sweep(tmp_path) -> None:
+    path, _ = _append(tmp_path, turn="u1")
+    _append(tmp_path, turn="u2", body="- will be torn\n")
+    full = path.read_text()
+    path.write_text(full[: full.index("- will be torn") + 6])
+    assert _append(tmp_path, turn="u2", body="- retried\n")[1] is True
+    assert "u2" in existing_turns(path)
+
+
+def test_an_anchor_without_a_terminator_never_counts(tmp_path) -> None:
+    """Hand-written or half-migrated content must not be trusted either."""
+    path = daily_path(tmp_path, "research", WHEN)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "# 2026-09-13\n\n## Session 09:00\n"
+        "<!-- session:s turn:orphan transcript:/t.jsonl -->\n- body with no terminator\n"
+    )
+    assert existing_turns(path) == set()
+
+
+def test_a_terminator_without_an_anchor_never_counts(tmp_path) -> None:
+    path = daily_path(tmp_path, "research", WHEN)
+    path.parent.mkdir(parents=True)
+    path.write_text("<!-- /scribe turn:ghost -->\n")
+    assert existing_turns(path) == set()

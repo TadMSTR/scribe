@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .paths import secure_dir, secure_sqlite
+
 SCHEMA_VERSION = 1
 
 STATUS_ACTIVE = "active"
@@ -92,10 +94,14 @@ class Store:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Owner-only, both layers. The store holds session_id values, which are functionally
+        # credentials when paired with `claude -p --resume`; sqlite3 would otherwise create
+        # the file 0644 from the process umask. See paths.py.
+        secure_dir(self.path.parent)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        secure_sqlite(self.path)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

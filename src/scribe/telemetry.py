@@ -28,6 +28,8 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .paths import secure_dir, secure_file
+
 #: Span names match the ones the existing SigNoz dashboards query, so those keep working
 #: across the shadow run and the cutover.
 SPAN_SUMMARIZE = "memsearch.summarize"
@@ -64,9 +66,10 @@ def record_spend(
         "event_kind": event,
     }
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        secure_dir(path.parent)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        secure_file(path)
     except OSError:
         return
 
