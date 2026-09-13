@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "session_id": "sess-struct",
+  "transcript_path": "tests/fixtures/transcript-structural.jsonl",
+  "project_dir": "fixtures",
+  "agent": "",
+  "cwd": "",
+  "git_branch": "",
+  "version": "",
+  "started_at": "2026-09-13T11:00:00Z",
+  "ended_at": "2026-09-13T11:05:01Z",
+  "turns": [
+    {
+      "turn_uuid": "s1",
+      "index": 0,
+      "started_at": "2026-09-13T11:00:02Z",
+      "ended_at": "2026-09-13T11:00:03Z",
+      "user_text": "First real question about vikunja#843",
+      "events": [
+        {
+          "seq": 0,
+          "tool": "Bash",
+          "kind": "bash",
+          "target": "git -C /repo checkout -b feat/thing 9f8e7d6",
+          "ok": true,
+          "result_digest": "Switched to a new branch",
+          "result_chars": 24
+        },
+        {
+          "seq": 1,
+          "tool": "Write",
+          "kind": "file_write",
+          "target": "/repo/src/mod.py",
+          "args_digest": "content=print('x')",
+          "ok": false,
+          "error": "EACCES: permission denied",
+          "result_digest": "EACCES: permission denied",
+          "result_chars": 25
+        },
+        {
+          "seq": 2,
+          "tool": "mcp__scoped-mcp__vikunja-mcp_task_get",
+          "kind": "mcp",
+          "target": "926",
+          "args_digest": "task_id=926",
+          "ok": null,
+          "result_chars": 0
+        }
+      ],
+      "rollup": {
+        "files_written": [
+          "/repo/src/mod.py"
+        ],
+        "commands": [
+          "git -C /repo checkout -b feat/thing 9f8e7d6"
+        ],
+        "mcp_tools": [
+          "mcp__scoped-mcp__vikunja-mcp_task_get"
+        ],
+        "tickets": [
+          "#843"
+        ],
+        "git_refs": [
+          "checkout",
+          "9f8e7d6"
+        ],
+        "failures": [
+          "Write: EACCES: permission denied"
+        ]
+      }
+    },
+    {
+      "turn_uuid": "s2",
+      "index": 1,
+      "started_at": "2026-09-13T11:05:00Z",
+      "ended_at": "2026-09-13T11:05:01Z",
+      "user_text": "Second real question",
+      "assistant_text": [
+        "Done. See https://vikunja.helmforge.me/tasks/926 for detail."
+      ],
+      "rollup": {
+        "urls": [
+          "https://vikunja.helmforge.me/tasks/926"
+        ],
+        "tickets": [
+          "#926"
+        ]
+      }
+    }
+  ],
+  "rollup": {
+    "files_written": [
+      "/repo/src/mod.py"
+    ],
+    "commands": [
+      "git -C /repo checkout -b feat/thing 9f8e7d6"
+    ],
+    "mcp_tools": [
+      "mcp__scoped-mcp__vikunja-mcp_task_get"
+    ],
+    "urls": [
+      "https://vikunja.helmforge.me/tasks/926"
+    ],
+    "tickets": [
+      "#843",
+      "#926"
+    ],
+    "git_refs": [
+      "checkout",
+      "9f8e7d6"
+    ],
+    "failures": [
+      "Write: EACCES: permission denied"
+    ]
+  }
+}

@@ -7,17 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Phases 2 to 5
+
+- **Session discovery** from the filesystem, with quiet-period completion and durable state
+  in SQLite. Idempotency is keyed on the turn uuid; a resumed session is detected by growth
+  past the recorded read offset rather than by its status.
+- **Config** with lazy credential resolution. A literal `api_key` is refused at load.
+- **Summarizer** over a pluggable provider abstraction (OpenAI-compatible HTTP, `claude -p`),
+  producing schema-validated JSON that is rendered to markdown by deterministic code. A
+  schema violation is retried like an API error; contamination is retried with a reminder
+  and then falls back to a marked suppression note.
+- **Write-back** mirroring the live memory layout, newline-terminated, refusing to append a
+  turn that is already present.
+- **Spend metering** in the exact record shape `memsearch-spend.sh` already parses, and OTel
+  spans reusing the `memsearch.summarize*` names so existing dashboards keep working.
+- **QC gates** that assert against the event log rather than against another summary:
+  groundedness of every path, command, ticket and tool a digest names, plus an
+  event-coverage floor. `python -m scribe.qc` exits non-zero on a failure.
+
 ### Planned
 
-- **Phase 2** — session discovery and completion: filesystem watch, quiet-period detection,
-  durable per-session state in SQLite.
-- **Phase 3** — summarizer: provider abstraction (OpenAI-compatible HTTP and `claude -p`),
-  schema'd JSON output validated before rendering, contamination guard ported from
-  `memsearch-summarize.py`.
-- **Phase 4** — write-back and daily roll-up, OTel spans, spend metering.
-- **Phase 5** — QC gates: coverage against the transcript, groundedness against the event
-  log, and an event-coverage floor.
-- **Phase 6** — shadow run alongside `memsearch-summarize`.
+- **Phase 6** — shadow run alongside `memsearch-summarize`, then a cutover decision.
+
+### Notes
+
+- `memsearch-spend.sh` does **not** only meter compact, as the build plan states —
+  `SUMMARIZE_LOG` is already in its stream list. The real defect is a path mismatch: the
+  producer writes to the PM2 stdout log while the meter reads an empty file, so reported
+  spend was about half the real figure. Filed as vikunja#846; scribe writes to a dedicated
+  log and is unaffected.
+- `python -m scribe.qc` initially exited 0 while doing nothing, because `qc.py` had no
+  `__main__` guard — a gate that could not fail, which is the defect the gate exists to
+  catch. Now covered by a subprocess test rather than by calling `main()` directly.
 
 ## [0.1.0] - 2026-09-13
 
