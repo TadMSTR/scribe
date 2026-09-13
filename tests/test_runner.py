@@ -199,3 +199,39 @@ def test_the_prompt_carries_the_event_log(slept) -> None:
     _system, user = provider.calls[0]
     assert "gh run list" in user
     assert "Bash" in user
+
+
+# --- vikunja#849: a deterministic schema violation must not buy two more calls -------------
+
+OVER_CAP = json.dumps(
+    {"asked": "a", "done": ["Listed the runs"], "tickets": [f"#{i}" for i in range(500)]}
+)
+
+
+def test_an_over_cap_response_is_not_retried(slept) -> None:
+    """The discriminator is the call count, not the outcome.
+
+    The script's second entry is a GOOD response, so a runner that still retried would
+    succeed on attempt two and every other assertion here would pass. Only `len(calls) == 1`
+    can tell the fix from its absence — and at ~50k input tokens a call, the two it saves are
+    the entire point of the phase.
+    """
+    delays, sleep = slept
+    provider = Scripted(OVER_CAP, GOOD, GOOD)
+    out = summarize_log(_log(), provider, sleep=sleep)
+    assert len(provider.calls) == 1
+    assert out.attempts == 1
+    assert delays == [], "a failure that will not be retried must not back off first"
+    assert out.ok is False
+    assert "not retryable" in out.reason
+    assert "placeholder, not a summary" in out.markdown
+
+
+def test_a_retryable_schema_violation_still_gets_its_retries(slept) -> None:
+    """The narrow half of the fix. Malformed JSON is a bad sample, not a property of the
+    input, so the module's original argument for retrying it is untouched."""
+    _delays, sleep = slept
+    provider = Scripted("not json at all", OVER_CAP, GOOD)
+    out = summarize_log(_log(), provider, sleep=sleep)
+    assert len(provider.calls) == 2, "attempt 1 retried; attempt 2 hit the cap and stopped"
+    assert out.ok is False

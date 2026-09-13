@@ -44,6 +44,12 @@ class SessionResult:
     degradation_level: int = 0
     summarized: bool = False
     written: bool = False
+    #: `written` says a block reached the file; it does NOT say the block is a digest.
+    #: `render_failure` and `render_suppressed` both produce a block, and both are appended, so
+    #: a run that lost every summary reports the same `written` as one that lost none. These two
+    #: are what make the totals readable: `written == summarized + suppressed + placeholder`.
+    suppressed: bool = False
+    placeholder: bool = False
     dry_run: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
@@ -68,6 +74,8 @@ class SessionResult:
             "degradation_level": self.degradation_level,
             "summarized": self.summarized,
             "written": self.written,
+            "suppressed": self.suppressed,
+            "placeholder": self.placeholder,
             "dry_run": self.dry_run,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -197,6 +205,12 @@ def process_session(
 
     result.input_tokens, result.output_tokens = outcome.input_tokens, outcome.output_tokens
     result.summarized = outcome.ok
+    result.suppressed = outcome.suppressed
+    # The third state, and the one that was invisible: neither a digest nor a deliberate
+    # suppression note, but `render_failure`'s marked placeholder. The session's summary is
+    # gone. Recorded here so the run totals can say so out loud -- inferring it from
+    # `written - summarized` is how 13 lost sessions would have read as a clean backfill.
+    result.placeholder = not outcome.ok and not outcome.suppressed
     result.errors.extend(outcome.errors)
     if outcome.input_tokens or outcome.output_tokens:
         record_spend(
@@ -294,6 +308,9 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "sessions": len(results),
         "summarized": sum(1 for r in results if r.summarized),
         "written": sum(1 for r in results if r.written),
+        "suppressed": sum(1 for r in results if r.suppressed),
+        #: Non-zero means summaries were LOST, not merely degraded. Treat it as loud.
+        "placeholders": sum(1 for r in results if r.placeholder),
         "events_total": sum(r.events for r in results),
         "secrets_redacted": sum(r.secrets_redacted for r in results),
         "post_render_redactions": sum(r.post_render_redactions for r in results),

@@ -209,3 +209,56 @@ def test_dispatch_routes_run(workspace, capsys) -> None:
 def test_dispatch_rejects_an_unknown_subcommand(argv, capsys) -> None:
     assert dispatch(argv) == 2
     assert "usage:" in capsys.readouterr().err
+
+
+# --- vikunja#849: a lost summary has to be loud on the surface that reports a run ----------
+
+
+def _with_placeholder(monkeypatch, **flags):
+    from scribe import pipeline
+
+    real = pipeline.run_once
+
+    def patched(*a, **k):
+        results = real(*a, **k)
+        for r in results:
+            for name, value in flags.items():
+                setattr(r, name, value)
+        return results
+
+    monkeypatch.setattr("scribe.run_cli.run_once", patched)
+
+
+def test_a_placeholder_is_reported_loudly(workspace, capsys, monkeypatch) -> None:
+    """A run that lost a summary must not read like a clean one.
+
+    The counter existing in the JSON is not the same as an operator seeing it: the backfill
+    is driven from the printed output, and `written: 5 / summarized: 4` is what made 13 lost
+    sessions look like a successful run.
+    """
+    cfg, _tmp = workspace
+    _with_placeholder(monkeypatch, placeholder=True, written=True)
+    run_main(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert "1 placeholder(s) written" in out
+    assert "LOST" in out
+
+
+def test_a_clean_run_says_nothing_about_placeholders(workspace, capsys, monkeypatch) -> None:
+    """Pins the line to the count. A banner printed unconditionally is noise, and noise is
+    how the next real one gets skipped over."""
+    cfg, _tmp = workspace
+    _with_placeholder(monkeypatch, placeholder=False)
+    run_main(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert "placeholder" not in out
+    assert "LOST" not in out
+
+
+def test_the_placeholder_count_reaches_the_json_totals(workspace, capsys, monkeypatch) -> None:
+    cfg, _tmp = workspace
+    _with_placeholder(monkeypatch, placeholder=True, written=True)
+    run_main(["--config", str(cfg), "--json"])
+    totals = json.loads(capsys.readouterr().out)["totals"]
+    assert totals["placeholders"] == 1
+    assert totals["written"] == 1
