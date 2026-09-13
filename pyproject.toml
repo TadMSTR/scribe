@@ -5,10 +5,13 @@ description = "Deterministic Claude Code transcript extractor and session summar
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-# Phase 1 (the extractor) is stdlib-only and must stay that way: it is the one component
-# that is provably offline, and a runtime dependency here is a dependency inside the module
-# that reads raw transcripts. Summarizer dependencies arrive in Phase 3 as an extra.
-dependencies = []
+# `scribe.extract` is stdlib-only and must stay that way — it is the one component that is
+# provably offline, and it is the one that reads raw transcripts. That invariant is enforced
+# by `tests/test_stdlib_only.py`, which walks the module's imports, rather than by keeping
+# httpx out of this list: a packaging convention is not a guarantee, and an AST check is.
+dependencies = [
+    "httpx>=0.27",
+]
 
 [project.optional-dependencies]
 dev = [
