@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — scribe-shadow-fixes-2026-09
+
+Both defects came out of the first `--live` shadow run, and neither was reachable before it:
+they live past the `dry_run` short-circuit in `pipeline.py`, so the extractor work and the
+367 tests could not have surfaced either. A `--dry-run` mode exercises the extractor, not the
+writer or the grader.
+
+- **#847 — digests were filed under the wall clock, not the session's own date.** `when` was
+  `datetime.now(UTC)`, and it decides the daily filename, the `## Session HH:MM` heading and
+  the `### HH:MM` heading alike. In steady state the clock and the session agree, so nothing
+  looked wrong; a backfill is the case where they do not, and all 429 digests would have
+  landed in one file named for the run day with the real dates unrecoverable. Now derived
+  from the session — `started_at`, then `ended_at`, then the clock. The start is the anchor
+  because a midnight-spanning session files all of its work under whichever day it names, and
+  sessions end just past midnight far more often than they begin just before it. Verified on
+  the five live sessions: four correctly-dated files, where previously all five collapsed
+  into one.
+- **#848 — the groundedness classifier over-fired, 70 false positives in 73 findings.** Every
+  backticked span was treated as a `command` requiring a match in `rollup.commands`, so
+  `parked`, `mistral-small-latest`, `credentials: source: env` and `set -euo pipefail` all
+  read as fabricated commands and `groundedness_rate` reported 0.00 for five good digests.
+  Spans are now classified by shape (command / code / identifier), and grounding is checked
+  against `EventLog.grounding_text()` — the same document the model was shown — by three
+  widening routes: the category set, verbatim presence, then all-token co-occurrence within a
+  bounded window for a composed span. The category sets were never the model's input, so a claim absent from them
+  but present in the corpus was always a true claim wrongly flagged. Findings across the five
+  sessions: 73 → 1.
+- The one surviving finding is the reason the gate exists, and it **reproduced on a fresh
+  model call**: a digest wrote `#417` for something its log only ever calls `id 417`, and
+  Vikunja's id 417 is identifier #398 — a real but unrelated ticket. It now carries a message
+  naming the conflation rather than a generic miss.
+- **F-01 (Medium, scribe-shadow-fixes-2026-09 audit)** — the composed-span route grounded a
+  claim if every token appeared *anywhere* in the ~180 KB corpus, with no proximity
+  requirement, so a fabricated command passed whenever its individual words occurred in
+  unrelated sentences. The commit introducing the check asserted `systemctl restart nginx`
+  "is still rejected", which was true only of the one fixture where those words are absent —
+  a property of the test data, not of the code. Tokens must now co-occur within 120
+  characters. Measured across the five real sessions: fabrications grounded by this route
+  drop from 9 of 35 to 1 of 35, while both genuine compressions still pass. Co-occurrence is
+  defined as the width of the smallest stretch of corpus containing every token, **not** as
+  distance from an anchor token — the anchored form is asymmetric (with A and C 200 apart but
+  each within 120 of B, the verdict depends on which is picked) and the anchor came from
+  iterating a set, so the gate answered differently on different interpreter hash seeds. That
+  was caught by its own regression test failing intermittently, and a non-deterministic gate
+  cannot be falsified at all.
+- **`python -m scribe.qc` graded more strictly than the pipeline** on identical inputs.
+  `_log_from_dict` rebuilt only the rollup and an event skeleton, dropping `user_text`,
+  `assistant_text` and `result_digest`, so its corpus was far thinner — and the CLI is what
+  CI runs. It now rebuilds from `__dataclass_fields__`, and a test pins the two paths
+  together.
+
 ### Added — Phases 2 to 5
 
 - **Session discovery** from the filesystem, with quiet-period completion and durable state

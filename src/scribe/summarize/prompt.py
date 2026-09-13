@@ -61,4 +61,4 @@ def grounding_corpus(log: EventLog) -> str:
     corpus assembled independently would eventually disagree with the prompt and start
     failing true claims.
     """
-    return json.dumps(log.content_dict(), ensure_ascii=False)
+    return log.grounding_text()

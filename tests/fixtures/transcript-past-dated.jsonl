@@ -1,0 +1,5 @@
+{"type": "user", "uuid": "p1", "sessionId": "sess-past", "timestamp": "2026-08-17T23:40:00Z", "message": {"role": "user", "content": "Check the queue before midnight"}}
+{"type": "assistant", "uuid": "pa1", "timestamp": "2026-08-17T23:40:05Z", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "p_t1", "name": "Bash", "input": {"command": "git -C /repo status --short"}}]}}
+{"type": "user", "uuid": "pr1", "timestamp": "2026-08-17T23:41:00Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "p_t1", "is_error": false, "content": "clean"}]}}
+{"type": "user", "uuid": "p2", "sessionId": "sess-past", "timestamp": "2026-08-18T00:20:00Z", "message": {"role": "user", "content": "One more thing after midnight"}}
+{"type": "assistant", "uuid": "pa2", "timestamp": "2026-08-18T00:20:30Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Recorded."}]}}

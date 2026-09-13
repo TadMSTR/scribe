@@ -14,7 +14,18 @@ from pathlib import Path
 import pytest
 
 from scribe.extract import extract
-from scribe.qc import DEFAULT_COVERAGE_FLOOR, check_digest, check_freshness, grounding_terms
+from scribe.extract.models import EventLog, Turn
+from scribe.qc import (
+    DEFAULT_COVERAGE_FLOOR,
+    Report,
+    _tokens_co_occur,
+    check_digest,
+    check_freshness,
+    check_groundedness,
+    classify_span,
+    grounding_terms,
+)
+from scribe.qc_cli import _log_from_dict
 from scribe.qc_cli import main as qc_main
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -270,3 +281,227 @@ def test_python_m_scribe_qc_actually_runs_the_gate() -> None:
     )
     assert proc.returncode == 1, f"gate did not fail: {proc.stdout} {proc.stderr}"
     assert "FAIL" in proc.stdout
+
+
+# --- vikunja#848: the classifier must separate a digest's vocabulary from its commands -----
+#
+# The regression set is SYNTHETIC, not the five live sessions the plan names. Those
+# transcripts are ~12 MB of Ted's real work, are 0600 on purpose, and are the unredacted
+# source of the 146 secret-shaped strings the extractor scrubbed on that run -- committing
+# them would move all of that into git history and onto every CI runner that clones the repo.
+# `transcript-qc-regression.jsonl` instead reproduces each structural shape the live run
+# exposed: a bare id that is not an identifier, a `#N` the extractor's ref-collection drops,
+# and the status/model/config vocabulary that was being reported as fabricated commands.
+# The real-corpus replay stays reproducible outside the repo -- see docs/qc-regression.md.
+
+QC_REGRESSION = FIXTURES / "transcript-qc-regression.jsonl"
+
+
+@pytest.fixture
+def qc_log():
+    return extract(QC_REGRESSION)
+
+
+def test_the_vocabulary_of_a_good_digest_is_not_reported_as_hallucination(qc_log) -> None:
+    """70 of 73 findings on the first live run were this: statuses, model names, config keys
+    and field names, each demanded to appear in `rollup.commands`."""
+    report = check_digest((FIXTURES / "digest-qc-composed.md").read_text(), qc_log)
+    assert report.findings == [], [f.detail for f in report.findings]
+    assert report.ok is True
+
+
+def test_a_vikunja_id_rendered_as_an_identifier_is_still_caught(qc_log) -> None:
+    """The one true positive, and the reason the gate must not simply be loosened.
+
+    `#417` is a real ticket -- just not this one. Vikunja's id 417 is identifier #398, so the
+    reference reads as ordinary and points somewhere else entirely.
+    """
+    report = check_digest((FIXTURES / "digest-qc-id-conflation.md").read_text(), qc_log)
+    assert report.ok is False
+    assert len(report.findings) == 1, [f.detail for f in report.findings]
+    detail = report.findings[0].detail
+    assert "#417" in detail
+    assert "internal id" in detail
+
+
+def test_the_two_regression_digests_differ_only_in_the_conflated_reference() -> None:
+    """The pair is a differential: one character apart, opposite verdicts.
+
+    Without this, the two fixtures could drift until they differed in several ways and the
+    verdict could no longer be attributed to the conflation alone -- the pair would still
+    look like it was testing something.
+    """
+    good = (FIXTURES / "digest-qc-composed.md").read_text().splitlines()
+    bad = (FIXTURES / "digest-qc-id-conflation.md").read_text().splitlines()
+    assert len(good) == len(bad)
+    differing = [(a, b) for a, b in zip(good, bad, strict=True) if a != b]
+    assert len(differing) == 1
+    assert differing[0][0].endswith("#398")
+    assert differing[0][1].endswith("#417")
+
+
+def test_token_overlap_does_not_ground_an_invention(log) -> None:
+    """The widest grounding route must still reject a fabricated command.
+
+    Note what this does and does not prove: the fixture log does not contain these words at
+    all, so it only shows the route is reachable and rejects. The structural property -- that
+    scattered words are not enough -- is
+    `test_a_fabrication_is_not_grounded_by_its_words_appearing_separately` below.
+    """
+    report = check_digest("**Done:**\n- Ran `systemctl restart nginx`\n", log)
+    assert any("systemctl restart nginx" in f.detail for f in report.findings)
+
+
+def _scattered_log() -> EventLog:
+    """A log containing every word of `systemctl restart nginx`, never together."""
+    log = EventLog(session_id="s", transcript_path="t")
+    first = Turn(turn_uuid="a", index=0)
+    first.user_text = "Can we restart the deployment please"
+    first.assistant_text = ["I checked the nginx config and it looks fine."]
+    second = Turn(turn_uuid="b", index=1)
+    second.assistant_text = ["No systemctl issues found on the host."]
+    log.turns = [first, second]
+    return log
+
+
+def test_a_fabrication_is_not_grounded_by_its_words_appearing_separately() -> None:
+    """The scribe-shadow-fixes-2026-09 audit finding, as a test.
+
+    The first version of `_tokens_co_occur` asked only that each token appear *somewhere* in
+    the ~180 KB corpus, so a fabricated command graded clean whenever its individual words
+    turned up in unrelated sentences -- routine in any session touching several topics. The
+    commit that introduced it claimed this exact command was "still rejected", which held only
+    against a fixture where the words are absent. That made the guarantee a property of the
+    test data rather than of the code, which is what this test exists to prevent.
+    """
+    report = Report()
+    check_groundedness("Ran `systemctl restart nginx` to fix it.", _scattered_log(), report)
+    assert [f.detail for f in report.findings] != []
+    assert any("systemctl restart nginx" in f.detail for f in report.findings)
+
+
+def test_a_genuine_compression_survives_the_proximity_requirement() -> None:
+    """The other direction: tokens that really do appear together must still ground.
+
+    Without this, the fix could be tightened until nothing passes -- which is the original
+    defect wearing the opposite sign.
+    """
+    log = EventLog(session_id="s", transcript_path="t")
+    turn = Turn(turn_uuid="a", index=0)
+    turn.assistant_text = [
+        'Called subprocess.Popen(["claude", "-p"], env=child_env) from the worker.'
+    ]
+    log.turns = [turn]
+    report = Report()
+    check_groundedness('Ran `popen(["claude","-p"], env=child_env)`.', log, report)
+    assert [f.detail for f in report.findings] == []
+
+
+def test_the_proximity_window_is_what_separates_the_two() -> None:
+    """Pin the mechanism, not just the two outcomes.
+
+    Both cases above would pass with an unbounded window; only the fabricated one changes
+    behaviour with it. Asserting that directly means a future change to the window cannot
+    quietly restore the defect while both outcome tests still read as green.
+    """
+    corpus = _scattered_log().grounding_text().lower()
+    assert _tokens_co_occur("systemctl restart nginx", corpus, window=10**9) is True
+    assert _tokens_co_occur("systemctl restart nginx", corpus) is False
+
+
+def test_a_ticket_claim_is_not_excused_by_a_longer_number(qc_log) -> None:
+    """Tickets are matched exactly. Containment would let `#65` ride on the log's `#655`."""
+    report = check_digest("**Tickets:**\n- Closed #65 today\n", qc_log)
+    assert any("#65" in f.detail for f in report.findings)
+
+
+@pytest.mark.parametrize(
+    ("span", "expected"),
+    [
+        ("set -euo pipefail", "command"),
+        ("git -C /repo checkout -b feat/thing", "command"),
+        ("systemctl restart nginx", "command"),
+        ("cat a.txt | grep b", "command"),
+        ('popen(["claude","-p"], env=child_env)', "code"),
+        ("max_retries=2", "code"),
+        ("parked", "identifier"),
+        ("mistral-small-latest", "identifier"),
+        ("credentials: source: env", "identifier"),
+        ("approved → in-progress → completed", "identifier"),
+        ("src/tools/queue.py:43", "identifier"),
+        ("", "identifier"),
+    ],
+)
+def test_spans_are_classified_by_shape_not_by_backticks(span, expected) -> None:
+    assert classify_span(span) == expected
+
+
+def test_the_cli_and_the_pipeline_grade_a_digest_identically(qc_log, tmp_path) -> None:
+    """`_log_from_dict` used to drop `user_text` and `assistant_text`, so the same digest and
+    the same log graded stricter through `python -m scribe.qc` than through the pipeline.
+
+    Two paths disagreeing about whether a digest is grounded is its own false signal -- the
+    CLI is what CI runs, so it is the one that would have reported the phantom findings.
+    """
+    events = tmp_path / "events.json"
+    events.write_text(json.dumps(qc_log.to_dict()), encoding="utf-8")
+    rebuilt = _log_from_dict(json.loads(events.read_text()))
+    assert rebuilt.grounding_text() == qc_log.grounding_text()
+
+    digest = tmp_path / "d.md"
+    digest.write_text((FIXTURES / "digest-qc-composed.md").read_text(), encoding="utf-8")
+    assert qc_main(["--digest", str(digest), "--events", str(events)]) == 0
+
+
+def test_an_event_log_missing_required_fields_is_graded_not_crashed(tmp_path) -> None:
+    """`to_dict` omits empty values, so a round trip can legitimately lack `session_id` or a
+    turn's `turn_uuid`. Rebuilding from `__dataclass_fields__` must supply those rather than
+    raise -- the dataclasses have no defaults for them."""
+    events = tmp_path / "e.json"
+    events.write_text(json.dumps({"turns": [{"events": [{"seq": 1, "tool": "Bash"}]}]}))
+    digest = tmp_path / "d.md"
+    digest.write_text("**Asked:** anything\n")
+    assert qc_main(["--digest", str(digest), "--events", str(events)]) in (0, 1)
+
+
+@pytest.mark.parametrize(
+    "payload", ['{"turns": "notalist"}', '{"turns": [{"index": "abc"}]}', "null", "[]"]
+)
+def test_a_malformed_event_log_is_not_reported_as_a_failed_gate(payload, tmp_path) -> None:
+    """Exit 1 is the FAIL verdict and an unhandled traceback also exits 1, so a broken input
+    file used to be indistinguishable from a digest that failed the gate. CI reads the exit
+    code, not the traceback."""
+    events = tmp_path / "e.json"
+    events.write_text(payload)
+    digest = tmp_path / "d.md"
+    digest.write_text("**Asked:** anything\n")
+    assert qc_main(["--digest", str(digest), "--events", str(events)]) == 2
+
+
+def test_co_occurrence_is_a_span_not_a_distance_from_an_anchor() -> None:
+    """Three tokens where the outer two are further apart than the window, but each is within
+    it of the middle one.
+
+    An anchored implementation answers this differently depending on which token it anchors
+    on -- and since the anchor came from iterating a set, the verdict moved with the
+    interpreter's hash seed. Measuring the enclosing span instead is symmetric, so there is
+    one right answer: the claim spans more than the window, so it is not grounded.
+    """
+    corpus = "alpha" + ("." * 120) + "beta" + ("." * 120) + "gamma"
+    assert _tokens_co_occur("alpha beta", corpus, window=130) is True
+    assert _tokens_co_occur("beta gamma", corpus, window=130) is True
+    # alpha..gamma spans ~250 characters, so the three together must not ground at 130.
+    assert _tokens_co_occur("alpha beta gamma", corpus, window=130) is False
+    assert _tokens_co_occur("alpha beta gamma", corpus, window=260) is True
+
+
+def test_the_verdict_does_not_depend_on_token_order() -> None:
+    """The same claim written in any order must grade identically.
+
+    This is the property the hash-seed bug violated. Asserting it directly means a future
+    reintroduction of an anchored implementation fails here rather than intermittently in CI.
+    """
+    corpus = "alpha" + ("." * 120) + "beta" + ("." * 120) + "gamma"
+    orders = ["alpha beta gamma", "gamma beta alpha", "beta gamma alpha", "beta alpha gamma"]
+    verdicts = {_tokens_co_occur(o, corpus, window=130) for o in orders}
+    assert len(verdicts) == 1

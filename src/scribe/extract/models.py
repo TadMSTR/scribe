@@ -13,6 +13,7 @@ rename becomes a summary that stops mentioning files.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 
 SCHEMA_VERSION = 1
@@ -185,6 +186,17 @@ class EventLog:
     turns: list[Turn] = field(default_factory=list)
     rollup: Rollup = field(default_factory=Rollup)
     stats: Stats = field(default_factory=Stats)
+
+    def grounding_text(self) -> str:
+        """Every string a digest is allowed to draw a concrete fact from, as one blob.
+
+        This is the *same document the model was shown*, serialized. That identity is the
+        point: a corpus assembled independently of the prompt would eventually disagree with
+        it and start failing true claims. `summarize.prompt.grounding_corpus` delegates here
+        rather than building its own, and `qc` reads it directly so that checking a digest
+        never requires importing the provider stack.
+        """
+        return json.dumps(self.content_dict(), ensure_ascii=False)
 
     def content_dict(self) -> dict:
         """The document minus `stats` — what the byte budget governs.

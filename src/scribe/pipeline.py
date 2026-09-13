@@ -83,6 +83,48 @@ def _last_turn_uuid(log: EventLog) -> str:
     return log.turns[-1].turn_uuid if log.turns else ""
 
 
+def _parse_ts(value: str) -> datetime | None:
+    """Parse one extractor timestamp, or return None if it is absent or malformed."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).astimezone(UTC)
+
+
+def session_when(log: EventLog, fallback: datetime) -> datetime:
+    """The datetime a digest is filed under -- the session's own, never the wall clock.
+
+    This one value decides the daily filename, the `## Session HH:MM` heading and the
+    `### HH:MM` heading inside the block, so sourcing it from the session fixes all three
+    at once (vikunja#847).
+
+    **`started_at` first, not `ended_at`.** The plan argued for `ended_at` because it matches
+    the incumbent's stop-hook semantics, but that does not transfer: the incumbent appends per
+    *turn*, so a session spanning midnight has its turns split across two daily files by
+    construction, while scribe writes one block for the whole session. Neither choice
+    reproduces it, so the tiebreak is which one loses less. A session running 14:00 -> 01:00
+    has ten hours of work on the first day and one on the second; anchoring on the end files
+    all eleven under the second. Sessions end just past midnight far more often than they
+    start just before it, so the start is the less lossy anchor.
+
+    Timestamps are normalised to UTC because that is what the extractor records and what the
+    previous `datetime.now(UTC)` produced -- mixing a local-time date into a corpus of UTC
+    ones would be worse than either alone.
+
+    The clock stays as the last resort, for a transcript whose timestamps are missing or
+    unparseable. Filing such a session under today beats not filing it at all.
+    """
+    for candidate in (log.started_at, log.ended_at):
+        parsed = _parse_ts(candidate)
+        if parsed is not None:
+            return parsed
+    return fallback
+
+
 def process_session(
     row: SessionRow,
     cfg: Config,
@@ -99,7 +141,6 @@ def process_session(
     An unexpected exception is caught and recorded against the session rather than allowed
     to abort the sweep: one malformed transcript must not stop the other fourteen.
     """
-    when = now or datetime.now(UTC)
     result = SessionResult(transcript_path=row.transcript_path, agent=row.agent, dry_run=dry_run)
     try:
         log = extract(row.transcript_path, max_session_chars=cfg.max_session_chars)
@@ -115,6 +156,10 @@ def process_session(
     result.extracted_chars, result.token_estimate = st.extracted_chars, st.token_estimate
     result.secrets_redacted = st.secrets_redacted
     result.degradation_level = st.degradation_level
+    # Derived here rather than from the clock, and necessarily after extraction: the session's
+    # own timestamps are the only thing that makes a backfill file 429 digests under 429 dates
+    # instead of collapsing them all into the day the backfill ran (vikunja#847).
+    when = session_when(log, now or datetime.now(UTC))
 
     if not log.turns:
         # A transcript with no real user turn is not a failure; there is simply nothing to
