@@ -1,0 +1,11 @@
+{
+  "asked": "First real question about vikunja#843",
+  "done": [
+    "Edited /etc/nginx/nginx.conf to add the upstream block",
+    "Ran `systemctl restart nginx` and confirmed it came back",
+    "Closed #4242 after verifying the fix"
+  ],
+  "found": [
+    "The WebFetch call returned 502"
+  ]
+}

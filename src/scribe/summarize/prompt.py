@@ -1,0 +1,64 @@
+"""Prompt construction from an event log.
+
+The prompt the old pipeline used instructed the model to "mention file names, function
+names, tool names, and concrete outcomes" while being shown 6.5% of the session with every
+tool call stripped out. Demanding a class of fact that has been removed from the input is a
+hallucination incentive, and no amount of prompt tuning fixes it.
+
+So this prompt does the opposite: it hands over the rollups — files read, files written,
+commands, tickets, failures, all derived deterministically — and instructs the model to use
+only what it was given. Post-extraction the task is formatting a structured log, which is
+why a small model is sufficient.
+"""
+
+from __future__ import annotations
+
+import json
+
+from ..extract.models import EventLog
+from .schema import json_schema
+
+SYSTEM = (
+    "You summarize one software engineering session from a structured event log.\n"
+    "\n"
+    "Respond with a single JSON object and nothing else. Use ONLY facts present in the "
+    "event log. Every file path, command, tool name and ticket number you mention must "
+    "appear verbatim in the log — a downstream check verifies this and rejects the summary "
+    "if it does not hold. If you do not know something, omit it; never guess a path, a "
+    "number or a date.\n"
+    "\n"
+    "Write in the third person about what happened. Do not reproduce markdown headings, "
+    "step lists or <placeholder> tokens from the source. If a skill or template was loaded, "
+    "say only that it was loaded and for what purpose, never its contents.\n"
+    "\n"
+    "Fields:\n"
+    "  asked       - one sentence: what the user wanted.\n"
+    "  done        - what was actually carried out. At least one entry.\n"
+    "  found       - findings, measurements and diagnoses, with their numbers.\n"
+    "  decisions   - choices made and why, including things deliberately not done.\n"
+    "  open_items  - what remains, is blocked, or needs a person.\n"
+    "  artifacts   - files, branches, PRs and services created or changed.\n"
+    "  tickets     - ticket references that appear in the log.\n"
+)
+
+
+def build_user_prompt(log: EventLog) -> str:
+    """Render the event log into the user half of the prompt."""
+    doc = log.content_dict()
+    return (
+        "Event log for one session.\n\n"
+        f"```json\n{json.dumps(doc, ensure_ascii=False, indent=None)}\n```\n\n"
+        "Return one JSON object matching this schema:\n\n"
+        f"```json\n{json.dumps(json_schema(), ensure_ascii=False)}\n```\n"
+    )
+
+
+def grounding_corpus(log: EventLog) -> str:
+    """Every string a digest is allowed to draw a concrete fact from.
+
+    Used by the contamination overlap check and, in Phase 5, by the groundedness gate. It is
+    built from the same document the model was shown, so the two cannot drift apart — a
+    corpus assembled independently would eventually disagree with the prompt and start
+    failing true claims.
+    """
+    return json.dumps(log.content_dict(), ensure_ascii=False)

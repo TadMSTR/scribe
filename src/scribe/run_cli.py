@@ -1,0 +1,80 @@
+"""`python -m scribe run` — one sweep of the pipeline.
+
+Defaults to `--dry-run`. Phase 6 is a shadow run and the live path must not change, so the
+mode that costs money and sends data off the machine is the one you have to ask for by name.
+`--once` without `--dry-run` is the shadow run proper.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from .config import ConfigError, load
+from .pipeline import run_once, summarize_run
+from .state import Store
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="python -m scribe run",
+        description="Discover finished sessions, extract them, and optionally summarize.",
+    )
+    ap.add_argument("--config", type=Path, default=None)
+    ap.add_argument(
+        "--live",
+        action="store_true",
+        help="actually call the summarization provider (default: dry run, no network)",
+    )
+    ap.add_argument("--limit", type=int, default=0, help="process at most N sessions")
+    ap.add_argument("--state", type=Path, default=None, help="override the state database")
+    ap.add_argument("--spend-log", default=None)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+
+    try:
+        cfg = load(args.config)
+    except ConfigError as exc:
+        print(f"scribe: {exc}", file=sys.stderr)
+        return 2
+
+    store = Store(args.state or cfg.state_path)
+    try:
+        results = run_once(
+            cfg, store, dry_run=not args.live, limit=args.limit, spend_log=args.spend_log
+        )
+    except ConfigError as exc:
+        print(f"scribe: {exc}", file=sys.stderr)
+        return 2
+
+    totals = summarize_run(results)
+    if args.json:
+        json.dump(
+            {"totals": totals, "sessions": [r.to_dict() for r in results]},
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+    else:
+        mode = "live" if args.live else "dry run"
+        print(
+            f"{mode}: {totals['sessions']} session(s), {totals['events_total']} events, "
+            f"{totals['secrets_redacted']} secrets redacted"
+        )
+        if totals["qc_graded"]:
+            print(
+                f"  QC {totals['qc_passed']}/{totals['qc_graded']} passed, "
+                f"mean coverage {totals['mean_coverage']:.1%}"
+            )
+        if totals["errors"]:
+            print(f"  {totals['errors']} error(s)")
+            for r in results:
+                for err in r.errors:
+                    print(f"    {Path(r.transcript_path).name}: {err}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
