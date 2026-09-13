@@ -388,3 +388,28 @@ def test_the_cli_and_the_pipeline_grade_a_digest_identically(qc_log, tmp_path) -
     digest = tmp_path / "d.md"
     digest.write_text((FIXTURES / "digest-qc-composed.md").read_text(), encoding="utf-8")
     assert qc_main(["--digest", str(digest), "--events", str(events)]) == 0
+
+
+def test_an_event_log_missing_required_fields_is_graded_not_crashed(tmp_path) -> None:
+    """`to_dict` omits empty values, so a round trip can legitimately lack `session_id` or a
+    turn's `turn_uuid`. Rebuilding from `__dataclass_fields__` must supply those rather than
+    raise -- the dataclasses have no defaults for them."""
+    events = tmp_path / "e.json"
+    events.write_text(json.dumps({"turns": [{"events": [{"seq": 1, "tool": "Bash"}]}]}))
+    digest = tmp_path / "d.md"
+    digest.write_text("**Asked:** anything\n")
+    assert qc_main(["--digest", str(digest), "--events", str(events)]) in (0, 1)
+
+
+@pytest.mark.parametrize(
+    "payload", ['{"turns": "notalist"}', '{"turns": [{"index": "abc"}]}', "null", "[]"]
+)
+def test_a_malformed_event_log_is_not_reported_as_a_failed_gate(payload, tmp_path) -> None:
+    """Exit 1 is the FAIL verdict and an unhandled traceback also exits 1, so a broken input
+    file used to be indistinguishable from a digest that failed the gate. CI reads the exit
+    code, not the traceback."""
+    events = tmp_path / "e.json"
+    events.write_text(payload)
+    digest = tmp_path / "d.md"
+    digest.write_text("**Asked:** anything\n")
+    assert qc_main(["--digest", str(digest), "--events", str(events)]) == 2

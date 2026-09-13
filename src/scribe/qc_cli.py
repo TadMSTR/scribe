@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import sys
+from dataclasses import MISSING
 from pathlib import Path
 
 from .extract.models import EventLog, Rollup, Stats, ToolEvent, Turn
@@ -33,10 +34,17 @@ def _rebuild(cls, data: dict, **overrides):
         if name in overrides:
             kwargs[name] = overrides[name]
             continue
+        want = spec.type if isinstance(spec.type, str) else ""
+        required = spec.default is MISSING and spec.default_factory is MISSING
         if name not in data:
+            # A field the dataclass has no default for must still be supplied, or an event log
+            # missing `session_id` or a turn missing `turn_uuid` raises TypeError instead of
+            # being graded. `to_dict` omits empty values, so this is an ordinary round trip,
+            # not a malformed-input case.
+            if required:
+                kwargs[name] = 0 if want.startswith("int") else ""
             continue
         value = data[name]
-        want = spec.type if isinstance(spec.type, str) else ""
         if want.startswith("list["):
             kwargs[name] = [str(x) for x in value] if isinstance(value, list) else []
         elif want.startswith("int"):
@@ -99,7 +107,16 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.suppress(ValueError):
             text = json.dumps(json.loads(text), ensure_ascii=False)
 
-    report = check_digest(text, _log_from_dict(events), floor=args.floor)
+    try:
+        log = _log_from_dict(events)
+    except (AttributeError, TypeError, ValueError) as exc:
+        # Exit 1 is the gate's FAIL verdict. An unhandled traceback also exits 1, so a
+        # malformed event log was indistinguishable from a digest that failed the gate --
+        # and CI reads the exit code, not the traceback.
+        print(f"scribe.qc: {args.events} is not an event log: {exc}", file=sys.stderr)
+        return 2
+
+    report = check_digest(text, log, floor=args.floor)
     if args.json:
         json.dump(report.to_dict(), sys.stdout, indent=2)
         sys.stdout.write("\n")
