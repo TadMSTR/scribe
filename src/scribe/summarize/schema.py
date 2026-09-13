@@ -57,6 +57,12 @@ MAX_ITEMS = 40
 #: **zero** sessions over 80 in a month. 100 is 1.3x the observed max with no exceedance in the
 #: corpus. Guarding these two with the free-text cap is what turned 13 faithful digests into
 #: placeholders (vikunja#849) — a bounded field cannot run away, and does not need that guard.
+#:
+#: Do not lower this towards the observed max. Since `json_schema` declares the cap, the model
+#: now sheds items to fit it: measured on `aa6634a7` (58 tickets in the rollup), a declared cap
+#: of 40 produced 27, 35 and 28 tickets across three identical runs, while 100 produced 53 every
+#: time. A cap near the ceiling does not reject the digest any more — it quietly shortens it, by
+#: a different amount each run.
 MAX_ROLLUP_ITEMS = 100
 
 MAX_ITEM_CHARS = 2000
