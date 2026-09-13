@@ -68,6 +68,13 @@ one rather than a third duplicate.
 python tests/check_gitleaks_gate.py                     # proves the secret gate can fire
 ```
 
+**Run the gate prover against the gitleaks version CI pins**, not the distro binary that
+happens to be on the forge host. Rulesets differ between versions and the difference is not
+academic: gitleaks 8.28.0 allowlists AWS's documented example key `AKIAIOSFODNN7EXAMPLE` and
+older versions do not, so a probe built on it passed locally and failed in CI. The prover
+prints both versions and warns on a mismatch. Get the pinned one with the same commands the
+workflow uses.
+
 **Prove a new gate red before trusting it green.** The pattern used here: copy the tree to a
 temporary directory, neuter the function body while keeping its signature, and confirm the
 suite fails. Mutate a copy, never the working tree — an interrupted run leaves a survivor

@@ -34,6 +34,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+#: The version CI installs. A local run against a different binary tests a different
+#: ruleset — reported rather than enforced, because refusing to run is worse than
+#: running with a caveat printed.
+GITLEAKS_PINNED = "8.28.0"
+
 FAILURES: list[str] = []
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG = REPO_ROOT / ".gitleaks.toml"
@@ -41,7 +46,12 @@ CONFIG = REPO_ROOT / ".gitleaks.toml"
 # Assembled at runtime so this file does not itself contain a contiguous credential-shaped
 # literal — otherwise the prober trips the very scanner it is testing.
 _GH = "ghp_" + "A1b2C3d4E5f6G7h8I9j0" + "K1l2M3n4O5"
-_AWS = "AKIA" + "IOSFODNN7EXAMPLE"
+# NOT the AWS documented example key (AKIAIOSFODNN7EXAMPLE). gitleaks 8.28.0 allowlists
+# that value by design, so a probe built on it reports the gate broken on a gate that
+# works. Older gitleaks did catch it, which is how the difference stayed hidden: this
+# script passed against the distro binary on the dev host and failed in CI, which
+# installs a pinned version. Hence GITLEAKS_PINNED below.
+_AWS = "AKIA" + "3ZQR7TXWVB2NLKPD"
 
 
 def check(cond: bool, label: str) -> None:
@@ -102,7 +112,18 @@ def main() -> int:
         print(f"FAIL missing {CONFIG}")
         return 1
 
-    print("gitleaks gate checks")
+    installed = subprocess.run(
+        ["gitleaks", "version"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    print(f"gitleaks gate checks (installed: {installed or 'unknown'}, CI pins {GITLEAKS_PINNED})")
+    if installed != GITLEAKS_PINNED:
+        print(
+            f"  NOTE  local gitleaks is {installed or 'unknown'}, not {GITLEAKS_PINNED}. "
+            "Rulesets differ between versions — a pass here is not a pass in CI."
+        )
 
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
@@ -114,7 +135,13 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         (d / "aws.env").write_text(f"AWS_ACCESS_KEY_ID={_AWS}\n", encoding="utf-8")
-        code, _ = scan(d)
+        code, rules = scan(d)
+        # Asserts the SPECIFIC rule, not just a non-zero exit. Exit-code-only would stay
+        # green if some other rule happened to match the surrounding text, which is exactly
+        # how a rule that has stopped working goes unnoticed.
+        check(
+            "aws-access-token" in rules, f"planted AWS key fires aws-access-token ({sorted(rules)})"
+        )
         check(code != 0, "planted AWS key is caught")
 
     # The allowlist must excuse SYNTHETIC literals, not the whole file. A real-shaped
