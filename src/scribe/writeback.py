@@ -19,9 +19,12 @@ edited by hand.
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from pathlib import Path
+
+from .paths import secure_dir, secure_file
 
 ANCHOR_RE = re.compile(r"<!--\s*session:(\S+)\s+turn:(\S+)\s+transcript:(\S+?)\s*-->")
 
@@ -65,7 +68,9 @@ def append_block(
     The whole block is composed in memory and written in a single append, so an interrupted
     write cannot leave a half-block with an anchor that claims the turn is done.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # Digests are derived from 0600 transcripts and must not be published wider than
+    # their source. See paths.py.
+    secure_dir(path.parent)
     if turn_uuid in existing_turns(path):
         return False
 
@@ -85,6 +90,21 @@ def append_block(
     parts.append(anchor(session_id, turn_uuid, transcript_path) + "\n")
     parts.append(body if body.endswith("\n") else body + "\n")
 
+    # FW-01 (atomic state writes) resolves differently for an append than for a replace:
+    # there is no temp-file-then-rename for "add to the end of a file". What is done instead:
+    # the whole block is composed in memory and handed to ONE write call, then fsynced, so a
+    # completed append is durable and concurrent appenders cannot interleave.
+    #
+    # The residual, stated plainly rather than glossed: a crash *during* a write larger than
+    # PIPE_BUF can still tear, and because the anchor precedes the body, a torn block leaves
+    # an anchor claiming the turn is done above a truncated body. Both dedup guards -- this
+    # file and the store -- would then agree not to rewrite it. Closing that properly means
+    # read-modify-replace of the whole daily file on every append, which is O(file) per block
+    # and trades a rare truncation for a routine cost. Flagged in the audit request rather
+    # than decided here.
     with path.open("a", encoding="utf-8") as fh:
         fh.write("".join(parts))
+        fh.flush()
+        os.fsync(fh.fileno())
+    secure_file(path)
     return True
