@@ -319,7 +319,7 @@ def _tokens_co_occur(claim: str, corpus: str, *, window: int = CO_OCCURRENCE_WIN
     seen: dict[str, int] = {}
     distinct = 0
     left = 0
-    for right, (_, end, token) in enumerate(spans):
+    for _start, end, token in spans:
         if not seen.get(token):
             distinct += 1
         seen[token] = seen.get(token, 0) + 1
