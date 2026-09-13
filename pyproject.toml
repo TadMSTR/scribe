@@ -1,0 +1,64 @@
+[project]
+name = "scribe"
+version = "0.1.0"
+description = "Deterministic Claude Code transcript extractor and session summarizer"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+# Phase 1 (the extractor) is stdlib-only and must stay that way: it is the one component
+# that is provably offline, and a runtime dependency here is a dependency inside the module
+# that reads raw transcripts. Summarizer dependencies arrive in Phase 3 as an extra.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    # Pinned exactly, not >=. `ruff format --check` is a CI gate and two patch releases can
+    # disagree about whitespace, which turns an unrelated PR red for a reason nobody
+    # changed. Taking a bump is a decision, not a default. 0.16.6 matches the pin already
+    # in use across the fleet (ollama-queue-proxy), so a shared bump moves together.
+    "ruff==0.16.6",
+]
+
+[project.scripts]
+scribe-extract = "scribe.extract.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["scribe"]
+branch = true
+
+[tool.coverage.report]
+# Measured 2026-09-13 on the Phase 1 tree at 96%. Set at 90 to leave headroom for the
+# Phase 3 summarizer landing with its own tests rather than forcing the floor down later.
+fail_under = 90
+show_missing = true
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "S"]
+ignore = ["S101"]  # assert is how pytest works
+
+[tool.ruff.lint.per-file-ignores]
+# Fixtures and contract tests contain synthetic credential literals on purpose; flagging
+# them as hardcoded secrets would mean the only way to test redaction is to disable the
+# secret scanner, which is the wrong trade.
+# S105-S107: synthetic credential literals, see above.
+# S108: `/tmp/...` appears as fixture DATA describing a transcript that mentions a
+# path — no test here writes to it. Real temporary files use the tmp_path fixture.
+"tests/*" = ["S105", "S106", "S107", "S108"]
