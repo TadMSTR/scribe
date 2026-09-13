@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 
+USAGE = "usage: python -m scribe {extract|qc|run} ..."
+
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
@@ -15,7 +17,11 @@ def main(argv: list[str] | None = None) -> int:
         from .qc_cli import main as qc_main
 
         return qc_main(args[1:])
-    print("usage: python -m scribe {extract|qc} ...", file=sys.stderr)
+    if args and args[0] == "run":
+        from .run_cli import main as run_main
+
+        return run_main(args[1:])
+    print(USAGE, file=sys.stderr)
     return 2
 
 

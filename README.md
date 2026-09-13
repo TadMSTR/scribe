@@ -117,9 +117,44 @@ Measured across 429 real transcripts at the default 200,000-character budget: 74
 
 Exit codes: `0` success (including an empty session, which is a real outcome), `2` the transcript could not be read.
 
+## The rest of the pipeline
+
+```bash
+python -m scribe run                 # dry run: discover, extract, check. No network.
+python -m scribe run --live          # shadow run: also summarize and write
+python -m scribe qc --digest D --events E   # exits non-zero on an ungrounded digest
+```
+
+**`run` defaults to a dry run.** It discovers finished sessions, extracts them and reports —
+without constructing a provider, reading a credential, calling anything or writing anything.
+The mode that spends money and sends data off the machine has to be asked for by name.
+
+A session is finished once its transcript has been idle past a quiet period, because the Stop
+hook fires per *turn* and there is no session-end signal. That inference can be wrong in one
+direction — Claude Code appends to an existing transcript when a session resumes — so state
+records how far the file was *read*, and growth past that offset makes a session live again
+regardless of its status.
+
+### The QC gate
+
+The gate this replaces graded a summary for fidelity to its source, and its source was the
+already-starved memory file: a faithful summary of an impoverished input scored PASS. The
+grader worked; it was pointed at the wrong artefact. So every check here asserts against the
+**event log**, never against another summary:
+
+- **Groundedness** — every path, command, ticket and tool name a digest asserts must appear
+  in the event log.
+- **Event-coverage floor** — a digest referencing too few of the session's events FAILS.
+  Without a floor, an extractor regression that silently drops events reads as a clean pass:
+  the digest stays perfectly grounded in a log that has lost most of its content.
+- **Freshness** — a digest exists and is newer than the transcript it summarizes.
+
 ## Status
 
-Phase 1 — the extractor — is complete and is the whole of this release. Session discovery, the summarizer, write-back and the QC gate are planned and not yet built. See `CHANGELOG.md`.
+Phases 1–5 are built: extraction, discovery, the summarizer, write-back and the QC gate.
+Phase 6 — a shadow run alongside `memsearch-summarize`, then a cutover decision — has its
+runner but has not been run. `memsearch-summarize` is untouched and remains in production.
+See `CHANGELOG.md`.
 
 ## License
 
