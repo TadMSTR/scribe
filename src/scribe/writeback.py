@@ -27,6 +27,21 @@ from pathlib import Path
 from .paths import secure_dir, secure_file
 
 ANCHOR_RE = re.compile(r"<!--\s*session:(\S+)\s+turn:(\S+)\s+transcript:(\S+?)\s*-->")
+#: Written after the body. Its presence is what proves the block was written whole --
+#: see `existing_turns`.
+TERMINATOR_RE = re.compile(r"<!--\s*/scribe\s+turn:(\S+)\s*-->")
+
+
+def terminator(turn_uuid: str) -> str:
+    """Closing marker for a block, written last.
+
+    This is what makes a torn write *detectable*. Without it, a crash mid-append leaves an
+    anchor claiming the turn is done above a truncated body, and both dedup guards then agree
+    never to retry it — the session is lost silently and permanently. Making the tear
+    detectable is far cheaper than making the write atomic, which would mean
+    read-modify-replace of the whole daily file on every append.
+    """
+    return f"<!-- /scribe turn:{turn_uuid} -->"
 
 
 def anchor(session_id: str, turn_uuid: str, transcript_path: str) -> str:
@@ -46,12 +61,20 @@ def daily_path(root: str | Path, agent: str, when: datetime) -> Path:
 
 
 def existing_turns(path: Path) -> set[str]:
-    """Turn uuids already present in a daily file."""
+    """Turn uuids present in a daily file **as complete blocks**.
+
+    A turn counts only when its opening anchor AND its closing terminator are both present.
+    An anchor alone means a torn write, and reporting that as "already done" is precisely how
+    a session would be lost forever: `append_block` would skip it, and the store would too.
+    Returning it as absent makes the next sweep rewrite it.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return set()
-    return {m.group(2) for m in ANCHOR_RE.finditer(text)}
+    opened = {m.group(2) for m in ANCHOR_RE.finditer(text)}
+    closed = {m.group(1) for m in TERMINATOR_RE.finditer(text)}
+    return opened & closed
 
 
 def append_block(
@@ -89,19 +112,20 @@ def append_block(
     parts.append(f"## Session {when:%H:%M}\n\n")
     parts.append(anchor(session_id, turn_uuid, transcript_path) + "\n")
     parts.append(body if body.endswith("\n") else body + "\n")
+    parts.append(terminator(turn_uuid) + "\n")
 
     # FW-01 (atomic state writes) resolves differently for an append than for a replace:
-    # there is no temp-file-then-rename for "add to the end of a file". What is done instead:
-    # the whole block is composed in memory and handed to ONE write call, then fsynced, so a
-    # completed append is durable and concurrent appenders cannot interleave.
+    # there is no temp-file-then-rename for "add to the end of a file". The whole block is
+    # composed in memory and handed to ONE write call, then fsynced, so a completed append is
+    # durable and concurrent appenders cannot interleave.
     #
-    # The residual, stated plainly rather than glossed: a crash *during* a write larger than
-    # PIPE_BUF can still tear, and because the anchor precedes the body, a torn block leaves
-    # an anchor claiming the turn is done above a truncated body. Both dedup guards -- this
-    # file and the store -- would then agree not to rewrite it. Closing that properly means
-    # read-modify-replace of the whole daily file on every append, which is O(file) per block
-    # and trades a rare truncation for a routine cost. Flagged in the audit request rather
-    # than decided here.
+    # A crash mid-write can still tear. What changed after the scribe-2026-09 audit (F-04) is
+    # that a tear is now DETECTABLE rather than silent: the block ends with a terminator, and
+    # `existing_turns` counts a turn only when anchor and terminator are both present. The
+    # audit framed the choice as "accept the risk, or read-modify-replace the whole daily file
+    # per append". Its own analysis pointed at the better option -- the harm was never the
+    # tear itself but that neither guard could SEE it, so the session was lost permanently.
+    # Detection costs one line per block; atomicity would cost O(file) on every append.
     with path.open("a", encoding="utf-8") as fh:
         fh.write("".join(parts))
         fh.flush()

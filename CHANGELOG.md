@@ -25,6 +25,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   groundedness of every path, command, ticket and tool a digest names, plus an
   event-coverage floor. `python -m scribe.qc` exits non-zero on a failure.
 
+### Security — scribe-2026-09 audit remediations
+
+- **F-01 (Medium)** — a PEM/private-key block whose closing marker was cut by Claude Code's
+  upstream output truncation was not redacted. The surviving fragment is bare base64 with no
+  assignment syntax, so no other rule caught it either. Measured: 11,478 truncation markers
+  across the 429-file corpus, so this was a routine shape rather than an edge case. Redaction
+  now runs from a bare `BEGIN` marker to end-of-string when no `END` is found.
+- **F-02 (Medium)** — bare `auth` was matched by the header rule but not by the
+  JSON/YAML/env assignment rules, so `{"auth": ...}`, `auth: ...` and `AUTH=...` all leaked.
+  Added, with the `authentik`/`authorized` carve-out asserted rather than assumed.
+- **F-03 (Low)** — added Slack's `xoxe-` token-rotation prefix. (The audit also cited
+  `xoxe.xoxp-1-…`; that form was already covered by the embedded `xoxp-`.)
+- **F-04 (Low)** — a torn append is now **detectable**. Blocks end with a terminator and
+  `existing_turns` counts a turn only when anchor and terminator are both present, so a
+  crash mid-write is retried instead of being recorded as done by both dedup guards and lost
+  permanently. Chosen over read-modify-replace of the whole daily file per append: the harm
+  was never the tear, it was that nothing could see it.
+- **F-05 (Info)** — the contamination-guard fallback re-check now runs the residue detector
+  as well as placeholder and signature. Overlap remains excluded, with upstream's reasoning.
+- **Defence in depth** — the rendered digest is re-scrubbed immediately before write-back.
+  It is also a *detector*: the digest derives from an already-scrubbed event log, so any hit
+  means extraction missed something, and it is reported as an error rather than quietly
+  cleaned up. This protects the on-disk digest only — the outbound call happens earlier, so
+  it is not a substitute for the extraction-layer fixes above.
+
 ### Planned
 
 - **Phase 6** — shadow run alongside `memsearch-summarize`, then a cutover decision.

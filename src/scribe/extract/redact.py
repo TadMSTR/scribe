@@ -44,6 +44,12 @@ _SENSITIVE_KEY = r"""(?:
     | private[_-]?key
     | access[_-]?key[_-]?id
     | authorization
+    # F-02, scribe-2026-09 audit. Bare `auth` was matched by the header rule but not here, so
+    # `{"auth": "..."}`, `auth: ...` and `AUTH=...` all leaked -- a real field name in several
+    # APIs, MQTT and webhook configs. Safe to add: every assignment pattern requires a
+    # separator (`"`, `:`, `=`) immediately after the key, so `authentik` and `authorized`
+    # cannot match. Asserted in test_redact.py rather than argued here.
+    | auth
     | credentials?
     | [a-z0-9_]*_token
     | [a-z0-9_]*_key
@@ -61,12 +67,20 @@ _TOKEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.DOTALL,
         ),
     ),
+    # F-01, scribe-2026-09 audit. Claude Code truncates large tool output BEFORE it reaches
+    # the transcript, so a key's closing marker is routinely cut -- 11,478 truncation markers
+    # across the 429-file corpus, measured. The surviving fragment is bare base64 with no
+    # assignment syntax, so no other rule here catches it either. This runs AFTER the paired
+    # rule above, so any BEGIN it sees had no END: redact to end of string.
+    ("pem_truncated", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?!-----END)[\s\S])*")),
     ("anthropic", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{8,}")),
     ("openai", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{16,}")),
     ("github_pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
     ("github", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}")),
     ("gitlab", re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,}")),
-    ("slack", re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}")),
+    # `e` added for the token-rotation refresh prefix (F-03). The audit also cited
+    # `xoxe.xoxp-1-...`, but that form was already caught by the embedded `xoxp-`.
+    ("slack", re.compile(r"\bxox[baprse]-[A-Za-z0-9.\-]{8,}")),
     ("aws_akid", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     # A JWT is three base64url segments; the leading eyJ is the encoded '{"'.
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+")),

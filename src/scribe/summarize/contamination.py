@@ -87,11 +87,19 @@ def build_fallback_note(raw: str) -> str:
     Emits no more source content than a normal summary would: the first real user line,
     truncated, plus a suppression marker.
 
-    The quoted line is itself re-checked against the placeholder and signature detectors and
-    dropped if it trips them. Without that, the "safe" fallback could re-leak up to 200
-    characters of exactly the disallowed content — a MEDIUM audit finding on 2026-07-21. The
-    overlap detector is skipped here on purpose: a single quoted line cannot form the
-    three-line window it needs, and it is drawn from `raw` by definition.
+    The quoted line is itself re-checked against the placeholder, signature **and residue**
+    detectors, and dropped if it trips any of them. Without that re-check the "safe" fallback
+    could re-leak up to 200 characters of exactly the disallowed content — a MEDIUM audit
+    finding on 2026-07-21.
+
+    Three of the four detectors run, not two. Upstream ran only placeholder and signature;
+    `_RESIDUE_RES` was added here (F-05, scribe-2026-09 audit) because upstream's omission of
+    it carried no stated reason, and a residue token in the quoted line is the same class of
+    template artefact the other two catch.
+
+    The overlap detector is the one deliberate exclusion, and that is upstream's reasoning
+    kept intact: a single quoted line cannot form the three-line window it needs, and it is
+    drawn from `raw` by definition.
     """
     first_user = ""
     for line in raw.splitlines():
@@ -102,6 +110,7 @@ def build_fallback_note(raw: str) -> str:
     if first_user and (
         _PLACEHOLDER_RE.search(first_user)
         or any(sig.search(first_user) for sig in _TEMPLATE_SIGNATURES)
+        or any(res.search(first_user) for res in _RESIDUE_RES)
     ):
         first_user = ""
     marker = (

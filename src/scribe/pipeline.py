@@ -20,6 +20,7 @@ from .config import Config
 from .discovery import scan
 from .extract import extract
 from .extract.models import EventLog
+from .extract.redact import Redactor
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
 from .state import STATUS_FAILED, SessionRow, Store
 from .summarize.providers import Provider, build
@@ -49,6 +50,9 @@ class SessionResult:
     qc_ok: bool | None = None
     qc_coverage: float = 0.0
     qc_findings: list[str] = field(default_factory=list)
+    #: Secrets caught by the last-line re-scrub of the rendered digest. Should always be
+    #: zero -- see `process_session`. Any non-zero value is an extraction-layer miss.
+    post_render_redactions: int = 0
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -70,6 +74,7 @@ class SessionResult:
             "qc_ok": self.qc_ok,
             "qc_coverage": round(self.qc_coverage, 4),
             "qc_findings": self.qc_findings,
+            "post_render_redactions": self.post_render_redactions,
             "errors": self.errors,
         }
 
@@ -158,10 +163,28 @@ def process_session(
             log_path=spend_log,
         )
 
+    # Defence in depth on the way to disk. The audit observed that nothing re-redacts the
+    # summarizer's RENDERED output, so the whole redaction model rested on extraction-time
+    # completeness -- and the two Medium findings in that layer showed the assumption was not
+    # free. This re-scrub is deliberately NOT a substitute for fixing extraction: the outbound
+    # call happens earlier, so it protects the on-disk digest only.
+    #
+    # It is also a DETECTOR. The digest is derived from an already-scrubbed event log, so a
+    # non-zero count here can only mean extraction missed something. That is worth surfacing
+    # loudly rather than quietly cleaning up.
+    guard = Redactor()
+    markdown = guard.scrub(outcome.markdown)
+    if guard.count:
+        result.post_render_redactions = guard.count
+        result.errors.append(
+            f"post-render redaction fired {guard.count}x — a secret survived extraction "
+            f"and was caught only at write time; investigate redact.py"
+        )
+
     # The QC gate runs on whatever was produced, including a placeholder: a run report that
     # silently omits the sessions that failed is the same shape of blind spot this component
     # was built to remove.
-    report: Report = check_digest(outcome.markdown, log, floor=coverage_floor)
+    report: Report = check_digest(markdown, log, floor=coverage_floor)
     result.qc_ok = report.ok
     result.qc_coverage = report.coverage
     result.qc_findings = [f"{f.check}: {f.detail}" for f in report.findings]
@@ -169,7 +192,7 @@ def process_session(
     path = daily_path(cfg.output_dir, result.agent, when)
     result.written = append_block(
         path,
-        body=outcome.markdown,
+        body=markdown,
         session_id=log.session_id,
         turn_uuid=_last_turn_uuid(log),
         transcript_path=row.transcript_path,
@@ -228,6 +251,7 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "written": sum(1 for r in results if r.written),
         "events_total": sum(r.events for r in results),
         "secrets_redacted": sum(r.secrets_redacted for r in results),
+        "post_render_redactions": sum(r.post_render_redactions for r in results),
         "input_tokens": sum(r.input_tokens for r in results),
         "output_tokens": sum(r.output_tokens for r in results),
         "degraded": sum(1 for r in results if r.degradation_level),

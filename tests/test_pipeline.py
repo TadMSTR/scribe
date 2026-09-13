@@ -288,3 +288,58 @@ def test_run_once_does_construct_one_for_a_live_run(env) -> None:
 
     run_once(cfg, store, dry_run=False, now=1_000_000.0, provider_factory=factory)
     assert built == ["constructed"]
+
+
+# --- post-render redaction guard (scribe-2026-09 audit, structural observation) ------
+
+
+def test_a_secret_in_the_model_output_is_scrubbed_before_it_reaches_disk(env) -> None:
+    """Defence in depth. The audit observed that nothing re-redacted the summarizer's
+    RENDERED output, so the whole redaction model rested on extraction-time completeness —
+    and two Medium findings in that layer showed the assumption was not free.
+    """
+    cfg, store, _t = env
+    leaky = json.dumps(
+        {"asked": "x", "done": ["used GITHUB_TOKEN=ghp_FAKE1234567890abcdefgh to push"]}
+    )
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+    (written,) = list(output_root(cfg).rglob("*.md"))
+    text = written.read_text()
+    assert "ghp_FAKE" not in text
+    assert "«redacted»" in text
+
+
+def test_the_post_render_guard_is_a_detector_not_a_silent_cleanup(env) -> None:
+    """A hit here can only mean extraction missed something, because the digest is derived
+    from an already-scrubbed event log. That is worth surfacing loudly."""
+    cfg, store, _t = env
+    leaky = json.dumps({"asked": "x", "done": ["token is ghp_FAKE1234567890abcdefgh"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+    assert r.post_render_redactions >= 1
+    assert any("survived extraction" in e for e in r.errors)
+
+
+def test_the_guard_stays_quiet_on_a_clean_digest(env) -> None:
+    """It must discriminate — otherwise the detector half is worthless."""
+    cfg, store, _t = env
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.post_render_redactions == 0
+    assert not any("survived extraction" in e for e in r.errors)
+
+
+def test_post_render_redactions_are_aggregated_in_the_run_totals(env) -> None:
+    cfg, store, _t = env
+    leaky = json.dumps({"asked": "x", "done": ["ghp_FAKE1234567890abcdefgh"]})
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+    assert summarize_run(results)["post_render_redactions"] >= 1
+
+
+def test_qc_grades_the_scrubbed_text_not_the_raw_model_output(env) -> None:
+    """The gate must judge what actually lands on disk, or its verdict describes a document
+    nobody has."""
+    cfg, store, _t = env
+    leaky = json.dumps({"asked": "x", "done": ["ghp_FAKE1234567890abcdefgh"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+    (written,) = list(output_root(cfg).rglob("*.md"))
+    assert r.qc_ok is not None
+    assert "ghp_FAKE" not in written.read_text()

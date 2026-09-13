@@ -109,3 +109,45 @@ def test_fallback_note_with_no_user_line_is_just_the_marker() -> None:
 def test_fallback_note_truncates_a_long_user_line() -> None:
     note = build_fallback_note("[User]: " + "x" * 500)
     assert len(note) < 400
+
+
+# --- F-05: the fallback re-check runs three of the four detectors -------------------
+
+
+@pytest.mark.parametrize(
+    "line,detector",
+    [
+        ("run <specific step> now", "placeholder"),
+        ("Base directory for this skill: /x", "signature"),
+        ("wrote N docs today", "residue (added by F-05)"),
+        ("reviewed XX tickets", "residue (added by F-05)"),
+        ("dated YYYY-MM-DD", "residue (added by F-05)"),
+    ],
+)
+def test_a_contaminated_first_line_is_dropped_from_the_fallback(line: str, detector: str) -> None:
+    """The 'safe' fallback must not re-leak the content the guard exists to suppress.
+
+    Upstream ran only the placeholder and signature detectors here. `_RESIDUE_RES` was added
+    for scribe (F-05, 2026-09-13 audit) because upstream's omission carried no stated reason
+    and a residue token is the same class of template artefact as the other two.
+    """
+    note = build_fallback_note(f"[User]: {line}")
+    assert "User turn:" not in note, f"{detector} did not suppress the quoted line"
+    assert "contamination guard" in note
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "please check the release workflow",
+        "merged PR #16 and tagged v0.5.1",
+        "coverage is N/A for the vendored module",
+        "the image is 500M",
+    ],
+)
+def test_a_clean_first_line_still_survives_the_re_check(line: str) -> None:
+    """The matched half. A re-check that dropped everything would pass the test above while
+    making the fallback useless."""
+    note = build_fallback_note(f"[User]: {line}")
+    assert "User turn:" in note
+    assert line[:20] in note

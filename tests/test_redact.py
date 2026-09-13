@@ -108,3 +108,82 @@ def test_digest_leaves_short_text_untouched() -> None:
 
 def test_scrub_handles_none() -> None:
     assert Redactor().scrub(None) == ""
+
+
+# --- scribe-2026-09 audit remediations ---------------------------------------------
+
+
+def test_a_truncated_pem_is_still_redacted() -> None:
+    """F-01 (Medium). Claude Code truncates large tool output BEFORE it reaches the
+    transcript — 11,478 truncation markers across the 429-file corpus — so a key's closing
+    marker is routinely cut. The surviving fragment is bare base64 with no assignment syntax,
+    which no other rule here catches.
+    """
+    r = Redactor()
+    out = r.scrub("-----BEGIN RSA PRIVATE KEY-----\nMIIFAKEkeymaterial123\n… output truncated")
+    assert "FAKEkeymaterial" not in out
+    assert r.count == 1
+
+
+def test_a_complete_pem_is_redacted_without_swallowing_what_follows() -> None:
+    """The paired rule must still win, or the truncation fallback would eat the rest of the
+    document from the first BEGIN marker onward."""
+    r = Redactor()
+    out = r.scrub(
+        "-----BEGIN RSA PRIVATE KEY-----\nFAKE\n-----END RSA PRIVATE KEY-----\n"
+        "and then some ordinary prose worth keeping"
+    )
+    assert "FAKE" not in out
+    assert "ordinary prose worth keeping" in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"auth": "FAKEvalue123"}',
+        "auth: FAKEvalue123",
+        "AUTH=FAKEvalue123",
+        "curl -H 'Auth: FAKEvalue123' https://x",
+    ],
+)
+def test_bare_auth_is_redacted_in_every_assignment_shape(text: str) -> None:
+    """F-02 (Medium). The header rule matched bare `auth`; the json/keyval/envvar rules did
+    not, so the same key name leaked in three of four shapes."""
+    r = Redactor()
+    out = r.scrub(text)
+    assert "FAKEvalue123" not in out
+    assert r.count >= 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "AUTHENTIK_HOST=auth.helmforge.me",
+        "authentik: enabled",
+        "authorized_users: 5",
+        "The user is authorized to authenticate",
+        '{"authentik_version": "2026.1"}',
+        "auth.helmforge.me is the SSO host",
+    ],
+)
+def test_adding_bare_auth_did_not_clobber_authentik_or_authorized(text: str) -> None:
+    """The carve-out that made `auth` risky in the first place. Every assignment pattern
+    requires a separator immediately after the key, which is why this holds — asserted rather
+    than argued."""
+    r = Redactor()
+    assert r.scrub(text) == text
+    assert r.count == 0
+
+
+def test_slack_rotation_prefix_is_covered() -> None:
+    """F-03 (Low). `xoxe-` is the token-rotation refresh prefix."""
+    r = Redactor()
+    assert "FAKE" not in r.scrub("xoxe-1-FAKEaaaabbbbccccdddd")
+    assert r.count == 1
+
+
+def test_the_other_slack_form_the_audit_cited_was_already_covered() -> None:
+    """Correction to the audit: `xoxe.xoxp-1-…` was never a gap — the embedded `xoxp-`
+    already matched. Pinned so the claim is checkable rather than asserted in prose."""
+    r = Redactor()
+    assert "FAKE" not in r.scrub("xoxe.xoxp-1-FAKEaaaabbbbcccc")
