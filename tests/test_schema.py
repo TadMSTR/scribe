@@ -213,3 +213,36 @@ def test_every_other_violation_stays_retryable(bad) -> None:
     with pytest.raises(SchemaError) as exc:
         parse(bad)
     assert exc.value.retryable is True
+
+
+# --- the message contract: reason fans out to sinks that are not all redacted ---------------
+
+SENTINEL = "sk-live-CANARY-do-not-log-me"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        f"{SENTINEL} is not json",
+        f'["{SENTINEL}"]',
+        {"asked": "", "done": [SENTINEL]},
+        {"asked": SENTINEL},
+        {"asked": SENTINEL, "done": [{"k": SENTINEL}]},
+        {"asked": SENTINEL, "done": [[SENTINEL]]},
+        {"asked": SENTINEL, "done": 7},
+        {"asked": SENTINEL, "done": ["x"], "tickets": [SENTINEL] * (MAX_ROLLUP_ITEMS + 1)},
+    ],
+)
+def test_no_violation_message_quotes_the_response(bad) -> None:
+    """A `SchemaError` message must never carry response content.
+
+    It becomes `Outcome.reason`, which fans out to three sinks and only one of them is
+    redacted: the rendered placeholder is re-scrubbed by `Redactor` before `append_block`,
+    but `store.record_attempt(error=...)` writes it to the state database verbatim and
+    `SessionResult.errors` carries it into the run report JSON and the CLI verbatim. Noted by
+    the scribe-schema-caps-2026-09 audit as the thing to remember if these messages are ever
+    widened to include a snippet of the bad response. This is that memory, enforced.
+    """
+    with pytest.raises(SchemaError) as exc:
+        parse(bad)
+    assert SENTINEL not in str(exc.value)

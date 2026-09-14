@@ -55,6 +55,14 @@ short-circuit, removing `maxItems`, and collapsing the two caps back into one ea
 tests red. Removing `maxItems` also empties the parametrised cap test's parameter set, so it
 would report green while checking nothing — an explicit non-vacuity guard catches that case.
 
+The security audit returned 0 findings at Medium or above. One of its two Info notes observed
+that `Outcome.reason` reaches three sinks and only the first is redacted — the rendered
+placeholder is re-scrubbed before `append_block`, but `store.record_attempt(error=...)` and
+`SessionResult.errors` carry it verbatim into the state database, the run report JSON and the
+CLI. Nothing leaks today, because every `SchemaError` message carries only a field name, a
+count, a type name or a JSON location. That constraint is now written at `SchemaError` itself
+and enforced by a test that fails the moment any raise site quotes the response.
+
 Nothing here is deployed. The backfill stays blocked on widening the shadow, and vikunja#843
 stays open until cutover.
 

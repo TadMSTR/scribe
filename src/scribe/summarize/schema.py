@@ -37,6 +37,18 @@ class SchemaError(ValueError):
     a property of the input rather than of the sample, which today means exactly one case — a
     list longer than its cap, where every attempt sees the same log and produces the same
     over-long field.
+
+    **Keep these messages content-free.** A field name, a count, a type name, a JSON location —
+    never a snippet of the response. The message becomes `Outcome.reason` and fans out to three
+    sinks, and only the first of them is redacted:
+
+      * the rendered placeholder, which `pipeline.py` re-scrubs with `Redactor` before writing;
+      * `store.record_attempt(error=...)` / `store.set_status(error=...)`, written to the state
+        database verbatim;
+      * `SessionResult.errors`, which reaches the run report JSON and the CLI verbatim.
+
+    Sanitising at one sink does not protect the other two, so the constraint lives here at the
+    source. `test_schema.py::test_no_violation_message_quotes_the_response` enforces it.
     """
 
     def __init__(self, message: str, *, retryable: bool = True) -> None:
