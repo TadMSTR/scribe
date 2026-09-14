@@ -4,9 +4,12 @@ The retry policy distinguishes three outcomes, and conflating any two of them is
 component would fail quietly:
 
   * **Retryable transport failure** — rate limits, 5xx, timeouts. Backed off and retried.
-  * **Schema violation** — the response did not fit the contract. Retried, because a model
-    that produced malformed JSON once often does not the next time, and because rendering it
-    anyway is how malformed output reaches a memory file.
+  * **Schema violation** — the response did not fit the contract. Retried *when the violation
+    is a bad sample* — a model that produced malformed JSON once often does not the next time,
+    and rendering it anyway is how malformed output reaches a memory file. A violation that is
+    a property of the input, such as a list longer than its cap, carries
+    `SchemaError.retryable = False` and fails immediately rather than buying the same rejection
+    twice more at ~50k input tokens a time.
   * **Contamination** — the response copied template text. Retried *with a reminder appended*,
     then falls back to a deterministic suppression note rather than to nothing.
 
@@ -92,9 +95,13 @@ def summarize_log(
         try:
             digest = parse(completion.text)
         except SchemaError as exc:
-            # Treated exactly like an API error, per the plan. A response that does not fit
-            # the contract is not a summary.
+            # Treated exactly like an API error, per the plan — including the retryable/not
+            # split. A response that does not fit the contract is not a summary; a response
+            # that will not fit it on the next attempt either is not worth another call.
             outcome.errors.append(f"schema: {exc}")
+            if not exc.retryable:
+                outcome.reason = f"schema violation (not retryable) on attempt {attempt}: {exc}"
+                break
             if attempt == max_attempts:
                 outcome.reason = f"schema violation after {attempt} attempts: {exc}"
                 break

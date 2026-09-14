@@ -68,6 +68,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"  QC {totals['qc_passed']}/{totals['qc_graded']} passed, "
                 f"mean coverage {totals['mean_coverage']:.1%}"
             )
+        # Loud, and above the error list: a placeholder is a session whose summary is gone,
+        # and the reason this was invisible for a month is that it only ever showed up as a
+        # one-off difference between two numbers nobody was subtracting.
+        if totals["placeholders"]:
+            print(
+                f"  !! {totals['placeholders']} placeholder(s) written -- "
+                f"{totals['placeholders']} session summar"
+                f"{'y' if totals['placeholders'] == 1 else 'ies'} LOST"
+            )
+        if totals["suppressed"]:
+            print(f"  {totals['suppressed']} suppressed (contamination fallback)")
         if totals["errors"]:
             print(f"  {totals['errors']} error(s)")
             for r in results:

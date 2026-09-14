@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 
 from ..extract.models import EventLog
-from .schema import json_schema
+from .schema import MAX_ITEMS, MAX_ROLLUP_ITEMS, json_schema
 
 SYSTEM = (
     "You summarize one software engineering session from a structured event log.\n"
@@ -39,6 +39,16 @@ SYSTEM = (
     "  open_items  - what remains, is blocked, or needs a person.\n"
     "  artifacts   - files, branches, PRs and services created or changed.\n"
     "  tickets     - ticket references that appear in the log.\n"
+    "\n"
+    # State the limit. The schema declares it as `maxItems`, but a field description that says
+    # "the ticket references that appear in the log" and a cap the model is never told is a
+    # contract the model cannot satisfy — it complies, and is rejected for complying.
+    f"Each list field has a limit, declared as maxItems in the schema below: {MAX_ITEMS} "
+    f"entries for done, found, decisions and open_items, and {MAX_ROLLUP_ITEMS} for artifacts "
+    "and tickets. Do not exceed them. If the log holds more entries than a field allows, list "
+    "the most significant ones up to the limit and stop: a response over the limit is rejected "
+    "outright and the whole summary is lost, so a field you have had to shorten is always "
+    "better than one that runs over.\n"
 )
 
 

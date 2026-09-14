@@ -437,3 +437,73 @@ def test_an_offset_session_timestamp_is_normalised_to_utc() -> None:
     """00:40 on the 18th at +01:00 is 23:40 on the 17th in UTC -- and the corpus is UTC."""
     log = EventLog(session_id="s", transcript_path="t", started_at="2026-08-18T00:40:00+01:00")
     assert session_when(log, WHEN) == PAST_START
+
+
+# --- vikunja#849: a placeholder must be visible in the totals ------------------------------
+
+OVER_CAP = json.dumps(
+    {
+        "asked": "First real question about vikunja#843",
+        "done": ["Created a branch"],
+        "tickets": [f"#{i}" for i in range(500)],
+    }
+)
+
+
+def test_a_placeholder_is_counted_as_a_placeholder_and_not_as_a_summary(env) -> None:
+    """The blind spot this closes.
+
+    `written` counts blocks that reached the file, and `render_failure`'s placeholder is a
+    block, so a run that lost every summary reported the same `written` as one that lost
+    none. The only tell was `written` and `summarized` differing by one — a subtraction
+    nobody was performing. 13 of 431 sessions would have gone this way in the backfill.
+    """
+    cfg, store, _t = env
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(OVER_CAP))
+    (r,) = results
+
+    assert r.summarized is False
+    assert r.written is True, "the placeholder block genuinely did reach the file"
+    assert r.placeholder is True
+    assert r.suppressed is False
+
+    totals = summarize_run(results)
+    assert totals["placeholders"] == 1
+    assert totals["summarized"] == 0
+    assert totals["written"] == 1, "written keeps its meaning: a block was appended"
+
+
+def test_a_successful_run_reports_no_placeholder(env) -> None:
+    """Pins the counter to the outcome rather than to the code path being reached at all.
+
+    Without this, a counter hardcoded to 1 would pass the test above.
+    """
+    cfg, store, _t = env
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    (r,) = results
+    assert r.summarized is True and r.placeholder is False
+    totals = summarize_run(results)
+    assert totals["placeholders"] == 0
+    assert totals["written"] == 1
+
+
+def test_the_three_written_outcomes_account_for_every_written_block(env) -> None:
+    """`written == summarized + suppressed + placeholders`, asserted rather than assumed.
+
+    This is the property that makes the totals readable: any future outcome that writes a
+    block without landing in one of the three buckets re-opens exactly the gap #849 found.
+    """
+    cfg, store, _t = env
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(OVER_CAP))
+    t = summarize_run(results)
+    assert t["written"] == t["summarized"] + t["suppressed"] + t["placeholders"]
+
+
+def test_the_placeholder_flag_is_carried_into_the_per_session_report(env) -> None:
+    """The run report is JSON before it is a printed line; a field missing from `to_dict` is
+    invisible to anything consuming the shadow comparison."""
+    cfg, store, _t = env
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(OVER_CAP))
+    d = r.to_dict()
+    assert d["placeholder"] is True
+    assert d["suppressed"] is False

@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — scribe-schema-caps-2026-09
+
+**#849 — the digest item cap was a rule the model was never given.** `MAX_ITEMS = 40` applied
+to all six list fields and *raised* where its neighbour `MAX_ITEM_CHARS` truncates, while
+`prompt.py` asked for "ticket references that appear in the log" and `json_schema()` emitted no
+`maxItems` at all. Session `aa6634a7` holds 58 tickets in its rollup; the model listed 53 of
+them and was rejected for it. The violation was retried like an API error, all three attempts
+failed identically at ~50k input tokens each, and `render_failure` wrote a placeholder that
+`summarize_run` then counted under `written`. 13 of 431 sessions are over the cap on `tickets`
+alone, so a 429-session backfill would have silently placeholder'd roughly 3% of itself.
+
+- **The cap is declared.** `json_schema()` emits `maxItems` per field and the system prompt
+  states the limits and what exceeding them costs. Measured live on `aa6634a7`, three samples
+  per arm: with the cap declared at 40 the model emitted 27, 35 and 28 tickets — under the
+  limit every time, where before it was rejected every time. Declaring the rule is what fixed
+  the failure; the validator is now a backstop.
+- **The caps are per field.** `tickets` and `artifacts` come from the extractor's own rollup
+  and have a knowable ceiling — measured over 432 sessions they top out at 76 and 58, with
+  **zero** sessions over 80 in a month — so `MAX_ROLLUP_ITEMS = 100`. `done`, `found`,
+  `decisions` and `open_items` are unbounded model prose (`rollup.commands` reaches 187, with
+  104 sessions over 40) and keep `MAX_ITEMS = 40`, which is what a runaway guard is for. One
+  constant was guarding both classes and only one of them can run away.
+
+  **This turned out to be the phase that preserves the content, not defence in depth.** At a
+  declared cap of 40 the model sheds about half the rollup's tickets and *which* half varies
+  run to run (27 / 35 / 28 from identical input). At 100 it lands on 53 every time. The plan's
+  expectation that the model drops "the least relevant" items is not established by this — what
+  is observable is that the choice varies. A cap set below what the log holds is lossy whichever
+  mechanism applies it, which is the argument for setting a rollup-backed cap above the corpus
+  ceiling rather than near it.
+- **A deterministic schema violation is no longer retried.** `SchemaError` carries `retryable`,
+  defaulting to **True** — malformed JSON and missing fields are sampling noise and a fresh
+  attempt often fixes them, which is the module's own long-standing argument. Only the cap
+  violation sets it False: the count follows from the input, so attempts two and three buy an
+  identical rejection. The live runs now show one provider call (61,309 input tokens), not three.
+- **A placeholder is visible in the run totals.** `SessionResult` gains `placeholder` and
+  `suppressed`; `summarize_run` reports both, `written` keeps its meaning — a block reached the
+  file — and the totals now satisfy `written == summarized + suppressed + placeholders`.
+  `run_cli` prints a loud line when `placeholders` is non-zero. After the first two changes the
+  validator will rarely fire, which is correct but means it stops being the drift detector;
+  this is what keeps that observable.
+
+Tests 402 → 430. Each change was mutation-checked on a throwaway copy rather than assumed:
+neutering the counter, dropping the CLI line, zeroing the total, removing the retry
+short-circuit, removing `maxItems`, and collapsing the two caps back into one each turn the new
+tests red. Removing `maxItems` also empties the parametrised cap test's parameter set, so it
+would report green while checking nothing — an explicit non-vacuity guard catches that case.
+
+The security audit returned 0 findings at Medium or above. One of its two Info notes observed
+that `Outcome.reason` reaches three sinks and only the first is redacted — the rendered
+placeholder is re-scrubbed before `append_block`, but `store.record_attempt(error=...)` and
+`SessionResult.errors` carry it verbatim into the state database, the run report JSON and the
+CLI. Nothing leaks today, because every `SchemaError` message carries only a field name, a
+count, a type name or a JSON location. That constraint is now written at `SchemaError` itself
+and enforced by a test that fails the moment any raise site quotes the response.
+
+Nothing here is deployed. The backfill stays blocked on widening the shadow, and vikunja#843
+stays open until cutover.
+
 ### Fixed — scribe-shadow-fixes-2026-09
 
 Both defects came out of the first `--live` shadow run, and neither was reachable before it:
