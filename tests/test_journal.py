@@ -27,6 +27,8 @@ import pytest
 
 from scribe.__main__ import main as scribe_main
 from scribe.config import DEFAULT_OUTPUT_DIR
+from scribe.extract.parser import _agent_from_cwd as agent_from_cwd
+from scribe.extract.parser import agent_for_path
 from scribe.journal import (
     agent_dir,
     agent_for_project,
@@ -628,3 +630,79 @@ def test_the_cli_refuses_a_symlinked_agent_directory(tmp_path, capsys) -> None:
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "escapes the digest root" in captured.err
+
+
+# --------------------------------------------------------------------------------------
+# The writer and the reader must resolve an agent name identically
+# --------------------------------------------------------------------------------------
+#
+# The audit's Low finding: `_agent_from_project_dir` truncated a hyphenated agent name at the
+# first hyphen. Its live consequence was not the cross-contamination the finding described --
+# no colliding directory exists -- but a DISAGREEMENT. The extractor wrote `doc-health`'s
+# digests to `digests/doc/`; a hook resolving `$CLAUDE_PROJECT_DIR` looked in
+# `digests/doc-health/` and found nothing. Silent, permanent, and aimed squarely at the
+# failure mode this component was built to remove.
+
+
+HYPHENATED = ["doc-health", "helm-build", "memory-sync"]
+
+
+@pytest.mark.parametrize("agent", [*HYPHENATED, "developer", "sysadmin"])
+def test_reader_and_writer_agree_on_the_agent_name(agent, monkeypatch, tmp_path) -> None:
+    """The property, stated directly: one name, both sides. Parametrised over the three
+    hyphenated agents on forge because that is the set the old behaviour renamed."""
+    projects = Path(os.path.expanduser("~/.claude/projects"))
+    (projects / agent).mkdir(parents=True)
+    flattened = f"-home-ted--claude-projects-{agent}"
+    (projects / flattened).mkdir()
+
+    writer_side = agent_for_path(flattened)
+    reader_side = agent_for_project(str(projects / agent))
+    assert writer_side == reader_side == agent
+
+
+@pytest.mark.parametrize("agent", HYPHENATED)
+def test_cwd_resolves_a_hyphenated_agent_exactly(agent) -> None:
+    """A session's `cwd` keeps its separators, so there is nothing to disambiguate. The
+    parser already captured this field; it simply was not used to name the agent."""
+    assert agent_from_cwd(f"/home/ted/.claude/projects/{agent}") == agent
+
+
+@pytest.mark.parametrize("agent", HYPHENATED)
+def test_the_flattened_form_resolves_against_the_directory_the_names_live_in(agent) -> None:
+    """The encoding is lossy: a separator and a hyphen inside a name both become `-`, so
+    `-...-projects-doc-health` is equally `projects/doc-health` and `projects/doc/health`.
+    The longest candidate that exists on disk wins."""
+    projects = Path(os.path.expanduser("~/.claude/projects"))
+    (projects / agent).mkdir(parents=True)
+    assert agent_for_path(f"-home-ted--claude-projects-{agent}") == agent
+
+
+def test_the_flattened_form_falls_back_to_the_first_segment(tmp_path) -> None:
+    """With nothing on disk to resolve against there is no better answer than the old one,
+    and inventing one would be worse than the documented ambiguity."""
+    assert agent_for_path("-home-ted--claude-projects-doc-health") == "doc"
+
+
+def test_a_flattened_directory_inside_projects_is_not_read_as_an_agent_name() -> None:
+    """Flattened transcript directories really do live under `~/.claude/projects`, so they
+    satisfy the working-directory shape exactly. Resolving `cwd` first would answer
+    `-home-ted--claude-projects-sysadmin` — well-formed, and wrong."""
+    path = "/home/ted/.claude/projects/-home-ted--claude-projects-sysadmin"
+    assert agent_for_path(path) == "sysadmin"
+
+
+def test_the_digest_lands_where_the_hook_looks_for_it(tmp_path) -> None:
+    """End to end over the seam, for the agent name that exposed it: write through the real
+    pipeline path, read through the real hook path, and require the file to be found."""
+    projects = Path(os.path.expanduser("~/.claude/projects"))
+    (projects / "doc-health").mkdir(parents=True)
+    agent = agent_for_path("-home-ted--claude-projects-doc-health")
+
+    digests = tmp_path / "digests"
+    write_digest(digests, agent, datetime(2026, 9, 15, 14, 2))
+
+    read_agent = agent_for_project(str(projects / "doc-health"))
+    found = recent_journals(agent_dir(digests, read_agent))
+    assert [p.name for p in found] == ["2026-09-15.md"]
+    assert "- Listed the runs" in build_context(found)

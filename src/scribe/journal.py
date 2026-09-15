@@ -33,7 +33,7 @@ import os
 import re
 from pathlib import Path
 
-from .extract.parser import _agent_from_project_dir
+from .extract.parser import agent_for_path
 
 #: Lines kept per file. The incumbent's `tail -n 40`, and the reason a long day's digest
 #: cannot crowd out the previous day's.
@@ -170,27 +170,21 @@ def agent_dir(digest_root: str | os.PathLike[str], agent: str) -> Path:
 def agent_for_project(project_dir: str) -> str:
     """Recover the agent name from a project directory, in either form it arrives in.
 
-    Two forms exist and both are real. A hook sees `CLAUDE_PROJECT_DIR`, which on forge is the
-    session's working directory, `~/.claude/projects/<agent>`. The extractor sees Claude
-    Code's flattened *transcript* directory, `-home-ted--claude-projects-<agent>`. Handling
-    only the flattened one -- the shape `scribe.extract` already knows -- would have returned
-    "" for every real hook invocation.
+    Delegates to `extract.parser.agent_for_path` **so the reader and the writer resolve a
+    name the same way**. They did not, briefly, and the failure was silent in the direction
+    that matters: the extractor truncated `doc-health` to `doc` and wrote its digests there,
+    while a hook resolving `$CLAUDE_PROJECT_DIR` looked in `doc-health` and found nothing.
+    An empty injection is indistinguishable from a quiet day, which is the whole failure mode
+    this component exists to remove -- so the two sides share one function rather than two
+    that agree today.
 
-    Returns "" for anything else, which is correct rather than defensive: outside
-    `~/.claude/projects` there is no agent, and guessing a name here would silently inject one
-    agent's sessions into another's context.
+    Returns "" for anything outside `~/.claude/projects`, which is correct rather than
+    defensive: there is no agent there, and guessing a name would silently inject one agent's
+    sessions into another's context. Names that are not a single usable path component are
+    refused here too, so a rejected name never reaches a path join.
     """
-    if not project_dir:
-        return ""
-    p = Path(project_dir).expanduser()
-    flattened = _agent_from_project_dir(p.name)
-    if flattened:
-        return flattened if valid_agent(flattened) else ""
-    parent = p.parent
-    if parent.name == "projects" and parent.parent.name == ".claude":
-        # `~/.claude/projects/..` satisfies every structural test above and yields `".."`.
-        return p.name if valid_agent(p.name) else ""
-    return ""
+    agent = agent_for_path(project_dir)
+    return agent if valid_agent(agent) else ""
 
 
 def build_context(paths: list[Path], max_lines: int = DEFAULT_MAX_LINES) -> str:

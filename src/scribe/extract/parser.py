@@ -117,8 +117,20 @@ def _agent_from_project_dir(project_dir: str) -> str:
     """Recover the agent name from Claude Code's flattened project directory name.
 
     Claude Code encodes the project path by replacing separators, so
-    `-home-ted--claude-projects-research` is `~/.claude/projects/research`. The trailing
-    segment is the agent. Returns "" rather than a guess when the shape is unfamiliar.
+    `-home-ted--claude-projects-research` is `~/.claude/projects/research`. Returns ""
+    rather than a guess when the shape is unfamiliar.
+
+    **This encoding is lossy and cannot be inverted from the string alone.** A separator and
+    a hyphen inside a name both become `-`, so `-...-projects-doc-health` is equally
+    `projects/doc-health` and `projects/doc/health`. The tail is resolved against the
+    directory those names live in: the longest candidate that exists wins, and the first
+    segment is the fallback when nothing does. Splitting unconditionally at the first hyphen
+    -- which is what this did -- silently renamed three of forge's ten agents (`doc-health`,
+    `helm-build`, `memory-sync`), and the rename landed on the *write* side, so their digests
+    went to a directory no reader would look in.
+
+    Prefer `agent_for_path` over calling this directly; it consults the session's real `cwd`
+    first, which is not ambiguous at all.
     """
     if not project_dir:
         return ""
@@ -127,7 +139,53 @@ def _agent_from_project_dir(project_dir: str) -> str:
     if idx == -1:
         return ""
     tail = project_dir[idx + len(marker) :]
-    return tail.split("-")[0] if tail else ""
+    if not tail:
+        return ""
+    segments = tail.split("-")
+    projects = Path("~/.claude/projects").expanduser()
+    for stop in range(len(segments), 1, -1):
+        candidate = "-".join(segments[:stop])
+        if (projects / candidate).is_dir():
+            return candidate
+    return segments[0]
+
+
+def _agent_from_cwd(cwd: str) -> str:
+    """Recover the agent name from a session's working directory. Exact, not a heuristic.
+
+    A project directory is `~/.claude/projects/<agent>`, and a path keeps its separators, so
+    there is nothing here to disambiguate. Returns "" for anything else -- outside that tree
+    there is no agent, and guessing one would attribute a session to it.
+    """
+    if not cwd:
+        return ""
+    p = Path(cwd).expanduser()
+    if p.parent.name == "projects" and p.parent.parent.name == ".claude":
+        return p.name
+    return ""
+
+
+def agent_for_path(path: str) -> str:
+    """The agent owning `path`, whichever of the two forms it arrives in.
+
+    **Both forms are real and they are read by different halves of this system.** A hook sees
+    `$CLAUDE_PROJECT_DIR`, the session's working directory. The extractor sees Claude Code's
+    flattened *transcript* directory, and a transcript's own records carry the working
+    directory too. Resolution has to be identical on both sides or the writer and the reader
+    disagree about where an agent's digests live -- which does not fail loudly, it just
+    injects nothing, for exactly the agents whose names contain a hyphen.
+
+    **The flattened form is checked first, and that ordering is a form discriminator rather
+    than a ranking.** A flattened transcript directory really does live at
+    `~/.claude/projects/-home-ted--claude-projects-sysadmin`, so it satisfies the working-
+    directory shape exactly -- and answering `-home-ted--claude-projects-sysadmin` would be
+    both wrong and well-formed. The `-claude-projects-` marker is the only thing that says
+    which form a string is in, so it decides, and `_agent_from_cwd` handles what is left.
+    """
+    if not path:
+        return ""
+    flattened = _agent_from_project_dir(Path(path).name)
+    return flattened or _agent_from_cwd(path)
 
 
 def _classify(tool: str, args: dict) -> tuple[str, str]:
@@ -278,7 +336,7 @@ def extract(
     p = Path(path).expanduser()
     red = Redactor()
     log = EventLog(session_id="", transcript_path=str(p), project_dir=p.parent.name)
-    log.agent = _agent_from_project_dir(log.project_dir)
+    log.agent = agent_for_path(log.project_dir)
     st = log.stats
     try:
         st.raw_file_bytes = p.stat().st_size
@@ -445,6 +503,10 @@ def extract(
                     pending[str(block.get("id", ""))] = ev
 
     log.turns = turns
+    # Re-resolved now that the records have been read. `cwd` is exact where the flattened
+    # directory name is ambiguous, and it is only available after parsing -- so the
+    # assignment above is a provisional one that this supersedes whenever it can.
+    log.agent = _agent_from_cwd(log.cwd) or log.agent
     _build_rollups(log)
     _finalise(log, red, max_session_chars)
     return log

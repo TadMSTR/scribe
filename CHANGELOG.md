@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — agent attribution truncated hyphenated names
+
+**The writer and the reader disagreed about where a hyphenated agent's digests live.**
+`_agent_from_project_dir` split Claude Code's flattened directory name at the first hyphen,
+so `-home-ted--claude-projects-doc-health` resolved to `doc`. Three of forge's ten agents are
+affected: `doc-health`, `helm-build`, `memory-sync`.
+
+Raised as Low by the scribe-journal-feed audit, on the grounds that no colliding `doc/`
+directory exists so it fails safe. That is true of the contamination risk and it is not the
+live consequence. The truncation landed on the **write** side — `pipeline.py` builds the
+digest path from this name — while the SessionStart hook resolves `$CLAUDE_PROJECT_DIR`,
+which keeps its separators and yields `doc-health`. So those agents' digests were written to a
+directory no reader would ever look in, and the injection would have been permanently empty
+for them without ever erroring.
+
+- **Attribution now comes from the session's `cwd`**, which is exact rather than heuristic: a
+  path keeps its separators, so there is nothing to disambiguate. The parser was already
+  reading that field into `log.cwd`; it simply was not used for this. Re-resolved after the
+  parse, since `cwd` is not known before it.
+- **One resolver, `agent_for_path`, shared by the extractor, discovery and the hook** — they
+  did not merely agree before, they were different code, and the disagreement was silent.
+- **The flattened form is resolved against the directory those names live in**, longest
+  candidate first, falling back to the first segment. The encoding is genuinely lossy — a
+  separator and a hyphen inside a name both become `-` — so `-...-projects-doc-health` is
+  equally `projects/doc-health` and `projects/doc/health`, and the filesystem is the only
+  thing that can say which.
+- **The flattened form is checked first, and that is a form discriminator rather than a
+  ranking.** A flattened transcript directory really does live at
+  `~/.claude/projects/-home-ted--claude-projects-sysadmin`, so it satisfies the
+  working-directory shape exactly; resolving `cwd` first would answer
+  `-home-ted--claude-projects-sysadmin` — well-formed, and wrong. An existing test caught it.
+
+No migration: no digests had been written for any affected agent.
+
 ### Added — memory-consolidation-2026-09 part 2
 
 **The SessionStart injection is the only memory push surface that demonstrably reaches a

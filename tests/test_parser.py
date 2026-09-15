@@ -168,3 +168,72 @@ def test_extract_never_writes_to_the_transcript(tmp_path) -> None:
     extract(target)
     assert target.read_bytes() == src
     assert target.stat().st_mtime_ns == before_mtime
+
+
+# --------------------------------------------------------------------------------------
+# Agent attribution
+# --------------------------------------------------------------------------------------
+
+
+def _transcript(dir_name: str, *, cwd: str, tmp_path: Path) -> Path:
+    """One minimal transcript inside a project directory named `dir_name`."""
+    d = tmp_path / dir_name
+    d.mkdir(parents=True)
+    p = d / "0e269db6-a164-4723-82b5-e120e8518746.jsonl"
+    p.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "sessionId": "0e269db6-a164-4723-82b5-e120e8518746",
+                "timestamp": "2026-09-15T14:02:00Z",
+                "cwd": cwd,
+                "message": {"role": "user", "content": "do the thing"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_a_hyphenated_agent_is_attributed_from_cwd(tmp_path) -> None:
+    """Claude Code's flattened directory name cannot be inverted: a separator and a hyphen
+    inside a name both become `-`. The session's own `cwd` keeps its separators and is
+    therefore exact -- and the parser was already reading it, just not using it for this.
+
+    Without the re-resolution this agent is recorded as `doc`, and since the digest path is
+    built from it, the digests land in a directory the SessionStart hook never looks in.
+    """
+    p = _transcript(
+        "-home-ted--claude-projects-doc-health",
+        cwd="/home/ted/.claude/projects/doc-health",
+        tmp_path=tmp_path,
+    )
+    assert extract(p).agent == "doc-health"
+
+
+def test_attribution_falls_back_to_the_directory_name_without_a_cwd(tmp_path) -> None:
+    """A transcript carrying no `cwd` record still has to be attributed to something."""
+    d = tmp_path / "-home-ted--claude-projects-research"
+    d.mkdir(parents=True)
+    p = d / "s.jsonl"
+    p.write_text(
+        json.dumps({"type": "user", "uuid": "u1", "message": {"role": "user", "content": "x"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    log = extract(p)
+    assert log.cwd == ""
+    assert log.agent == "research"
+
+
+def test_a_cwd_outside_the_projects_tree_does_not_override_attribution(tmp_path) -> None:
+    """A session started in a repo checkout has a `cwd` that names no agent. Letting it win
+    would replace a correct name with an empty one."""
+    p = _transcript(
+        "-home-ted--claude-projects-research",
+        cwd="/home/ted/repos/personal/scribe",
+        tmp_path=tmp_path,
+    )
+    assert extract(p).agent == "research"
