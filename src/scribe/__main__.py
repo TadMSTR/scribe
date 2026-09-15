@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-USAGE = "usage: python -m scribe {extract|events|qc|run} ..."
+USAGE = "usage: python -m scribe {extract|events|journal|qc|run} ..."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,6 +17,10 @@ def main(argv: list[str] | None = None) -> int:
         from .events_cli import main as events_main
 
         return events_main(args[1:])
+    if args and args[0] == "journal":
+        from .journal_cli import main as journal_main
+
+        return journal_main(args[1:])
     if args and args[0] == "qc":
         from .qc_cli import main as qc_main
 

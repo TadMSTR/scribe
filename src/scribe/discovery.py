@@ -38,9 +38,9 @@ class Discovered:
 
     @property
     def agent(self) -> str:
-        from .extract.parser import _agent_from_project_dir
+        from .extract.parser import agent_for_path
 
-        return _agent_from_project_dir(self.path.parent.name)
+        return agent_for_path(self.path.parent.name)
 
 
 def iter_transcripts(

@@ -55,6 +55,13 @@ what has been processed, and conflating the two makes a rescan re-summarize fini
 **9. Output ends with a newline.**
 A missing one glued ~1,030 headings together in the memory files downstream.
 
+**10. The journal preview must stay byte-identical to `tests/reference/recent_memory_preview.awk`.**
+That file is the incumbent consumer's parser, extracted verbatim, and it is evidence rather
+than an implementation — do not tidy it. `scribe.journal.preview` is a port of it, and the
+failure it guards against is silent: the hook keeps firing, the file keeps being written, and
+the injected block is empty because the content stopped parsing. A test that asserted scribe
+wrote a file to a path would pass on every one of those days.
+
 ## Porting notes
 
 `_INJECTED_PREFIXES` and the `isMeta` guard are ported verbatim from

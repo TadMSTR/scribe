@@ -124,6 +124,7 @@ python -m scribe run                 # dry run: discover, extract, check. No net
 python -m scribe run --live          # shadow run: also summarize and write
 python -m scribe events SESSION_ID   # print the event log behind a digest
 python -m scribe qc --digest D --events E   # exits non-zero on an ungrounded digest
+python -m scribe journal             # SessionStart hook payload for this agent
 ```
 
 **`run` defaults to a dry run.** It discovers finished sessions, extracts them and reports —
@@ -169,6 +170,42 @@ written `0600` inside a `0700` directory, like everything else derived from a tr
 Retention is settled: **keep everything.** The measured corpus is 429 sessions in ~39 MB,
 growing at roughly 0.46 GB/year. There is no pruning and none is planned.
 
+### Feeding the SessionStart injection
+
+Digests are also **pushed**, not only retrieved. `python -m scribe journal` emits the JSON a
+Claude Code `SessionStart` hook writes to stdout, built from this agent's two most recent
+digests:
+
+```bash
+CLAUDE_PROJECT_DIR=~/.claude/projects/sysadmin python -m scribe journal | jq -r \
+  '.hookSpecificOutput.additionalContext'
+```
+
+`hooks/session-start.sh` is the wrapper to register. Point `SCRIBE_PYTHON` at an interpreter
+that can import scribe:
+
+```json
+"hooks": { "SessionStart": [ { "matcher": "", "hooks": [
+  { "type": "command", "command": "/path/to/scribe/hooks/session-start.sh" } ] } ] }
+```
+
+**`hookSpecificOutput.additionalContext` is the field that carries content.** A hook emitting
+a bare `systemMessage` is dropped for agent sessions, so the status line this also emits is an
+operator signal in a terminal, not a delivery mechanism. That asymmetry was measured, not
+assumed, and it is why the payload is shaped the way it is.
+
+This replaces an injection that read a journal written by a component being retired. The
+format needed no porting — the incumbent's parser, run over a real scribe digest, produced 177
+lines of clean output unmodified — so what moved is the directory and what is asserted is
+agreement: `tests/reference/recent_memory_preview.awk` holds that parser verbatim and
+`tests/test_journal.py` requires byte-for-byte equality with it. The point is to fail the day
+the digest format drifts, which is the day a `SessionStart` hook would otherwise start
+injecting an empty block and say nothing about it.
+
+Absence is reported rather than inferred. "scribe has not run yet" and "scribe is writing
+somewhere else" produce the same empty injection and are distinguished only by the status
+line, which names the directory it looked in.
+
 ### The QC gate
 
 The gate this replaces graded a summary for fidelity to its source, and its source was the
@@ -188,6 +225,8 @@ grader worked; it was pointed at the wrong artefact. So every check here asserts
 Phases 1–5 are built: extraction, discovery, the summarizer, write-back and the QC gate.
 Phase 6 — a shadow run alongside `memsearch-summarize`, then a cutover decision — has its
 runner but has not been run. `memsearch-summarize` is untouched and remains in production.
+The `SessionStart` feed above is built and verified but **not registered**; registering it is
+part of that cutover.
 See `CHANGELOG.md`.
 
 ## License

@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — agent attribution truncated hyphenated names
+
+**The writer and the reader disagreed about where a hyphenated agent's digests live.**
+`_agent_from_project_dir` split Claude Code's flattened directory name at the first hyphen,
+so `-home-ted--claude-projects-doc-health` resolved to `doc`. Three of forge's ten agents are
+affected: `doc-health`, `helm-build`, `memory-sync`.
+
+Raised as Low by the scribe-journal-feed audit, on the grounds that no colliding `doc/`
+directory exists so it fails safe. That is true of the contamination risk and it is not the
+live consequence. The truncation landed on the **write** side — `pipeline.py` builds the
+digest path from this name — while the SessionStart hook resolves `$CLAUDE_PROJECT_DIR`,
+which keeps its separators and yields `doc-health`. So those agents' digests were written to a
+directory no reader would ever look in, and the injection would have been permanently empty
+for them without ever erroring.
+
+- **Attribution now comes from the session's `cwd`**, which is exact rather than heuristic: a
+  path keeps its separators, so there is nothing to disambiguate. The parser was already
+  reading that field into `log.cwd`; it simply was not used for this. Re-resolved after the
+  parse, since `cwd` is not known before it.
+- **One resolver, `agent_for_path`, shared by the extractor, discovery and the hook** — they
+  did not merely agree before, they were different code, and the disagreement was silent.
+- **The flattened form is resolved against the directory those names live in**, longest
+  candidate first, falling back to the first segment. The encoding is genuinely lossy — a
+  separator and a hyphen inside a name both become `-` — so `-...-projects-doc-health` is
+  equally `projects/doc-health` and `projects/doc/health`, and the filesystem is the only
+  thing that can say which.
+- **The flattened form is checked first, and that is a form discriminator rather than a
+  ranking.** A flattened transcript directory really does live at
+  `~/.claude/projects/-home-ted--claude-projects-sysadmin`, so it satisfies the
+  working-directory shape exactly; resolving `cwd` first would answer
+  `-home-ted--claude-projects-sysadmin` — well-formed, and wrong. An existing test caught it.
+
+No migration: no digests had been written for any affected agent.
+
+### Added — memory-consolidation-2026-09 part 2
+
+**The SessionStart injection is the only memory push surface that demonstrably reaches a
+CloudCLI agent session, and the component feeding it is being retired.** Measured live
+2026-09-15: a hook emitting `hookSpecificOutput.additionalContext` is surfaced to the agent;
+the sibling hook emits a bare `systemMessage` and CloudCLI drops it for agent sessions. The
+journal that injection reads is written by the memsearch Stop hook and rewritten by the
+`memsearch-summarize` service. Removing those would not have failed loudly — `stop.sh`'s own
+comment says the raw transcript block it appends "is only transient because
+memsearch-summarize replaces it" — so the injection would have filled with raw transcript
+rather than emptied.
+
+- **`python -m scribe journal`** emits the hook payload for one agent, built from the two
+  most recent `YYYY-MM-DD.md` digests under `<output_dir>/<agent>/`. `hooks/session-start.sh`
+  is the wrapper to register; `SCRIBE_PYTHON` names the interpreter. No output location moved
+  and no format changed, so the `session-digests` qmd collection is untouched.
+- **`scribe.journal.preview` is a port of the incumbent consumer's parser**, which is kept
+  verbatim at `tests/reference/recent_memory_preview.awk` and asserted against byte for byte —
+  over digests built through `render_digest` + `append_block` rather than hand-written
+  fixtures, over adversarial edge cases, and over this host's real digests when present.
+  Verified on forge: the emitted context is byte-identical to what the incumbent produced
+  from the same file. The format itself never needed porting; only the directory differed.
+- **Ported rather than shelled out to awk**, because the property worth holding is "the
+  digests still parse" and that has to be assertable. A test that only checked scribe wrote a
+  file to the expected path would pass unchanged on the day the content stopped parsing.
+- **One incumbent quirk deliberately not reproduced.** Its context assembly is built in bash
+  double quotes — `context="# Recent Memory\n\n"` — where `\n` is two literal characters,
+  which `jq -Rs` then encodes faithfully; live injected context on forge shows the literal
+  `\n`. Real newlines here, pinned by a test.
+- **Absence is reported, not inferred.** "scribe has not run" and "scribe is writing
+  elsewhere" both produce an empty injection; the status line names the directory it looked
+  in. A missing digest directory exits 0 — that is the ordinary state before the first run.
+  Exit 2 means the command refused, and it writes nothing to stdout so a refusal cannot be
+  mistaken for an empty result.
+- **Agent resolution handles both project-directory shapes.** A hook sees
+  `~/.claude/projects/<agent>`; the extractor sees Claude Code's flattened transcript
+  directory. Handling only the flattened shape the codebase already knew would have returned
+  no agent for every real hook invocation. An unrecognised directory yields no agent rather
+  than a guess — a wrong guess injects one agent's sessions into another's context.
+- **Journal selection does not follow symlinks**, matching `find -type f` without `-L`.
+  Everything reachable from there is read and injected, so a link dropped into the digest
+  directory would be a read primitive aimed at anything the account can open.
+
 ### Added — scribe-storage-model-2026-09
 
 **#852 — the extracted event log was never persisted, so the drill-down tier did not exist.**
