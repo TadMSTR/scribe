@@ -387,6 +387,28 @@ def test_a_value_present_in_the_event_log_does_name_redact_py(env) -> None:
     assert _CAUSE_DETAIL[CAUSE_EXTRACTION].endswith("investigate redact.py")
 
 
+def test_the_captured_plaintext_never_reaches_any_reported_sink(env) -> None:
+    """`capture=True` holds the plaintext of what was matched. Prove it stays held.
+
+    `result.errors` is an unredacted sink — it reaches the JSON report and the CLI, and a
+    previous audit on this repo found exactly that. So the guarantee is asserted against the
+    *whole reported surface*, not just against the one field the fix touched: if a future
+    change pipes `guard.captured` into a message, this goes red.
+    """
+    cfg, store, _t = env
+    secret = "ghp_FAKE1234567890abcdefgh"
+    leaky = json.dumps({"asked": "x", "done": [f"token is {secret}"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+
+    assert r.post_render_redactions >= 1, "the fixture must actually trip the detector"
+    reported = json.dumps(r.to_dict())
+    assert secret not in reported
+    assert "ghp_" not in reported
+    # And the digest that was written is clean too — the re-scrub is still doing its job.
+    (written,) = list(output_root(cfg).rglob("*.md"))
+    assert secret not in written.read_text()
+
+
 def test_an_absent_event_log_yields_no_cause_at_all(env) -> None:
     """The third answer. Before #852 there was no log, and the code asserted a cause anyway;
     with no evidence the honest output is "undetermined", not a guess."""
