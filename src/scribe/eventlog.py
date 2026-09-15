@@ -34,7 +34,7 @@ import re
 from pathlib import Path
 
 from .extract.models import EventLog
-from .paths import secure_dir, secure_file
+from .paths import secure_create, secure_dir
 
 #: A session id usable as a filename verbatim. Deliberately narrower than "no separators":
 #: no dots, so a stem can never carry its own extension, and a leading alphanumeric, so
@@ -85,20 +85,22 @@ def write_eventlog(root: str | Path, log: EventLog) -> Path:
     document, so a re-run always has a correct whole to write and there is no reason to
     leave a torn one readable.
 
-    The temp file is tightened to 0600 **before** the rename, so the log never exists under
-    its final name at the process umask. Owner-only throughout: this is derived from a 0600
-    transcript, and it is the least redacted thing scribe keeps. See `paths.py`.
+    The temp file is created 0600 **by the kernel at O_CREAT**, not chmod'd afterwards
+    (`secure_create`). Two reasons, and the second is the one that bites: a chmod-after leaves
+    a window where the file is world-readable, and `rename` preserves the *source's*
+    permissions — so a 0644 temp file silently downgrades an already-0600 destination.
+    Owner-only throughout, because this is derived from a 0600 transcript and is the least
+    redacted thing scribe keeps. See `paths.py`.
     """
     path = eventlog_path(root, log.session_id, log.transcript_path)
     secure_dir(path.parent)
     payload = json.dumps(log.to_dict(), ensure_ascii=False)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
+        with secure_create(tmp) as fh:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
-        secure_file(tmp)
         tmp.replace(path)
     except OSError:
         with contextlib.suppress(OSError):

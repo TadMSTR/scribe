@@ -10,13 +10,21 @@ grants them access.
 
 from __future__ import annotations
 
+import os
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from scribe.paths import DIR_MODE, FILE_MODE, secure_dir, secure_file, secure_sqlite
+from scribe.paths import (
+    DIR_MODE,
+    FILE_MODE,
+    secure_create,
+    secure_dir,
+    secure_file,
+    secure_sqlite,
+)
 from scribe.state import Store
 from scribe.telemetry import record_spend
 from scribe.writeback import append_block, daily_path
@@ -161,3 +169,68 @@ def test_the_result_does_not_depend_on_the_process_umask(tmp_path, umask_value: 
         assert_owner_only(store.path.parent)
     finally:
         os.umask(old)
+
+
+# --- FW-03: temp files must be created 0600, not chmod'd afterwards -------------------
+
+
+@pytest.mark.parametrize("umask", [0o000, 0o022, 0o077])
+def test_secure_create_is_owner_only_under_any_umask(tmp_path, umask) -> None:
+    """The mode must come from `O_CREAT`, not from the process umask.
+
+    Parametrized over a permissive umask deliberately: at 0o077 a plain `open()` also
+    produces 0600, so a test run only under the developer's own umask cannot tell a correct
+    implementation from the umask-inheriting one it replaced.
+    """
+    old = os.umask(umask)
+    try:
+        p = tmp_path / "f"
+        with secure_create(p) as fh:
+            fh.write("x")
+        assert mode(p) == FILE_MODE, f"umask {oct(umask)} leaked into the file mode"
+    finally:
+        os.umask(old)
+
+
+@pytest.mark.parametrize("umask", [0o000, 0o022])
+def test_the_event_log_temp_file_is_never_world_readable(tmp_path, umask) -> None:
+    """FW-03. Observed at `fsync`, which is the moment the content is on disk.
+
+    Checking at *rename* time is not enough, and the distinction is the whole finding: an
+    `open()` + `chmod` + `rename` sequence is already 0600 by the time it renames, so a
+    rename-time assertion passes while the payload still sat world-readable for the whole
+    write. `fsync` is called with the content flushed and the handle still open, so it is
+    where the window is visible.
+
+    Parametrized over a permissive umask deliberately — under the developer's own 0o077 a
+    plain `open()` also yields 0600, and the test could not fail.
+
+    The window is not the only cost. `rename` preserves the SOURCE's permissions, so a 0644
+    temp file also downgrades an already-0600 destination once it lands.
+    """
+    from scribe.eventlog import write_eventlog
+    from scribe.extract.models import EventLog, Turn
+
+    seen: list[int] = []
+    real_fsync = os.fsync
+
+    def spy(fd):
+        seen.append(stat.S_IMODE(os.fstat(fd).st_mode))
+        return real_fsync(fd)
+
+    log = EventLog(
+        session_id="s-1",
+        transcript_path="/var/tmp/sess.jsonl",
+        turns=[Turn(turn_uuid="t-1", index=1, user_text="hi")],
+    )
+    old = os.umask(umask)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(os, "fsync", spy)
+            written = write_eventlog(tmp_path / "eventlogs", log)
+    finally:
+        os.umask(old)
+
+    assert seen, "precondition: the write fsyncs, so the mode was observable mid-write"
+    assert seen[0] == FILE_MODE, f"the event log was {oct(seen[0])} while its content was on disk"
+    assert_owner_only(written)
