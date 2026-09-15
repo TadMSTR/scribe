@@ -24,9 +24,11 @@ from scribe.qc import (
     check_groundedness,
     classify_span,
     grounding_terms,
+    strip_scribe_markers,
 )
 from scribe.qc_cli import _log_from_dict
 from scribe.qc_cli import main as qc_main
+from scribe.writeback import anchor, terminator
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -505,3 +507,95 @@ def test_the_verdict_does_not_depend_on_token_order() -> None:
     orders = ["alpha beta gamma", "gamma beta alpha", "beta gamma alpha", "beta alpha gamma"]
     verdicts = {_tokens_co_occur(o, corpus, window=130) for o in orders}
     assert len(verdicts) == 1
+
+
+# ---------------------------------------------------------------------------
+# Scribe's own block markers are not model claims (vikunja#852).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def bare_log() -> EventLog:
+    """A minimal event log whose corpus contains no path resembling a scribe marker.
+
+    The `log` and `qc_log` fixtures both extract real transcripts **from this repository**,
+    so their grounding corpora contain `/home/ted/repos/personal/scribe/...` — and the
+    groundedness check tests `claim not in corpus` by substring, which means `/scribe` is
+    "grounded" against either of them. A marker test built on those passes whether or not
+    the stripping exists. This fixture is what makes these assertions able to fail.
+    """
+    return EventLog(
+        session_id="s-1",
+        transcript_path="/var/tmp/projects/one/sess.jsonl",
+        turns=[Turn(turn_uuid="t-1", index=1, user_text="Please do the thing.")],
+    )
+
+
+def test_the_marker_fixture_can_actually_see_an_ungrounded_path(bare_log) -> None:
+    """Guards the guard: if `/scribe` were grounded here, the next two tests prove nothing."""
+    report = Report()
+    check_groundedness("- Touched /scribe/nowhere.py\n", bare_log, report)
+    assert any("/scribe" in f.detail for f in report.findings)
+
+
+def test_the_terminator_is_not_read_as_a_file_path(bare_log) -> None:
+    """`<!-- /scribe turn:... -->` must not become a `/scribe` path claim.
+
+    This is the defect that made `scribe qc --digest <a file scribe wrote>` structurally
+    incapable of passing: the terminator is on every block, `/scribe` is in no event log,
+    so every digest file carried a guaranteed groundedness finding. It stayed invisible
+    because the pipeline grades the rendered block *before* the markers are attached, and
+    only the CLI — the path a human re-checking a digest actually takes — ever sees them.
+    """
+    report = Report()
+    check_groundedness(f"- Did a thing.\n{terminator('abc-123')}\n", bare_log, report)
+    assert not [f for f in report.findings if "/scribe" in f.detail]
+
+
+def test_both_markers_are_removed_before_anything_reads_the_text() -> None:
+    """Asserted on `strip_scribe_markers` directly, because the anchor cannot be caught
+    through `check_groundedness` today.
+
+    An anchor's transcript path is preceded by `transcript:` rather than whitespace, and
+    `_PATH_RE` requires whitespace or start-of-string — so the anchor happens to produce no
+    claim regardless of whether it is stripped. A groundedness-level test of it would pass
+    with the anchor half of the strip deleted, which is a test that proves nothing.
+
+    The anchor is still stripped, deliberately: the only reason it is currently harmless is
+    one lookbehind in an unrelated regex, and the next widening of `_PATH_RE` would make it
+    a finding on every digest. This pins that, at the level where it is real.
+    """
+    text = (
+        anchor("s-1", "t-1", "/nowhere/near/the/event/log.jsonl")
+        + "\n- Did a thing.\n"
+        + terminator("t-1")
+    )
+    stripped = strip_scribe_markers(text)
+
+    assert "/nowhere/near/the/event/log.jsonl" not in stripped
+    assert "/scribe" not in stripped
+    assert "- Did a thing." in stripped, "the body itself must survive untouched"
+
+
+def test_stripping_the_markers_does_not_silence_a_real_hallucination(bare_log) -> None:
+    """The pair. Removing scribe's markers must not remove anything else.
+
+    Without this, `strip_scribe_markers` returning `""` would pass the two tests above —
+    and a gate handed an empty document passes everything.
+    """
+    report = Report()
+    check_groundedness(
+        f"- Edited /etc/nginx/nginx.conf\n{terminator('abc-123')}\n", bare_log, report
+    )
+    assert any("nginx" in f.detail for f in report.findings)
+
+
+def test_a_marker_shaped_span_inside_prose_is_still_graded(bare_log) -> None:
+    """Only the two known markers are stripped, not every HTML comment.
+
+    A model that writes `<!-- /etc/shadow -->` into a bullet is still making a claim, and a
+    blanket comment strip would be a hole opened for no reason.
+    """
+    report = Report()
+    check_groundedness("- Note: <!-- /etc/shadow was read -->\n", bare_log, report)
+    assert any("/etc/shadow" in f.detail for f in report.findings)

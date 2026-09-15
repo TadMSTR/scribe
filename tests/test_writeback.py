@@ -177,3 +177,30 @@ def test_a_terminator_without_an_anchor_never_counts(tmp_path) -> None:
     path.parent.mkdir(parents=True)
     path.write_text("<!-- /scribe turn:ghost -->\n")
     assert existing_turns(path) == set()
+
+
+def test_a_digest_carries_no_expires_frontmatter(tmp_path) -> None:
+    """Nothing scribe writes may claim an expiry date.
+
+    `memory-expire.py` sweeps `~/.claude/memory/` and deletes notes whose `expires:`
+    frontmatter has passed. Digests live outside that tree, so it cannot reach them today
+    and this costs one test — but "today" is doing real work in that sentence. The digest
+    root is one config change away from being somewhere that sweeper looks, and a
+    machine-generated corpus that quietly deletes itself is not a failure anyone would
+    attribute to a frontmatter key added years earlier.
+    """
+    path = tmp_path / "research" / "2026-09-15.md"
+    append_block(
+        path,
+        body="**Asked:** A question\n\n**Done:**\n- Did a thing\n",
+        session_id="s-1",
+        turn_uuid="t-1",
+        transcript_path="/var/tmp/sess.jsonl",
+        when=datetime(2026, 9, 15, 14, 52, tzinfo=UTC),
+    )
+    text = path.read_text(encoding="utf-8")
+
+    assert "expires" not in text.lower()
+    # And no YAML frontmatter block at all -- `expires` is only reachable inside one, so the
+    # absence of the container is the durable form of the claim.
+    assert not text.lstrip().startswith("---")

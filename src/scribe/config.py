@@ -20,6 +20,11 @@ DEFAULT_QUIET_PERIOD_MINUTES = 15
 DEFAULT_MAX_SESSION_CHARS = 200_000
 DEFAULT_PROJECT_GLOBS = ("~/.claude/projects/*/",)
 DEFAULT_EXCLUDE = (".memsearch",)
+DEFAULT_OUTPUT_DIR = "~/.local/share/scribe/digests"
+#: A **sibling** of the digest root, never a child of it. The `session-digests` qmd
+#: collection globs `<output_dir>/**/*.md`, so keeping event logs outside that tree is what
+#: stops them being indexed — a structural exclusion rather than a pattern to maintain.
+DEFAULT_EVENTLOG_DIR = "~/.local/share/scribe/eventlogs"
 
 
 class ConfigError(ValueError):
@@ -67,7 +72,8 @@ class Config:
     project_globs: tuple[str, ...] = DEFAULT_PROJECT_GLOBS
     exclude: tuple[str, ...] = DEFAULT_EXCLUDE
     state_path: str = "~/.local/state/scribe/scribe.sqlite3"
-    output_dir: str = "~/.local/share/scribe/digests"
+    output_dir: str = DEFAULT_OUTPUT_DIR
+    eventlog_dir: str = DEFAULT_EVENTLOG_DIR
     host: str = "127.0.0.1"
     port: int = 8499
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
@@ -138,6 +144,8 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
         cfg.state_path = str(disc["state_path"])
     if "output_dir" in disc:
         cfg.output_dir = str(disc["output_dir"])
+    if "eventlog_dir" in disc:
+        cfg.eventlog_dir = str(disc["eventlog_dir"])
 
     service = data.get("service", {})
     cfg.host = str(service.get("host", cfg.host))

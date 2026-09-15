@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — scribe-storage-model-2026-09
+
+**#852 — the extracted event log was never persisted, so the drill-down tier did not exist.**
+`pipeline.py` built the `EventLog` in memory, handed it to the summarizer and the QC gate, and
+dropped it. Three tiers were assumed and two existed: going from a digest line to its evidence
+meant re-parsing a 2.5 MB transcript out of a Backrest restore, and a digest could never be
+re-checked afterwards because `scribe qc` needs the log and nothing kept it.
+
+- **The event log is written per session**, to `[discovery] eventlog_dir`
+  (`~/.local/share/scribe/eventlogs/<session-id>.json`), `0600` inside a `0700` directory. The
+  serialized form is `EventLog.to_dict()` verbatim — the same JSON `scribe extract --json`
+  emits and `scribe qc --events` consumes, so a file is a valid input to the gate the moment
+  it lands.
+- **Written before the summarization call**, and after the dry-run guard. Before the call,
+  because afterwards it would be missing in exactly the case it exists for — a failed model
+  call, where it is the only record of what the run saw. After the dry-run guard, because a
+  dry run is documented to write nothing and that inertness is what makes it safe to sweep
+  the real corpus with. Both are pinned by tests: one observes the event log's existence
+  *from inside* the provider call, because asserting it afterwards cannot tell "written
+  before" from "written after".
+- **Flat, keyed on session id.** The digest anchor carries the session id and nothing else,
+  so a flat layout makes the drill-down a lookup where date partitioning would force a glob.
+  The id comes out of the transcript, so anything that is not a bare identifier is *replaced*
+  with a hash of the transcript path rather than sanitised — a scrubbed id can collide with a
+  real one, and a collision here silently overwrites another session's evidence.
+- **`python -m scribe events <session-id>`** resolves a session to its event log and prints
+  it, or just its path with `--path` for piping into `scribe qc --events`. Exit 1 for "no
+  event log kept" is distinct from exit 2 for "could not look".
+- **Event logs are not indexed**, and sit in a sibling directory rather than under
+  `digests/`, so the new `session-digests` qmd collection excludes them by construction
+  rather than by a pattern someone has to keep correct.
+- Retention is settled: keep everything. 429 sessions in ~39 MB, ~0.46 GB/year. No pruning.
+
+### Fixed — scribe-storage-model-2026-09
+
+**`scribe qc --digest <a file scribe wrote>` could never pass.** The groundedness check read
+scribe's own block terminator, `<!-- /scribe turn:… -->`, as a claim that the file `/scribe`
+was touched — a path in no event log, on every block, so every digest file carried a
+guaranteed finding. It went unseen because the pipeline grades the rendered block *before* the
+markers are attached while the CLI grades the file *after*: the two graded different
+documents, and only the CLI's is the one a human re-checking a digest later actually has.
+Found by persisting the event log and then trying to use it for the thing it was persisted
+for. `_claims` now strips the two known markers — not all HTML comments, which would also
+silence a hallucinated path a model happened to put inside one.
+
+**#851 — the test suite wrote to the production spend log.** `record_spend` falls back to
+`~/logs/scribe-tokens.log` whenever `log_path` is `None`, and isolation depended on every call
+site remembering to override it. Measured: 1,182 phantom `stub-1` records, **99.1% of the
+file**, at +20 per `pytest` run — well-formed records lying in wait for the day the spend meter
+is pointed at that path. A new `tests/conftest.py` redirects `HOME` for every test, rather than
+patching each default: `~` is the single thing all of them go through, so a default added later
+is covered without anyone remembering. The regression tests assert against the **real** home,
+captured before the fixture runs — a test checking only that the tmp file was written cannot
+tell isolation-working from isolation-removed.
+
 ### Fixed — scribe-schema-caps-2026-09
 
 **#849 — the digest item cap was a rule the model was never given.** `MAX_ITEMS = 40` applied
