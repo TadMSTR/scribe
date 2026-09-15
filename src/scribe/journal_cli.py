@@ -81,7 +81,14 @@ def main(argv: list[str] | None = None) -> int:
         args.project_dir or os.environ.get("CLAUDE_PROJECT_DIR", "")
     )
 
-    directory = agent_dir(root, agent) if agent else root
+    try:
+        directory = agent_dir(root, agent) if agent else root
+    except ValueError as exc:
+        # Refused, not empty. An agent name that does not name a directory under the digest
+        # root is a caller error worth reporting, and reporting it costs nothing that an
+        # empty injection would not have cost anyway.
+        print(f"scribe: {exc}", file=sys.stderr)
+        return 2
     paths = recent_journals(directory, args.files) if agent else []
     context = build_context(paths, args.max_lines)
 

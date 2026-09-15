@@ -54,6 +54,21 @@ _BULLET_RE = re.compile(rf"^-{_SP}")
 #: `find -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md'`, as the incumbent globbed.
 _JOURNAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 
+#: An agent name is one path component and is used as one. `.` and `..` match this pattern
+#: and are excluded separately, because a character class cannot express "is not a traversal".
+_AGENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def valid_agent(name: str) -> bool:
+    """Whether `name` is safe to use as a directory component.
+
+    The agent name arrives from `$CLAUDE_PROJECT_DIR` or from `--agent` and is then joined
+    onto the digest root, so it is an external identifier reaching a path. `..` clears a
+    naive check twice over -- it is a legal directory name and `Path('.../projects/..').name`
+    really is `".."`, so the environment form reaches here as readily as the flag does.
+    """
+    return bool(_AGENT_RE.match(name)) and name not in {".", ".."}
+
 
 def preview(text: str, max_lines: int = DEFAULT_MAX_LINES) -> str:
     """Reduce a digest to the lines the SessionStart consumer keeps.
@@ -131,8 +146,25 @@ def agent_dir(digest_root: str | os.PathLike[str], agent: str) -> Path:
     scribe writes per agent and the journal is per project. On forge those are the same set
     under two names: a project directory is `~/.claude/projects/<agent>`. `agent_for_project`
     is where that equivalence is stated; nothing else may assume it.
+
+    **Two guards, and the second is the one that actually holds.** `valid_agent` rejects the
+    name; the containment check rejects the resulting path. A character allowlist states an
+    intention about names, and the property that matters is about paths -- everything under
+    the directory this returns is read and injected into a session, so a traversal here is a
+    read primitive, not a tidiness problem. Containment is asserted against the resolved path
+    so it cannot be satisfied by a name that merely looks well-formed.
+
+    Raises `ValueError` rather than falling back to a default. Silently substituting
+    `unknown` for a rejected name would turn a refusal into an empty injection, which is
+    indistinguishable from a quiet day -- the exact ambiguity this component exists to remove.
     """
-    return Path(digest_root).expanduser() / (agent or "unknown")
+    root = Path(digest_root).expanduser()
+    if not valid_agent(agent):
+        raise ValueError(f"not a usable agent name: {agent!r}")
+    target = root / agent
+    if root.resolve(strict=False) not in target.resolve(strict=False).parents:
+        raise ValueError(f"agent directory escapes the digest root: {target}")
+    return target
 
 
 def agent_for_project(project_dir: str) -> str:
@@ -153,10 +185,11 @@ def agent_for_project(project_dir: str) -> str:
     p = Path(project_dir).expanduser()
     flattened = _agent_from_project_dir(p.name)
     if flattened:
-        return flattened
+        return flattened if valid_agent(flattened) else ""
     parent = p.parent
     if parent.name == "projects" and parent.parent.name == ".claude":
-        return p.name
+        # `~/.claude/projects/..` satisfies every structural test above and yields `".."`.
+        return p.name if valid_agent(p.name) else ""
     return ""
 
 

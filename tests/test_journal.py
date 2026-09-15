@@ -35,6 +35,7 @@ from scribe.journal import (
     preview,
     recent_journals,
     status_line,
+    valid_agent,
 )
 from scribe.journal_cli import main as journal_main
 from scribe.summarize.render import render_digest
@@ -514,3 +515,116 @@ def test_dispatch_routes_the_journal_subcommand(tmp_path, capsys) -> None:
     write_digest(tmp_path, "developer", datetime(2026, 9, 15, 14, 2))
     assert scribe_main(["journal", "--digests", str(tmp_path), "--agent", "developer"]) == 0
     assert "- Listed the runs" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------------------
+# The agent name is an external identifier that reaches a path
+# --------------------------------------------------------------------------------------
+#
+# IV-01 in the fleet's pattern knowledge base, recurrence 14. It arrives from
+# `$CLAUDE_PROJECT_DIR` or `--agent` and is joined onto the digest root, and everything under
+# the directory that produces is read and injected into a session.
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["developer", "sysadmin", "agent-01", "a.b_c", "X"],
+)
+def test_ordinary_agent_names_are_accepted(name) -> None:
+    assert valid_agent(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", ".", "..", "../secrets", "a/b", "a\\b", "a b", "a\0b", "a;b", "*", "~", "a\nb"],
+)
+def test_agent_names_that_are_not_one_path_component_are_refused(name) -> None:
+    """A leading dash is deliberately NOT in this list: `-r` is a legal directory name and
+    nothing here hands the value to a shell, so refusing it would be guarding the wrong
+    thing. What is refused is anything that is not exactly one path component."""
+    assert not valid_agent(name)
+
+
+@pytest.mark.parametrize("name", ["..", "../..", "../../.claude", "a/../.."])
+def test_a_traversing_agent_name_is_refused_loudly(tmp_path, name) -> None:
+    """Loudly, not by falling back to a default. Substituting `unknown` would turn a refusal
+    into an empty injection, which is indistinguishable from a quiet day."""
+    with pytest.raises(ValueError):
+        agent_dir(tmp_path, name)
+
+
+def test_agent_dir_containment_is_asserted_on_the_resolved_path(tmp_path) -> None:
+    """The character allowlist states an intention about names; this states the property
+    about paths, and it is the one that has to hold."""
+    assert agent_dir(tmp_path, "developer") == tmp_path / "developer"
+    with pytest.raises(ValueError):
+        agent_dir(tmp_path, "..")
+
+
+def test_a_traversing_project_directory_yields_no_agent() -> None:
+    """`~/.claude/projects/..` satisfies every structural test — it really is a directory
+    under `projects` whose parent's parent is `.claude` — and `Path(...).name` really is
+    `".."`. The environment form reaches the path join as readily as the flag does."""
+    assert agent_for_project("/home/ted/.claude/projects/..") == ""
+
+
+def test_the_cli_refuses_a_traversing_agent_and_emits_nothing(tmp_path, capsys) -> None:
+    assert journal_main(["--digests", str(tmp_path), "--agent", "../../.claude"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "not a usable agent name" in captured.err
+
+
+def test_the_real_hook_refuses_a_traversing_project_directory(tmp_path) -> None:
+    """End to end: a hook handed a traversing `CLAUDE_PROJECT_DIR` injects nothing and says
+    so, rather than injecting whatever `YYYY-MM-DD.md` files sit above the digest root."""
+    (tmp_path / "2026-09-15.md").write_text(
+        "## S\n- content from above the root\n", encoding="utf-8"
+    )
+    write_digest(tmp_path / "digests", "developer", datetime(2026, 9, 15, 14, 2))
+    proc = run_hook(
+        "--digests",
+        str(tmp_path / "digests"),
+        env={"CLAUDE_PROJECT_DIR": "/home/ted/.claude/projects/.."},
+    )
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert "hookSpecificOutput" not in doc
+    assert "no agent resolved" in doc["systemMessage"]
+
+
+def test_a_symlinked_agent_directory_is_refused(tmp_path) -> None:
+    """The containment check is not redundant with the character allowlist, and this is the
+    case that shows it: `developer` passes every name test there is, and the directory it
+    names is a link out of the tree.
+
+    `recent_journals`' `follow_symlinks=False` does not cover this — it guards the journal
+    *files*, and `os.scandir` follows a symlinked directory happily. Without the containment
+    check the listing below returns the file outside the root and its content is injected.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "2026-09-15.md").write_text("## S\n- content from outside\n", encoding="utf-8")
+    root = tmp_path / "digests"
+    root.mkdir()
+    (root / "developer").symlink_to(outside)
+
+    assert [p.name for p in recent_journals(root / "developer")] == ["2026-09-15.md"], (
+        "precondition: without the guard, the listing reaches outside the root"
+    )
+    with pytest.raises(ValueError, match="escapes the digest root"):
+        agent_dir(root, "developer")
+
+
+def test_the_cli_refuses_a_symlinked_agent_directory(tmp_path, capsys) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "2026-09-15.md").write_text("## S\n- content from outside\n", encoding="utf-8")
+    root = tmp_path / "digests"
+    root.mkdir()
+    (root / "developer").symlink_to(outside)
+
+    assert journal_main(["--digests", str(root), "--agent", "developer"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "escapes the digest root" in captured.err

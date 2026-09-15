@@ -14,7 +14,10 @@
 # the hard way -- a `$(cat)` with no EOF blocks a session start indefinitely -- and this hook
 # reads no input at all, so there is nothing to lose by closing it.
 exec < /dev/null
-set -u
+# `set -e` is safe alongside the explicit `if out=$(...)` below: a command substitution
+# in an `if` condition is exempt, so the failure path stays reachable rather than
+# exiting the hook before it can report anything.
+set -euo pipefail
 
 PY="${SCRIBE_PYTHON:-python3}"
 
