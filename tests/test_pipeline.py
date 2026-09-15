@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,6 +18,11 @@ import pytest
 from scribe.config import Config, ProviderConfig, StageConfig
 from scribe.extract.models import EventLog
 from scribe.pipeline import (
+    _CAUSE_DETAIL,
+    CAUSE_EXTRACTION,
+    CAUSE_MODEL,
+    CAUSE_UNKNOWN,
+    classify_post_render,
     output_root,
     process_session,
     run_once,
@@ -326,13 +332,88 @@ def test_a_secret_in_the_model_output_is_scrubbed_before_it_reaches_disk(env) ->
 
 
 def test_the_post_render_guard_is_a_detector_not_a_silent_cleanup(env) -> None:
-    """A hit here can only mean extraction missed something, because the digest is derived
-    from an already-scrubbed event log. That is worth surfacing loudly."""
+    """A hit is surfaced loudly. It is the *cause* the message must not overstate.
+
+    Retargeted for vikunja#856. This test previously asserted the message said the secret
+    "survived extraction" — but the fixture below is the model-output case, not the
+    extraction-miss one: the token is in the STUB PROVIDER'S RESPONSE, never in the
+    transcript, so the event log cannot contain it. The old assertion passed while naming
+    the wrong file, which is precisely the defect #856 describes.
+    """
     cfg, store, _t = env
     leaky = json.dumps({"asked": "x", "done": ["token is ghp_FAKE1234567890abcdefgh"]})
     (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
     assert r.post_render_redactions >= 1
-    assert any("survived extraction" in e for e in r.errors)
+    assert any("caught at write time" in e for e in r.errors)
+
+
+def test_a_value_the_model_invented_is_not_blamed_on_extraction(env) -> None:
+    """The model-output branch: the value is absent from the event log, so redact.py is
+    explicitly NOT named. This is the case that was misdiagnosed for the whole shadow run."""
+    cfg, store, _t = env
+    leaky = json.dumps({"asked": "x", "done": ["token is ghp_FAKE1234567890abcdefgh"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+    assert r.post_render_cause == CAUSE_MODEL
+    assert r.eventlog_path, "the branch is only meaningful when a log was actually consulted"
+    (msg,) = [e for e in r.errors if "post-render" in e]
+    assert "redact.py is not the file to look at" in msg
+    assert "survived extraction" not in msg
+
+
+def test_a_value_present_in_the_event_log_does_name_redact_py(env) -> None:
+    """The extraction-miss branch, constructed as the mirror of the one above.
+
+    Both cases are built, per the plan: a single case would prove only that one branch
+    exists. The difference is entirely in what the event log contains — the provider
+    response is identical — which is exactly the discrimination #856 asked for.
+    """
+    cfg, store, _t = env
+    secret = "ghp_FAKE1234567890abcdefgh"
+    leaky = json.dumps({"asked": "x", "done": [f"token is {secret}"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+    # Non-vacuity, asserted rather than assumed: BEFORE the plant this same call must return
+    # the other cause. Without this line the test would pass even if `classify_post_render`
+    # ignored its arguments and always returned CAUSE_EXTRACTION.
+    assert classify_post_render(r.eventlog_path, [secret]) == CAUSE_MODEL
+
+    # Plant the value in the persisted log, which is what "extraction missed it" means: the
+    # value reached the event log, so the model was shown it.
+    path = pathlib.Path(r.eventlog_path)
+    payload = json.loads(path.read_text())
+    payload["planted_leaf"] = f"the value was here all along: {secret}"
+    path.write_text(json.dumps(payload))
+
+    assert classify_post_render(r.eventlog_path, [secret]) == CAUSE_EXTRACTION
+    assert _CAUSE_DETAIL[CAUSE_EXTRACTION].endswith("investigate redact.py")
+
+
+def test_the_captured_plaintext_never_reaches_any_reported_sink(env) -> None:
+    """`capture=True` holds the plaintext of what was matched. Prove it stays held.
+
+    `result.errors` is an unredacted sink — it reaches the JSON report and the CLI, and a
+    previous audit on this repo found exactly that. So the guarantee is asserted against the
+    *whole reported surface*, not just against the one field the fix touched: if a future
+    change pipes `guard.captured` into a message, this goes red.
+    """
+    cfg, store, _t = env
+    secret = "ghp_FAKE1234567890abcdefgh"
+    leaky = json.dumps({"asked": "x", "done": [f"token is {secret}"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+
+    assert r.post_render_redactions >= 1, "the fixture must actually trip the detector"
+    reported = json.dumps(r.to_dict())
+    assert secret not in reported
+    assert "ghp_" not in reported
+    # And the digest that was written is clean too — the re-scrub is still doing its job.
+    (written,) = list(output_root(cfg).rglob("*.md"))
+    assert secret not in written.read_text()
+
+
+def test_an_absent_event_log_yields_no_cause_at_all(env) -> None:
+    """The third answer. Before #852 there was no log, and the code asserted a cause anyway;
+    with no evidence the honest output is "undetermined", not a guess."""
+    assert classify_post_render("", ["ghp_FAKE1234567890abcdefgh"]) == CAUSE_UNKNOWN
+    assert classify_post_render("/nonexistent/eventlog.json", ["x"]) == CAUSE_UNKNOWN
 
 
 def test_the_guard_stays_quiet_on_a_clean_digest(env) -> None:
@@ -340,7 +421,8 @@ def test_the_guard_stays_quiet_on_a_clean_digest(env) -> None:
     cfg, store, _t = env
     (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
     assert r.post_render_redactions == 0
-    assert not any("survived extraction" in e for e in r.errors)
+    assert r.post_render_cause == ""
+    assert not any("post-render" in e for e in r.errors)
 
 
 def test_post_render_redactions_are_aggregated_in_the_run_totals(env) -> None:

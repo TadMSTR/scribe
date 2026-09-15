@@ -14,6 +14,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Spans are emitted only when BOTH of these are true: this extra is installed, and
+# `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Neither alone does anything, and the failure mode
+# of getting it half-right is silence -- vikunja#336 (endpoint set, extra never installed,
+# telemetry dead for two months) and vikunja#579 (extras not part of venv-deploy, so a
+# redeploy dropped them again). `setup_tracing()` prints to stderr when the endpoint is set
+# and the import fails, so the half-configured case is noisy rather than silent.
+#
+# gRPC rather than HTTP, and that is not arbitrary: forge's `OTEL_EXPORTER_OTLP_ENDPOINT` is
+# `http://127.0.0.1:4317`, which is the collector's gRPC port, and the three sibling venvs
+# that have working telemetry (githost-mcp, datastore-mcp, scoped-mcp) all carry the
+# proto-grpc exporter. The floor is 1.42 because that is the oldest version deployed on
+# forge today; the `<2` ceiling is because the 1.x span API is what these call sites use.
+telemetry = [
+    "opentelemetry-api>=1.42,<2",
+    "opentelemetry-sdk>=1.42,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.42,<2",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

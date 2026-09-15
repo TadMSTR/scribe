@@ -125,6 +125,18 @@ _ASSIGNMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# Which capture group holds the VALUE, per assignment rule — used only when a `Redactor` is
+# built with `capture=True`. Derived from `_ASSIGNMENT_REPL` above: the group that is NOT
+# written back into the replacement is the one being discarded, which is the secret.
+# Vendor-token rules have no groups; the whole match is the value.
+_VALUE_GROUP: dict[str, int] = {
+    "bearer": 1,
+    "header": 5,
+    "json": 2,
+    "keyval": 2,
+    "envvar": 2,
+}
+
 # Substitutions that keep the value's *shape* — the key name, the header name — while
 # discarding the value, so the reader can still see that a credential was involved.
 _ASSIGNMENT_REPL: dict[str, str] = {
@@ -141,9 +153,16 @@ class Redactor:
 
     A single instance is shared for one extraction run, so `count` is the session total
     reported as `stats.secrets_redacted`.
+
+    **`capture` is off by default and extraction must never turn it on.** A capturing
+    redactor holds the plaintext of everything it matched, which is the one thing this class
+    exists to get rid of. It exists for exactly one caller: the post-render detector in
+    `pipeline.py`, which needs the matched value in memory just long enough to ask "was this
+    in the event log?" and then discards it. The values are never written anywhere — not to
+    the error list, not to the JSON report, not to a span attribute. See vikunja#856.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, capture: bool = False) -> None:
         #: Net secrets removed — the number of redaction markers this instance introduced.
         #: This is the figure reported as `stats.secrets_redacted`.
         self.count = 0
@@ -154,6 +173,42 @@ class Redactor:
         #: than rule fires is what keeps the headline number equal to reality, and it holds
         #: for overlaps nobody enumerated in advance.
         self.by_kind: dict[str, int] = {}
+        self._capture = capture
+        #: Plaintext of every value replaced, when `capture=True`; always empty otherwise.
+        #: Transient by contract — see the class docstring.
+        self.captured: list[str] = []
+
+    def _record(self, kind: str, pat: re.Pattern[str], text: str) -> None:
+        """Record the matched values for `kind`, if capturing.
+
+        **Surrounding quotes are stripped, and that is a correctness fix rather than tidying.**
+        Two rules capture a value with its delimiters still attached: `json`'s group 2 is the
+        quoted value, and `envvar`'s alternation includes the `"..."` and `'...'` forms. The
+        only consumer is `eventlog.contains_value`, which does substring matching against the
+        log's *parsed* string leaves — where the value appears bare, because the quotes were
+        JSON syntax and the parser consumed them.
+
+        So a value captured as `"abc"` would not be found in a leaf containing `abc`, and the
+        caller would conclude `model-output` when the truth was `extraction-miss`. That is a
+        wrong answer in the reassuring direction: it says "the model invented this, extraction
+        is fine" about a value extraction genuinely leaked. Measured before the strip was
+        added — `contains_value` returned False for a value demonstrably present in the log.
+        """
+        if not self._capture:
+            return
+        group = _VALUE_GROUP.get(kind, 0)
+        for m in pat.finditer(text):
+            value = m.group(group)
+            if not value:
+                continue
+            if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            # A value that is already a redaction marker is residue, not a secret: an earlier
+            # rule replaced it and a later one matched the leftover shape. `Bearer «redacted»`
+            # is the concrete case. Recording it would add a verdict that is always False
+            # (no marker is in the event log) for a value that was never a secret.
+            if value and REDACTED not in value:
+                self.captured.append(value)
 
     def _bump(self, kind: str, n: int) -> None:
         if n:
@@ -171,9 +226,11 @@ class Redactor:
             return ""
         out = text
         for kind, pat in _TOKEN_PATTERNS:
+            self._record(kind, pat, out)
             out, n = pat.subn(REDACTED, out)
             self._bump(kind, n)
         for kind, pat in _ASSIGNMENT_PATTERNS:
+            self._record(kind, pat, out)
             out, n = pat.subn(_ASSIGNMENT_REPL[kind], out)
             self._bump(kind, n)
         self.count += out.count(REDACTED) - text.count(REDACTED)

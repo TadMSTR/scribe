@@ -15,6 +15,7 @@ from pathlib import Path
 from .config import ConfigError, load
 from .pipeline import run_once, summarize_run
 from .state import Store
+from .telemetry import setup_tracing, shutdown_tracing
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,6 +42,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     store = Store(args.state or cfg.state_path)
+    # `run` is the only subcommand that reaches a span call site, so it is the only one that
+    # needs a provider. Without this the three span names exist, the call sites execute, and
+    # nothing is ever exported — see `telemetry.setup_tracing`.
+    setup_tracing()
     try:
         results = run_once(
             cfg, store, dry_run=not args.live, limit=args.limit, spend_log=args.spend_log
@@ -48,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"scribe: {exc}", file=sys.stderr)
         return 2
+    finally:
+        # In `finally`, because `BatchSpanProcessor` exports on a timer and a sweep that
+        # raises would otherwise drop every span it had already produced — including the ones
+        # describing the failure, which are the ones worth having.
+        shutdown_tracing()
 
     totals = summarize_run(results)
     if args.json:

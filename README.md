@@ -222,12 +222,49 @@ grader worked; it was pointed at the wrong artefact. So every check here asserts
 
 ## Status
 
-Phases 1–5 are built: extraction, discovery, the summarizer, write-back and the QC gate.
-Phase 6 — a shadow run alongside `memsearch-summarize`, then a cutover decision — has its
-runner but has not been run. `memsearch-summarize` is untouched and remains in production.
-The `SessionStart` feed above is built and verified but **not registered**; registering it is
-part of that cutover.
+All six phases are built, and the shadow run **has been run**: 429 sessions swept in dry mode,
+plus live runs behind vikunja#847, #848, #849 and #852. `memsearch-summarize` is untouched and
+remains in production — the shadow run writes to scribe's own output root and changes nothing
+in the live path.
+
+What remains is not scribe's to do. Registration of the `SessionStart` feed above, and the
+cutover itself, belong to the retirement build (vikunja#863) and are sequenced behind a
+backfill: only one agent has a digest today, so registering the hook first would leave the
+others with an empty injection and no error.
+
 See `CHANGELOG.md`.
+
+## Telemetry
+
+Off by default. Spans are emitted only when **both** of these are true:
+
+```sh
+pip install 'scribe[telemetry]'          # 1. the extra is installed
+export OTEL_EXPORTER_OTLP_ENDPOINT=...   # 2. the endpoint is set (forge: http://127.0.0.1:4317)
+```
+
+**Neither alone does anything**, and that is the part worth stating plainly, because forge has
+shipped the half-configured version of it twice: vikunja#336 (endpoint set, extra never
+installed — telemetry dead for two months, one warning line at startup) and vikunja#579
+(extras not part of venv-deploy, so a redeploy silently dropped them again). Setting the env
+var is the visible step; installing the extra is the one that matters.
+
+scribe makes the half-configured case noisy rather than silent: with the endpoint set and the
+packages missing, `scribe run` prints a warning to stderr naming the install command. It is a
+warning and not a fatal error on purpose — this is a batch job over a corpus, and dying over
+an observability extra would trade a complete run for a complete outage.
+
+Three spans are emitted, and the names are deliberately the *incumbent's* so existing SigNoz
+dashboards keep working across the cutover:
+
+| span | when |
+|---|---|
+| `memsearch.summarize` | each summarization call |
+| `memsearch.summarize_rejected` | each contamination rejection (`signal`, `attempt`, `fallback`) |
+| `memsearch.summarize_extract` | each transcript extraction |
+
+The exporter is OTLP over **gRPC**, which is why the endpoint is the collector's 4317 and
+carries no `/v1/traces` path suffix.
 
 ## License
 
