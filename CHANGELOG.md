@@ -40,6 +40,28 @@ re-checked afterwards because `scribe qc` needs the log and nothing kept it.
   rather than by a pattern someone has to keep correct.
 - Retention is settled: keep everything. 429 sessions in ~39 MB, ~0.46 GB/year. No pruning.
 
+### Security — scribe-storage-model-2026-09
+
+**The event log's temp file was created at the process umask, then chmod'd.** `write_eventlog`
+opened it with `tmp.open("w")` — 0644 at the usual 0022 — and tightened it only afterwards, so
+the payload sat world-readable for the whole write. That payload is the least redacted thing
+scribe keeps: every tool argument, target and result digest of a session, derived from a 0600
+transcript. Seven `agent-*` local accounts exist on this host, none in group `ted`, and the
+world-read bit is precisely the bit that grants them access. FW-03 in the fleet pattern
+knowledge base, whose rule also names the half that outlives the window — `rename` preserves
+the *source's* permissions, so a 0644 temp file downgrades an already-0600 destination once it
+lands.
+
+New `paths.secure_create()` uses `os.open(…, 0o600)`, so the mode is applied by the kernel at
+`O_CREAT` and there is no window to have. Found by this build's own pre-audit baseline, before
+the security audit ran.
+
+The test observes the mode at `fsync`, **not** at rename, and that distinction is the finding:
+the original code was already 0600 by the time it renamed, so a rename-time assertion passes
+while the content was exposed for the entire write. Parametrized over umask `0o000`/`0o022`
+because under the developer's own `0o077` a plain `open()` also yields 0600 and the test could
+not fail.
+
 ### Fixed — scribe-storage-model-2026-09
 
 **`scribe qc --digest <a file scribe wrote>` could never pass.** The groundedness check read
