@@ -187,3 +187,48 @@ def test_the_other_slack_form_the_audit_cited_was_already_covered() -> None:
     already matched. Pinned so the claim is checkable rather than asserted in prose."""
     r = Redactor()
     assert "FAKE" not in r.scrub("xoxe.xoxp-1-FAKEaaaabbbbcccc")
+
+
+def test_captured_values_are_stripped_of_the_quotes_that_delimited_them() -> None:
+    """A capture that keeps its delimiters gives the WRONG answer, in the reassuring direction.
+
+    `json`'s value group is the *quoted* value, and `envvar`'s alternation includes the
+    `"..."` and `'...'` forms. The only consumer is `eventlog.contains_value`, which substring-
+    matches against the log's PARSED string leaves — where the value is bare, because the
+    quotes were JSON syntax the parser consumed.
+
+    So `"abc"` would not be found in a leaf containing `abc`, and `classify_post_render` would
+    answer `model-output` — "the model invented this, extraction is fine" — about a value
+    extraction had genuinely leaked. Measured: before the strip, `contains_value` returned
+    False for a value demonstrably present in the log.
+    """
+    for text in (
+        '{"api_key": "jsonsecretvalue"}',
+        'export FOO_TOKEN="jsonsecretvalue"',
+        "export FOO_TOKEN='jsonsecretvalue'",
+    ):
+        r = Redactor(capture=True)
+        r.scrub(text)
+        assert r.captured == ["jsonsecretvalue"], f"delimiters survived for {text!r}"
+
+    # A bare value is untouched — the strip must not eat a character off an unquoted secret.
+    bare = Redactor(capture=True)
+    bare.scrub("export FOO_TOKEN=barevalue")
+    assert bare.captured == ["barevalue"]
+
+
+def test_capture_skips_redaction_residue() -> None:
+    """`Bearer «redacted»` is what a later rule sees after an earlier one fired. It is not a
+    secret, and recording it adds a verdict that is always False for a non-value."""
+    r = Redactor(capture=True)
+    r.scrub("Authorization: Bearer abc123XYZtoken")
+    assert r.captured == ["abc123XYZtoken"]
+    assert not any(REDACTED in v for v in r.captured)
+
+
+def test_capture_is_off_by_default_so_extraction_never_holds_plaintext() -> None:
+    """The default is the whole safety property: extraction must not retain what it scrubs."""
+    r = Redactor()
+    r.scrub("export FOO_TOKEN=barevalue")
+    assert r.count == 1, "it must still redact — otherwise this passes vacuously"
+    assert r.captured == []

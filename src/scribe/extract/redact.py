@@ -179,13 +179,35 @@ class Redactor:
         self.captured: list[str] = []
 
     def _record(self, kind: str, pat: re.Pattern[str], text: str) -> None:
-        """Record the matched values for `kind`, if capturing."""
+        """Record the matched values for `kind`, if capturing.
+
+        **Surrounding quotes are stripped, and that is a correctness fix rather than tidying.**
+        Two rules capture a value with its delimiters still attached: `json`'s group 2 is the
+        quoted value, and `envvar`'s alternation includes the `"..."` and `'...'` forms. The
+        only consumer is `eventlog.contains_value`, which does substring matching against the
+        log's *parsed* string leaves — where the value appears bare, because the quotes were
+        JSON syntax and the parser consumed them.
+
+        So a value captured as `"abc"` would not be found in a leaf containing `abc`, and the
+        caller would conclude `model-output` when the truth was `extraction-miss`. That is a
+        wrong answer in the reassuring direction: it says "the model invented this, extraction
+        is fine" about a value extraction genuinely leaked. Measured before the strip was
+        added — `contains_value` returned False for a value demonstrably present in the log.
+        """
         if not self._capture:
             return
         group = _VALUE_GROUP.get(kind, 0)
         for m in pat.finditer(text):
             value = m.group(group)
-            if value:
+            if not value:
+                continue
+            if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            # A value that is already a redaction marker is residue, not a secret: an earlier
+            # rule replaced it and a later one matched the leftover shape. `Bearer «redacted»`
+            # is the concrete case. Recording it would add a verdict that is always False
+            # (no marker is in the event log) for a value that was never a secret.
+            if value and REDACTED not in value:
                 self.captured.append(value)
 
     def _bump(self, kind: str, n: int) -> None:
