@@ -5,16 +5,19 @@ Guidance for agents working in this repository.
 ## What this is
 
 A deterministic extractor that turns a Claude Code JSONL transcript into a structured event
-log, plus (planned) a schema'd summarizer that consumes it. It replaces a pipeline that sent
-its model 6.5% of each session and then asked it to name the tools, files and commands it had
-never been shown.
+log, plus a schema'd summarizer that consumes it. It replaces a pipeline that sent its model
+6.5% of each session and then asked it to name the tools, files and commands it had never
+been shown.
 
 ## Invariants — do not weaken these without reading why they exist
 
 **1. `scribe.extract` is stdlib-only and offline.**
 No runtime dependencies, no network, no imports that could acquire either. It is the one
 module that reads raw transcripts, which are the least trustworthy input in the system.
-Summarizer dependencies belong in a Phase 3 extra, not in `[project.dependencies]`.
+Summarizer dependencies belong in an extra, not in `[project.dependencies]` — as
+`[telemetry]` does. The invariant is enforced by `tests/test_stdlib_only.py`, which walks the
+package's imports; this is also why the `SPAN_EXTRACT` span wraps the *call* to `extract()`
+in `pipeline.py` rather than living inside the extractor.
 
 **2. Transcripts are read-only.**
 Never write to `~/.claude/projects/*/*.jsonl`. They are the only durable record of what

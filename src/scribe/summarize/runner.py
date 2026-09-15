@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..extract.models import EventLog
+from ..telemetry import SPAN_REJECTED, span
 from .contamination import RETRY_REMINDER, build_fallback_note, detect_contamination
 from .prompt import SYSTEM, build_user_prompt, grounding_corpus
 from .providers import Completion, Provider, ProviderError
@@ -111,6 +112,27 @@ def summarize_log(
         rendered = render_digest(digest, heading=heading)
         contaminated = detect_contamination(rendered, corpus)
         if contaminated:
+            # `memsearch.summarize_rejected` — emitted once per rejected attempt, matching the
+            # incumbent's `_record_rejection` exactly, because the SigNoz dashboards that query
+            # this span name have to keep working across the cutover. The incumbent's
+            # attributes were `project`, `signal` and `attempt`; `signal` and `attempt` carry
+            # over verbatim, and scribe's `session_id`/`agent` take the place of `project`,
+            # which has no equivalent here. `fallback` marks the terminal rejection, the one
+            # after which a suppression note is written instead of a digest — the incumbent
+            # set the same flag on its second and final attempt.
+            #
+            # Inside the `if`, not after the loop: a session rejected on attempt 1 and accepted
+            # on attempt 2 is a real contamination event that a post-loop emit would lose, and
+            # "how often does the reminder rescue a run" is exactly what the dashboard is for.
+            with span(
+                SPAN_REJECTED,
+                session_id=log.session_id,
+                agent=log.agent,
+                signal=contaminated,
+                attempt=attempt,
+                fallback=attempt >= max_attempts,
+            ):
+                pass
             outcome.errors.append(f"contamination: {contaminated}")
             if attempt < max_attempts:
                 reminder = RETRY_REMINDER

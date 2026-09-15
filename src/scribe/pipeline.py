@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .config import Config
 from .discovery import scan
-from .eventlog import write_eventlog
+from .eventlog import contains_value, write_eventlog
 from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
@@ -26,7 +26,7 @@ from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
 from .state import STATUS_FAILED, SessionRow, Store
 from .summarize.providers import Provider, build
 from .summarize.runner import Outcome, summarize_log
-from .telemetry import SPAN_SUMMARIZE, record_spend, set_span_attributes, span
+from .telemetry import SPAN_EXTRACT, SPAN_SUMMARIZE, record_spend, set_span_attributes, span
 from .writeback import append_block, daily_path
 
 
@@ -60,6 +60,10 @@ class SessionResult:
     #: Secrets caught by the last-line re-scrub of the rendered digest. Should always be
     #: zero -- see `process_session`. Any non-zero value is an extraction-layer miss.
     post_render_redactions: int = 0
+    #: Which cause the fire supports — `extraction-miss`, `model-output` or `undetermined`.
+    #: Empty when nothing fired. Reported so a sweep can be filtered by cause rather than by
+    #: reading every error string (vikunja#856).
+    post_render_cause: str = ""
     #: Where this session's event log was persisted, or "" if it was not. Reported so a run
     #: says out loud whether the drill-down tier exists for each session rather than leaving
     #: it to be inferred from a directory listing.
@@ -88,6 +92,7 @@ class SessionResult:
             "qc_coverage": round(self.qc_coverage, 4),
             "qc_findings": self.qc_findings,
             "post_render_redactions": self.post_render_redactions,
+            "post_render_cause": self.post_render_cause,
             "eventlog_path": self.eventlog_path,
             "errors": self.errors,
         }
@@ -139,6 +144,48 @@ def session_when(log: EventLog, fallback: datetime) -> datetime:
     return fallback
 
 
+#: Extraction missed it: the value is in the event log, so the model was shown it. This is
+#: the only case where `redact.py` is the file to look at.
+CAUSE_EXTRACTION = "extraction-miss"
+#: The model emitted a secret-shaped string that was never in its input. Not an extraction
+#: defect; the digest is still correct on disk because the re-scrub caught it.
+CAUSE_MODEL = "model-output"
+#: No event log to consult, so neither cause is supported by evidence.
+CAUSE_UNKNOWN = "undetermined"
+
+_CAUSE_DETAIL: dict[str, str] = {
+    CAUSE_EXTRACTION: (
+        "at least one matched value IS present in this session's event log, so extraction "
+        "missed it and the model was shown it — investigate redact.py"
+    ),
+    CAUSE_MODEL: (
+        "no matched value appears in this session's event log, so the model emitted a "
+        "secret-shaped string that was never in its input — this is NOT an extraction miss "
+        "and redact.py is not the file to look at"
+    ),
+    CAUSE_UNKNOWN: (
+        "this session's event log is absent or unreadable, so the cause cannot be "
+        "determined — re-run with the event log present to tell the two apart"
+    ),
+}
+
+
+def classify_post_render(eventlog_path: str, values: list[str]) -> str:
+    """Which cause a post-render redaction fire supports, given the persisted event log.
+
+    `True` wins over `False`, and `False` over `None`, because the three answers are not
+    symmetric. One value found in the log proves extraction missed something regardless of
+    how many others were not; a clean "not present" is only meaningful once the log has
+    actually been read; and no log at all proves nothing either way.
+    """
+    verdicts = [contains_value(eventlog_path, value) for value in values]
+    if any(v is True for v in verdicts):
+        return CAUSE_EXTRACTION
+    if any(v is False for v in verdicts):
+        return CAUSE_MODEL
+    return CAUSE_UNKNOWN
+
+
 def process_session(
     row: SessionRow,
     cfg: Config,
@@ -156,12 +203,30 @@ def process_session(
     to abort the sweep: one malformed transcript must not stop the other fourteen.
     """
     result = SessionResult(transcript_path=row.transcript_path, agent=row.agent, dry_run=dry_run)
-    try:
-        log = extract(row.transcript_path, max_session_chars=cfg.max_session_chars)
-    except OSError as exc:
-        result.errors.append(f"extract: {exc}")
-        store.set_status(row.transcript_path, STATUS_FAILED, error=str(exc))
-        return result
+    # Wrapped at the CALL SITE rather than inside `scribe.extract`, deliberately. That package
+    # is asserted stdlib-only by `tests/test_stdlib_only.py` -- it is the component that reads
+    # raw transcripts, and its "no network" claim is structural rather than conventional.
+    # Importing a telemetry module into it would make that invariant a property of what
+    # `telemetry.py` happens to import today. Here, the span covers the same work and the
+    # extractor stays clean.
+    with span(SPAN_EXTRACT, transcript_path=row.transcript_path, agent=row.agent) as sp:
+        try:
+            log = extract(row.transcript_path, max_session_chars=cfg.max_session_chars)
+        except OSError as exc:
+            set_span_attributes(sp, ok=False, error=str(exc))
+            result.errors.append(f"extract: {exc}")
+            store.set_status(row.transcript_path, STATUS_FAILED, error=str(exc))
+            return result
+        set_span_attributes(
+            sp,
+            ok=True,
+            session_id=log.session_id,
+            turns=log.stats.turns,
+            events=log.stats.tool_events,
+            extracted_chars=log.stats.extracted_chars,
+            secrets_redacted=log.stats.secrets_redacted,
+            degradation_level=log.stats.degradation_level,
+        )
 
     st = log.stats
     result.session_id = log.session_id
@@ -252,16 +317,29 @@ def process_session(
     # free. This re-scrub is deliberately NOT a substitute for fixing extraction: the outbound
     # call happens earlier, so it protects the on-disk digest only.
     #
-    # It is also a DETECTOR. The digest is derived from an already-scrubbed event log, so a
-    # non-zero count here can only mean extraction missed something. That is worth surfacing
-    # loudly rather than quietly cleaning up.
-    guard = Redactor()
+    # It is also a DETECTOR, and a fire here has TWO possible causes (vikunja#856):
+    #
+    #   * extraction missed it — the value was in the event log and went to the model, or
+    #   * the model emitted it — a secret-shaped string that was never in its input.
+    #
+    # This comment used to say a fire "can only mean extraction missed something", and the
+    # error told the reader to investigate `redact.py`. That was unfalsifiable before #852
+    # persisted the event log, and measurement since says it was often wrong: two `--live
+    # --limit 3` runs over the SAME three sessions gave `post_render_redactions` of 1 then 0,
+    # which an input-side cause cannot produce. Separately, all three persisted logs scrubbed
+    # field-by-field fired 0 times across 1,797 string leaves.
+    #
+    # So ask the log rather than asserting. `capture=True` is used ONLY here and the captured
+    # plaintext never leaves this block — in particular it is never put in `result.errors`,
+    # which is an unredacted sink that reaches the JSON report and the CLI.
+    guard = Redactor(capture=True)
     markdown = guard.scrub(outcome.markdown)
     if guard.count:
         result.post_render_redactions = guard.count
+        result.post_render_cause = classify_post_render(result.eventlog_path, guard.captured)
         result.errors.append(
-            f"post-render redaction fired {guard.count}x — a secret survived extraction "
-            f"and was caught only at write time; investigate redact.py"
+            f"post-render redaction fired {guard.count}x — a secret was caught at write "
+            f"time; {_CAUSE_DETAIL[result.post_render_cause]}"
         )
 
     # The QC gate runs on whatever was produced, including a placeholder: a run report that

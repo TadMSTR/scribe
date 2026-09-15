@@ -8,7 +8,11 @@ because that is the whole point of the format: `timestamp`, `model`, `input_toke
 from __future__ import annotations
 
 import json
+import sys
 
+import pytest
+
+from scribe import telemetry
 from scribe.telemetry import (
     SPAN_REJECTED,
     SPAN_SUMMARIZE,
@@ -167,3 +171,147 @@ def test_span_yields_a_real_span_when_otel_is_available(monkeypatch) -> None:
         assert sp is fake_span
     assert recorded["name"] == "memsearch.summarize"
     assert fake_span.attributes == {"session_id": "s1"}
+
+
+# ---------------------------------------------------------------------------
+# Emission — the half that vikunja#336 and #320 both got wrong
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_provider():
+    """Give one test a pristine global TracerProvider, and take it back afterwards.
+
+    OTel's `set_tracer_provider` refuses to override an already-installed provider — it logs
+    and no-ops. So a test that installs one would silently hand its spans to whichever test
+    got there first, and the assertions would be about the wrong exporter. Reaching into
+    `trace._TRACER_PROVIDER` is the only way to make these tests order-independent.
+    """
+    trace = pytest.importorskip("opentelemetry.trace")
+    pytest.importorskip("opentelemetry.sdk.trace")
+    saved = trace._TRACER_PROVIDER
+    saved_once = trace._TRACER_PROVIDER_SET_ONCE
+    trace._TRACER_PROVIDER = None
+    trace._TRACER_PROVIDER_SET_ONCE = trace.Once()
+    telemetry._provider = None
+    try:
+        yield
+    finally:
+        telemetry.shutdown_tracing()
+        trace._TRACER_PROVIDER = saved
+        trace._TRACER_PROVIDER_SET_ONCE = saved_once
+        telemetry._provider = None
+
+
+def test_all_three_span_names_actually_reach_an_exporter(clean_provider, tmp_path) -> None:
+    """The test the plan asked for, and the one #336 did not have.
+
+    Asserting that `span()` was *called* proves nothing about whether an exporter would ever
+    see it — `trace.get_tracer()` returns a no-op tracer until a provider is installed, so
+    every call site can look correct while the process emits nothing. This drives
+    `setup_tracing()` itself and reads what came out the other end.
+    """
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    assert telemetry.setup_tracing(exporter=exporter) is True
+
+    with telemetry.span(telemetry.SPAN_SUMMARIZE, session_id="s1", ok=True):
+        pass
+    with telemetry.span(telemetry.SPAN_REJECTED, signal="template", attempt=2, fallback=True):
+        pass
+    with telemetry.span(telemetry.SPAN_EXTRACT, turns=3, events=7):
+        pass
+
+    telemetry.shutdown_tracing()
+    emitted = {s.name: s for s in exporter.get_finished_spans()}
+    assert set(emitted) == {
+        "memsearch.summarize",
+        "memsearch.summarize_rejected",
+        "memsearch.summarize_extract",
+    }
+    # Attributes, not just names. A dashboard that groups by `signal` breaks just as hard
+    # when the attribute is missing as when the span is.
+    assert emitted["memsearch.summarize_rejected"].attributes["signal"] == "template"
+    assert emitted["memsearch.summarize_rejected"].attributes["attempt"] == 2
+    assert emitted["memsearch.summarize_rejected"].attributes["fallback"] is True
+    assert emitted["memsearch.summarize_extract"].attributes["events"] == 7
+    assert emitted["memsearch.summarize"].attributes["ok"] is True
+
+
+def test_a_real_run_emits_the_extract_and_rejected_spans(clean_provider, monkeypatch) -> None:
+    """End to end: the two previously-dead names emit from the PIPELINE, not from a test.
+
+    Wiring a span name into a test proves the constant is spellable. This drives the actual
+    contamination path and the actual extraction call, which is what "has a call site" was
+    supposed to mean.
+    """
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from scribe.extract.models import EventLog
+    from scribe.summarize.runner import summarize_log
+
+    exporter = InMemorySpanExporter()
+    assert telemetry.setup_tracing(exporter=exporter) is True
+
+    # A provider whose output always trips the contamination guard, so the rejection path
+    # runs for every attempt and falls back — the incumbent's attempt=1/attempt=2 shape.
+    monkeypatch.setattr(
+        "scribe.summarize.runner.detect_contamination", lambda rendered, corpus: "template"
+    )
+    log = EventLog(session_id="s9", agent="developer", transcript_path="/tmp/t.jsonl")
+
+    class _Stub:
+        def complete(self, system, user, timeout=0):
+            from scribe.summarize.providers import Completion
+
+            return Completion(
+                text=json.dumps(
+                    {"asked": "x", "done": ["y"], "decided": [], "next": [], "files": []}
+                ),
+                input_tokens=1,
+                output_tokens=1,
+                model="m",
+                provider="p",
+            )
+
+    summarize_log(log, _Stub(), max_attempts=2, sleep=lambda _s: None)
+    telemetry.shutdown_tracing()
+
+    spans = exporter.get_finished_spans()
+    rejected = [s for s in spans if s.name == "memsearch.summarize_rejected"]
+    assert len(rejected) == 2, "one span per rejected attempt, matching the incumbent"
+    assert [s.attributes["attempt"] for s in rejected] == [1, 2]
+    assert [s.attributes["fallback"] for s in rejected] == [False, True]
+
+
+def test_setup_tracing_is_off_by_default_and_silent_about_it(
+    clean_provider, monkeypatch, capsys
+) -> None:
+    """No endpoint, no provider, no noise. Telemetry is opt-in and a batch CLI should not
+    editorialise about a feature nobody turned on."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    assert telemetry.setup_tracing() is False
+    assert telemetry.tracing_enabled() is False
+    assert capsys.readouterr().err == ""
+    # And `span()` still yields None rather than raising, so call sites need no guard.
+    with telemetry.span(telemetry.SPAN_EXTRACT) as sp:
+        assert sp is None
+
+
+def test_endpoint_set_but_packages_missing_is_loud(clean_provider, monkeypatch, capsys) -> None:
+    """vikunja#336's actual lesson, as a test.
+
+    nextcloud-mcp sat for two months with the endpoint set and the extra uninstalled, emitting
+    nothing, because the only signal was one warning line nobody read. The operator has stated
+    an intent the environment cannot satisfy; that must not degrade to silence.
+
+    A warning rather than a hard failure is deliberate: scribe is a batch job over a corpus,
+    and dying over an observability extra would trade a complete run for a complete outage.
+    """
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+    monkeypatch.setitem(sys.modules, "opentelemetry.sdk.trace", None)
+    assert telemetry.setup_tracing() is False
+    err = capsys.readouterr().err
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT is set" in err
+    assert "scribe[telemetry]" in err

@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — telemetry that actually emits (vikunja#336, #579)
+
+**Two of the three declared span names had no call site, and OpenTelemetry was not installed
+at all.** `SPAN_REJECTED` and `SPAN_EXTRACT` were constants nothing referenced, there was no
+`[telemetry]` extra, and no `OTEL_*` variable was set — so scribe emitted zero spans. That is
+defensible for a shadow component, but the span names were deliberately kept identical to
+`memsearch-summarize`'s so existing SigNoz dashboards would survive the cutover, and those
+dashboards query `memsearch.summarize_rejected`. Shipping as-is meant two of three going dark
+the moment the incumbent stopped.
+
+- **A `[telemetry]` extra**, pinning the OTLP **gRPC** exporter. gRPC because forge's
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is `http://127.0.0.1:4317` — the collector's gRPC port — and
+  because the three sibling venvs on forge with working telemetry all carry proto-grpc.
+- **`SPAN_EXTRACT` wraps the extraction call in `pipeline.py`**, not the extractor itself.
+  `scribe.extract` is asserted stdlib-only; importing a telemetry module into it would make
+  that invariant depend on what `telemetry.py` happens to import.
+- **`SPAN_REJECTED` fires once per rejected attempt** on the contamination path, carrying
+  `signal`, `attempt` and `fallback` — matching the incumbent's `_record_rejection` so the
+  dashboards keep grouping the same way. Inside the retry loop rather than after it: a session
+  rejected on attempt 1 and accepted on attempt 2 is a real event, and "how often does the
+  reminder rescue a run" is what the dashboard is for.
+- **`setup_tracing()` — the step whose absence was invisible.** `trace.get_tracer()` returns a
+  *no-op* tracer until an SDK `TracerProvider` is installed, so installing the packages and
+  setting the endpoint was still not enough: every call site would have looked correct while
+  the process emitted nothing. This is the shape of vikunja#320. `run` installs the provider
+  and flushes it in a `finally`, because `BatchSpanProcessor` exports on a timer and a batch
+  CLI can otherwise exit having dropped the whole batch.
+- **The half-configured case is now loud.** Endpoint set and packages missing prints to stderr
+  naming the install command. That is #336's own recommendation — it sat two months with the
+  endpoint set and the extra uninstalled, and the only signal was one warning line. A warning
+  rather than a fatal error, deliberately: scribe is a batch job over a corpus, and dying over
+  an observability extra would trade a complete run for a complete outage.
+- **Emission is asserted against a real exporter**, driving `setup_tracing()` itself rather
+  than building a provider in the test — a test that builds its own would pass while
+  production stayed dark. Verified by neutering the provider install and confirming both
+  emission tests go red. **CI installs `.[dev,telemetry]`** and imports the exporter as an
+  explicit step, so the test cannot silently `importorskip` in the one place that gates
+  merges, and so the install is *run* rather than merely resolved (#578).
+
+### Fixed — the post-render detector named a file it could not know was at fault (vikunja#856)
+
+**A post-render redaction fire was reported as proof that extraction had missed something,
+and told the reader to investigate `redact.py`.** It could not know that. Measured: two
+`--live --limit 3` runs over the same three sessions gave `post_render_redactions` of 1 then
+0 — same input, different outcome, so the trigger was the model's output, not the input
+document. Separately, all three persisted event logs scrubbed field-by-field fired 0 times
+across 1,797 string leaves.
+
+The two causes were indistinguishable until #852 persisted the event log. Now they are
+separable, so the code asks instead of asserting:
+
+- **`classify_post_render` consults the persisted event log** and returns one of
+  `extraction-miss`, `model-output` or `undetermined`, surfaced as `post_render_cause`. The
+  three answers are not symmetric: one value found proves an extraction miss regardless of the
+  others, a clean "absent" is only meaningful once a log has actually been read, and no log at
+  all proves nothing either way.
+- **The message branches with it.** The model-output case now says so explicitly and states
+  that `redact.py` is *not* the file to look at.
+- **`Redactor(capture=True)`** is the opt-in that makes this answerable. Off by default and
+  never used by extraction: a capturing redactor holds the plaintext of what it matched, which
+  is the thing the class exists to remove. The captured values never reach `result.errors`,
+  the JSON report or a span attribute.
+- **The detector still fires loudly, and the digest on disk was always correct.** Only the
+  diagnosis changed.
+- **The serialized-log trap is recorded as a test.** Scrubbing a *serialized* event log
+  produces matches field-level scrubbing does not — the `envvar` rule's negated class stops at
+  a quote character but knows nothing about JSON structure, so a match runs through a `", "`
+  boundary and swallows its neighbours. Field-level: 0 fires across 1,797 leaves. Whole-file:
+  7, all spurious. The tell asserted is that a whole-file scrub **corrupts the document**,
+  which is stronger than the match length. Anyone auditing `eventlogs/` will reach for a file
+  scanner first; this is the note saying why that is the wrong tool.
+
+### Fixed — docs described a tool that had never been run (vikunja#850)
+
+- `AGENTS.md` called the summarizer "(planned)". It shipped and has been shadow-run live.
+- `README.md`'s Status said Phase 6 "has its runner but has not been run". It has been run
+  repeatedly — 429 sessions dry, plus live runs behind #847, #848, #849 and #852. Status now
+  states what remains and whose build it is (#863), rather than implying scribe is unfinished.
+- A **Telemetry** section states the two-part deploy requirement plainly, because the extra
+  and the endpoint are each useless alone and that is exactly what #336 and #579 each got
+  wrong.
+- The rest of the README was checked against the live CLI — all five subcommands' flags, the
+  three-tier table and the drill-down commands — and is accurate.
+
 ### Fixed — agent attribution truncated hyphenated names
 
 **The writer and the reader disagreed about where a hyphenated agent's digests live.**

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import stat
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,12 +21,14 @@ import pytest
 from scribe.config import DEFAULT_EVENTLOG_DIR, DEFAULT_OUTPUT_DIR
 from scribe.eventlog import (
     SUFFIX,
+    contains_value,
     eventlog_path,
     read_eventlog,
     safe_stem,
     write_eventlog,
 )
 from scribe.extract import extract
+from scribe.extract.redact import Redactor
 from scribe.qc_cli import _log_from_dict
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -178,3 +181,67 @@ def test_the_eventlog_root_is_outside_the_digest_tree() -> None:
     assert digests not in eventlogs.parents
     # And nothing written there can match the collection's pattern even by accident.
     assert SUFFIX != ".md"
+
+
+def test_field_level_and_whole_file_scrubbing_disagree_and_field_level_is_right() -> None:
+    """The trap anyone auditing `eventlogs/` will walk into, recorded where they will hit it.
+
+    Scrubbing a *serialized* event log produces matches that field-level scrubbing does not.
+    `Redactor`'s `envvar` rule ends in the negated class ``[^\\s\\"',\\]\\}]+``, which stops at
+    a quote *character* but knows nothing about JSON structure. In serialized form the match
+    therefore runs straight through a structural `", "` boundary and swallows its neighbours.
+
+    Measured on two real event logs: field-level fired **0** times across 1,797 string leaves;
+    whole-file fired **7**, and all seven were spurious, reporting "values" of 155-668
+    characters. The obvious audit approach — point a file scanner at the directory — is the
+    wrong tool, and it fails in the direction that wastes the most time, by manufacturing
+    findings rather than missing them.
+
+    The tell asserted here is stronger than the match length, which varies with the
+    surrounding content: a whole-file scrub **corrupts the document**, because it replaces
+    bytes that were JSON syntax rather than JSON content. A redaction pass that destroys the
+    evidence it is auditing is self-evidently the wrong pass.
+
+    This is why `eventlog.contains_value` walks string leaves instead of searching raw text.
+    """
+    # Two shapes, both clean field-by-field: an unescaped structural boundary, and the
+    # escaped-quote form a tool-argument blob actually takes.
+    for payload in (
+        {
+            "cmd": "export API_TOKEN=",
+            "next": "plain prose that follows",
+            "third": "more ordinary text",
+        },
+        {"cmd": 'sh -c "export API_TOKEN=" && echo done', "note": "tail"},
+    ):
+        serialized = json.dumps(payload)
+
+        field_level = Redactor()
+        for leaf in payload.values():
+            field_level.scrub(leaf)
+        assert field_level.count == 0, f"field-level should find nothing in {payload}"
+
+        whole_file = Redactor()
+        scrubbed = whole_file.scrub(serialized)
+        assert whole_file.count > field_level.count, (
+            "if this ever stops being true the trap is gone and this test should be deleted "
+            "rather than adjusted — but check that before assuming it"
+        )
+        with pytest.raises(ValueError):
+            json.loads(scrubbed)
+
+
+def test_contains_value_finds_a_value_field_level_and_answers_none_when_it_cannot() -> None:
+    """`contains_value`'s three answers, including the one that is not a boolean."""
+    payload = {"turns": [{"text": "the command was FOO=barbaz here"}], "n": 3}
+    path = Path(tempfile.mkdtemp()) / "log.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert contains_value(path, "barbaz") is True
+    assert contains_value(path, "not-in-here") is False
+    # Not a boolean: there is nothing to consult, which supports neither cause.
+    assert contains_value("", "barbaz") is None
+    assert contains_value(path.with_name("absent.json"), "barbaz") is None
+
+    path.write_text("{not json", encoding="utf-8")
+    assert contains_value(path, "barbaz") is None

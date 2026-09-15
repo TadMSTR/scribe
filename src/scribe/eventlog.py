@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from .extract.models import EventLog
@@ -107,6 +108,53 @@ def write_eventlog(root: str | Path, log: EventLog) -> Path:
             tmp.unlink()
         raise
     return path
+
+
+def _string_leaves(node: object) -> Iterator[str]:
+    """Every string leaf in a decoded event log, depth-first."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            yield key
+            yield from _string_leaves(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _string_leaves(item)
+
+
+def contains_value(path: str | Path, value: str) -> bool | None:
+    r"""Whether `value` appears in any string leaf of the event log at `path`.
+
+    Returns None when the question cannot be answered — no path, missing file, unreadable,
+    or not valid JSON. **None is a third answer, not a False.** The caller states a cause
+    based on this, and "the log says no" and "there is no log" support very different
+    claims; collapsing them is how vikunja#856 got its confident wrong message in the first
+    place.
+
+    **Field-level, walking leaves — never a regex over the serialized file.** That
+    distinction is not a style preference, it is the documented trap:
+    `Redactor`'s `envvar` rule ends in the negated class `[^\s\"',\]\}]+`, and in the
+    serialized form a `"` has become `\"`, so the match runs straight through what was a
+    quote boundary and reports "values" of 155-668 characters. Measured across two real
+    event logs: field-level scrubbing fired **0** times, whole-file scrubbing fired **7**,
+    and all seven were spurious. Anyone auditing `eventlogs/` will reach for `grep` or a
+    file scanner first; this is the note saying why that answer is wrong.
+
+    Substring containment rather than equality, because the value was matched inside a larger
+    leaf — a shell command line, a tool argument blob — and the leaf is what was stored.
+    """
+    if not path:
+        return None
+    try:
+        raw = Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    return any(value in leaf for leaf in _string_leaves(payload))
 
 
 def read_eventlog(root: str | Path, session_id: str) -> Path | None:

@@ -24,7 +24,18 @@ jobs:
       # ruff's version comes from the `dev` extra, where it is pinned exactly. Pinning it
       # a second time here would be a second source of truth for one fact, and the two
       # would eventually disagree.
-      - run: pip install -e ".[dev]"
+      # `telemetry` as well as `dev`, deliberately. The span-emission test asserts that spans
+      # reach a real exporter, and without the extra installed it would `importorskip` —
+      # leaving the one test that proves telemetry works silently unrun in the one place that
+      # gates merges. That is vikunja#336 and #579 in test form: the check exists, reports
+      # success, and measured nothing.
+      - run: pip install -e ".[dev,telemetry]"
+
+      # The install is RUN, not merely resolved. #578 shipped two venvs whose telemetry
+      # extra resolved fine and was never installed, discarding every metric silently. A
+      # resolvable dependency list is not an installable one, and this step is the difference.
+      - run: |
+          python -c "import opentelemetry.sdk, opentelemetry.exporter.otlp.proto.grpc.trace_exporter"
 
       # src/ AND tests/. Linting only src/ leaves every rule unenforced across half the
       # repository, which is where the assertions live.
