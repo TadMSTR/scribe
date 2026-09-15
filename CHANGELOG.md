@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-09-15
+
+**scribe's first tagged release.** No tag existed before this one, so there is no predecessor
+to be consistent with — `0.1.0` is what `pyproject.toml` has said throughout, and the seven
+merged PRs below it *built* that version rather than changing a released one. Bumping would
+have implied a public 0.1.0 that never existed.
+
+**Why this exists, in one measurement.** The pipeline it replaces showed its model **6.5% of
+a session** — 33,995 of 523,546 characters on the reference transcript — and then asked it to
+name the tools, files and commands it had never been shown. 176 tool calls and 176 tool
+results were dropped before the model saw anything. scribe is the part that recovers them:
+a deterministic, stdlib-only, offline extractor that turns the full transcript into a
+structured event log, a schema'd summarizer over that log, and a QC gate that grades the
+result against the log rather than against another summary.
+
+Shipped: five verbs (`extract`, `run`, `journal`, `qc`, `events`), three retention tiers with
+a lookup path between them, redaction that is counted rather than assumed, and optional OTel.
+One runtime dependency (`httpx`). 612 tests.
+
+**Nothing is open against this release.** vikunja#850 and #856 are both closed by it; #863
+(registration and cutover) is a separate build and is deliberately not part of this one.
+
 ### Added — telemetry that actually emits (vikunja#336, #579)
 
 **Two of the three declared span names had no call site, and OpenTelemetry was not installed
@@ -90,6 +112,26 @@ separable, so the code asks instead of asserting:
   wrong.
 - The rest of the README was checked against the live CLI — all five subcommands' flags, the
   three-tier table and the drill-down commands — and is accurate.
+
+### Security — post-audit remediation
+
+Audit `scribe-release-readiness-2026-09`: **one Low, two Info, nothing at Medium or above.**
+
+- **Low — the delimiter strip can mangle a `keyval` value.** Correct observation: that rule's
+  value group is unconstrained, so an *unquoted* value that happens to begin and end with the
+  same quote character loses those characters. Behaviour is **pinned by test rather than
+  changed**, because the predicted consequence does not follow: `contains_value` does
+  substring containment and the stripped value is by construction a substring of the
+  unstripped one, so a mangle can never turn a match into a miss. Its only possible error is
+  the conservative direction. The audit's alternative suggestion — scoping the strip to
+  `json`/`envvar` — would have reintroduced the inverted verdict for `keyval`, and there is
+  now a test asserting exactly that so it is not "fixed" later.
+- **Info — `captured` relied on scope rather than an explicit clear.** Now cleared explicitly
+  after classification. The plaintext was already provably unreachable; this makes the bounded
+  retention window visible in the code instead of implicit.
+- **Info — `pip` CVEs in the local dev venv.** Pre-dates this branch, is packaging tooling
+  rather than a shipped dependency, and does not reach the release artefact. Carried into the
+  deploy task so the new `/opt/venvs/scribe` starts current.
 
 ### Fixed — agent attribution truncated hyphenated names
 

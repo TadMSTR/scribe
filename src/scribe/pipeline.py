@@ -337,6 +337,11 @@ def process_session(
     if guard.count:
         result.post_render_redactions = guard.count
         result.post_render_cause = classify_post_render(result.eventlog_path, guard.captured)
+        # Explicit, not left to refcounting. The plaintext is provably unreachable after this
+        # point either way -- `guard` is function-local and nothing retains it -- but the
+        # retention window is a deliberate, bounded thing and it should look deliberate in the
+        # code rather than be implicit in scope rules. Info #1, scribe-release-readiness audit.
+        guard.captured.clear()
         result.errors.append(
             f"post-render redaction fired {guard.count}x — a secret was caught at write "
             f"time; {_CAUSE_DETAIL[result.post_render_cause]}"

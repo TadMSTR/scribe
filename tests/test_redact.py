@@ -232,3 +232,56 @@ def test_capture_is_off_by_default_so_extraction_never_holds_plaintext() -> None
     r.scrub("export FOO_TOKEN=barevalue")
     assert r.count == 1, "it must still redact — otherwise this passes vacuously"
     assert r.captured == []
+
+
+def test_the_delimiter_strip_can_mangle_a_keyval_value_and_that_is_still_safe() -> None:
+    """LOW finding, scribe-release-readiness-2026-09 audit. Behaviour pinned, not changed.
+
+    The audit is right that the strip can mangle a `keyval` value: that rule's value group is
+    unconstrained (`[^\\n]+`), so a value that is *unquoted* in the source but happens to begin
+    and end with the same quote character loses those characters.
+
+    It is wrong about the consequence, and the difference matters because the two point at
+    opposite fixes. The audit predicted a missed match — a real extraction-miss reported as
+    `model-output`, the reassuring-wrong direction. **That cannot happen**, for a structural
+    reason: `eventlog.contains_value` does SUBSTRING containment, and the stripped value is by
+    construction a substring of the unstripped one. If the original is present in the log, so
+    is any substring of it. Stripping can only ever turn a False into a True — yielding
+    `extraction-miss`, which sends the reader to `redact.py`. That is the conservative
+    direction.
+
+    **Do not "fix" this by scoping the strip to `json` and `envvar`.** That was the audit's
+    other suggestion and it reintroduces the exact bug commit `2d2373f` fixed: for a quoted
+    `keyval` source (`password: "abc"`) whose event log holds the parsed bare value (`abc`),
+    the unstripped needle `"abc"` does not match and the verdict inverts to `model-output`.
+    Measured both ways; the case is asserted below so the regression is caught rather than
+    argued.
+    """
+    # The mangle is real.
+    r = Redactor(capture=True)
+    r.scrub('password: "quoted"value"')
+    assert r.captured == ['quoted"value'], "outer quote characters are stripped"
+
+    # And it is harmless, because the needle only ever gets shorter.
+    for source in ('password: "quoted"value"', 'password: "abc"', "password: 'abc'"):
+        captured = Redactor(capture=True)
+        captured.scrub(source)
+        assert captured.captured[0] in source, (
+            "the captured value must remain a substring of its source — that is the whole "
+            "reason a mangle cannot cause a missed match"
+        )
+
+
+def test_stripping_is_required_for_keyval_not_just_json_and_envvar() -> None:
+    """The guard against the audit's harmful suggestion, stated as an executable case.
+
+    A quoted `keyval` source whose event log holds the parsed bare value: without the strip
+    the needle carries quotes the log does not have, the lookup misses, and the verdict
+    inverts to `model-output` for a value extraction genuinely leaked.
+    """
+    r = Redactor(capture=True)
+    r.scrub('password: "abc123secret"')
+    assert r.captured == ["abc123secret"], (
+        "if this ever captures '\"abc123secret\"' again, the keyval strip has been removed "
+        "and vikunja#856's inverted verdict is back for this rule"
+    )
