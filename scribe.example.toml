@@ -13,6 +13,15 @@ project_globs = ["~/.claude/projects/*/"]
 exclude       = [".memsearch"]
 state_path    = "~/.local/state/scribe/scribe.sqlite3"
 output_dir    = "~/.local/share/scribe/digests"
+# The per-session event logs — the drill-down tier behind each digest. Written before the
+# summarization call, so a failed model call still leaves the evidence of what it saw.
+#
+# Keep this a SIBLING of output_dir, never a child. Digests are indexed (qmd collection
+# `session-digests`, which globs `<output_dir>/**/*.md`); event logs must not be, because
+# they are evidence reached *from* a digest rather than a search target, and ~39 MB of tool
+# arguments would swamp the digest signal in every semantic query. Nesting them under
+# output_dir is what would quietly undo that.
+eventlog_dir  = "~/.local/share/scribe/eventlogs"
 
 [summarize.session]
 # Post-extraction the task is formatting a structured log, not inference, so `small` is

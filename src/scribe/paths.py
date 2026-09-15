@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
+from typing import IO
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -75,6 +76,23 @@ def secure_file(path: str | os.PathLike[str]) -> Path:
     with contextlib.suppress(OSError):
         p.chmod(FILE_MODE)
     return p
+
+
+def secure_create(path: str | os.PathLike[str]) -> IO[str]:
+    """Open `path` for writing, created 0600 **at creation** rather than chmod'd after.
+
+    `open(path, "w")` inherits the process umask — typically 0022, so 0644 — and a chmod
+    afterwards leaves a window in which the file is world-readable. For a temp file that is
+    about to be renamed over a destination, the window is not the only problem: **rename
+    preserves the source's permissions**, so a 0644 temp file silently downgrades an
+    already-0600 destination. That is FW-03 in the fleet's pattern knowledge base, recurrence
+    2, and it is why this exists as its own call rather than as `open()` plus `secure_file()`.
+
+    The mode is applied by the kernel at `O_CREAT`, so there is no window at all.
+    """
+    p = Path(path).expanduser()
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    return os.fdopen(fd, "w", encoding="utf-8")
 
 
 def secure_sqlite(db_path: str | os.PathLike[str]) -> None:

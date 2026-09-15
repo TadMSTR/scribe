@@ -76,6 +76,7 @@ def env(tmp_path):
         quiet_period_minutes=15,
         project_globs=(str(projects / "*") + "/",),
         output_dir=str(tmp_path / "out"),
+        eventlog_dir=str(tmp_path / "eventlogs"),
         state_path=str(tmp_path / "state.sqlite3"),
         providers={
             "stub": ProviderConfig(
@@ -99,9 +100,17 @@ def test_a_dry_run_finds_the_session_but_calls_nothing(env) -> None:
 
 
 def test_a_dry_run_writes_nothing(env) -> None:
+    """Inertness covers the event log too.
+
+    It would have been convenient to persist it here — "is the event log right" is the
+    question a dry run is for. But a dry run is documented to write nothing, and that is
+    what makes it safe to sweep the real corpus with; `scribe extract --json` answers the
+    same question without spending the guarantee.
+    """
     cfg, store, _t = env
     run_once(cfg, store, dry_run=True, now=1_000_000.0)
     assert not output_root(cfg).exists()
+    assert not Path(cfg.eventlog_dir).exists()
 
 
 def test_a_dry_run_does_not_advance_the_session_state(env) -> None:
@@ -507,3 +516,143 @@ def test_the_placeholder_flag_is_carried_into_the_per_session_report(env) -> Non
     d = r.to_dict()
     assert d["placeholder"] is True
     assert d["suppressed"] is False
+
+
+# ---------------------------------------------------------------------------
+# The persisted event log — the drill-down tier (vikunja#852).
+# ---------------------------------------------------------------------------
+
+
+class Watching(Provider):
+    """Records the state of the event log root **at the moment the model is called**.
+
+    This is what makes the ordering testable rather than inferable. Asserting after the run
+    that the file exists cannot distinguish "written before the call" from "written after
+    it", and those two differ in exactly the case the file exists for.
+    """
+
+    name = "watching"
+
+    def __init__(self, root: Path, *, raise_with=None) -> None:
+        self.root = Path(root)
+        self.raise_with = raise_with
+        self.seen: list[str] = []
+
+    def complete(self, system, user, *, timeout=120.0) -> Completion:
+        self.seen = sorted(p.name for p in self.root.glob("*.json")) if self.root.exists() else []
+        if self.raise_with:
+            raise self.raise_with
+        return Completion(
+            text=GOOD, input_tokens=50, output_tokens=10, model="stub-1", provider="stub"
+        )
+
+
+def test_a_live_run_persists_one_event_log_per_session(env) -> None:
+    cfg, store, _t = env
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    written = list(Path(cfg.eventlog_dir).glob("*.json"))
+    assert len(written) == 1
+    assert r.eventlog_path == str(written[0])
+
+
+def test_the_event_log_exists_before_the_model_is_called(env) -> None:
+    """The ordering constraint, observed from inside the call rather than after it."""
+    cfg, store, _t = env
+    watcher = Watching(cfg.eventlog_dir)
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: watcher)
+    assert len(watcher.seen) == 1, "the event log must be on disk before the provider runs"
+
+
+def test_a_failed_model_call_still_leaves_the_event_log(env) -> None:
+    """The case it exists for: the summary is gone, the evidence is not.
+
+    Written after the call instead, this file would be absent exactly when the digest is a
+    placeholder — which is the one time nobody can reconstruct what the run saw.
+    """
+    cfg, store, _t = env
+    err = ProviderError("bad request", retryable=False)
+    (r,) = run_once(
+        cfg,
+        store,
+        now=1_000_000.0,
+        provider_factory=lambda: Watching(cfg.eventlog_dir, raise_with=err),
+    )
+    assert r.placeholder is True, "precondition: this run lost its summary"
+    assert r.eventlog_path and Path(r.eventlog_path).is_file()
+
+
+def test_the_persisted_log_can_re_check_its_own_digest(env) -> None:
+    """The point of keeping it: `scribe qc` on a digest written in an earlier run.
+
+    Runs the QC *CLI* over the two files as they sit on disk, because that is the path a
+    human or CI actually takes, and it is the path whose event-log loader drifted once
+    already.
+    """
+    from scribe.qc_cli import main as qc_main
+
+    cfg, store, _t = env
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    (digest,) = list(output_root(cfg).rglob("*.md"))
+
+    assert qc_main(["--digest", str(digest), "--events", r.eventlog_path]) == 0
+
+
+def test_a_hallucinated_digest_still_fails_the_gate_against_the_persisted_log(env) -> None:
+    """Pins the test above to the verdict rather than to the gate merely running.
+
+    A `check_digest` that returned PASS unconditionally would satisfy the happy path.
+    """
+    from scribe.qc_cli import main as qc_main
+
+    cfg, store, _t = env
+    bad = json.dumps({"asked": "x", "done": ["Edited /etc/nginx/nginx.conf"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(bad))
+    (digest,) = list(output_root(cfg).rglob("*.md"))
+
+    assert qc_main(["--digest", str(digest), "--events", r.eventlog_path]) == 1
+
+
+def test_the_event_log_root_is_not_inside_the_digest_root(env) -> None:
+    """Indexing follows the digest root. A nested event log would be swept up with it."""
+    cfg, store, _t = env
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert output_root(cfg) not in Path(cfg.eventlog_dir).parents
+    assert list(output_root(cfg).rglob("*.json")) == []
+
+
+def test_an_unwritable_event_log_root_does_not_lose_the_digest(env, tmp_path) -> None:
+    """A digest without its drill-down tier beats no digest.
+
+    The failure is recorded rather than swallowed — a silently absent event log is how the
+    tier would come to be missing for a subset of sessions without anyone noticing.
+    """
+    cfg, store, _t = env
+    blocked = tmp_path / "blocked"
+    blocked.mkdir(mode=0o500)
+    cfg.eventlog_dir = str(blocked / "eventlogs")
+
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+
+    assert r.written is True and r.summarized is True
+    assert r.eventlog_path == ""
+    assert any("eventlog" in e for e in r.errors)
+
+
+def test_the_run_totals_count_the_event_logs(env) -> None:
+    cfg, store, _t = env
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert summarize_run(results)["eventlogs_written"] == 1
+
+
+def test_a_dry_run_reports_no_event_logs(env) -> None:
+    """Pins the counter to the outcome; a constant 1 would pass the test above."""
+    cfg, store, _t = env
+    results = run_once(cfg, store, dry_run=True, now=1_000_000.0)
+    assert summarize_run(results)["eventlogs_written"] == 0
+
+
+def test_the_event_log_path_is_carried_into_the_per_session_report(env) -> None:
+    """The run report is JSON before it is a printed line."""
+    cfg, store, _t = env
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.to_dict()["eventlog_path"] == r.eventlog_path

@@ -36,17 +36,24 @@ extracted logs at zero cost and with no model call:
 ```python
 from scribe.extract import extract
 from scribe.qc import check_digest
-from scribe.writeback import ANCHOR_RE, TERMINATOR_RE
+from scribe.writeback import ANCHOR_RE
 
 text = open(".../evidence/digest-as-written-WRONG-DATE.md").read()
 marks = list(ANCHOR_RE.finditer(text))
 for i, m in enumerate(marks):
     end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-    body = text[m.end() : end]
-    t = TERMINATOR_RE.search(body)             # the pipeline grades BEFORE this is appended;
-    body = body[: t.start()] if t else body    # leaving it in flags `/scribe` as a path
-    print(m.group(1)[:8], check_digest(body, extract(m.group(3))).ok)
+    print(m.group(1)[:8], check_digest(text[m.end() : end], extract(m.group(3))).ok)
 ```
+
+**The terminator no longer has to be trimmed by hand.** This snippet used to cut each block
+at `TERMINATOR_RE` with the note *"the pipeline grades BEFORE this is appended; leaving it in
+flags `/scribe` as a path"*. That was a workaround for a real defect rather than a quirk of
+replaying: `<!-- /scribe turn:… -->` is on every block scribe writes, `_PATH_RE` read `/scribe`
+out of it as a file path, and `/scribe` is in no event log — so `scribe qc --digest <any file
+scribe wrote>` was structurally incapable of passing. The workaround made this replay work
+while leaving the actual CLI broken, and it is exactly why the defect survived: the one place
+someone hit it, they stepped around it and wrote the step-around down. `_claims` now strips
+scribe's own markers, and `test_the_terminator_is_not_read_as_a_file_path` pins it.
 
 ## The numbers
 

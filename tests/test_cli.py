@@ -84,3 +84,77 @@ def test_unreadable_transcript_exits_2(capsys, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "open", boom)
     assert main([str(target)]) == 2
     assert "cannot read" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# `scribe events` — the drill-down lookup (vikunja#852).
+# ---------------------------------------------------------------------------
+
+
+def _write_log(root, session_id="0192f3c4-aaaa-bbbb-cccc-0123456789ab"):
+    from scribe.eventlog import write_eventlog
+    from scribe.extract import extract
+
+    log = extract(Path(__file__).parent / "fixtures" / "transcript-structural.jsonl")
+    log.session_id = session_id
+    return log, write_eventlog(root, log)
+
+
+def test_events_prints_the_log_for_a_session(tmp_path, capsys) -> None:
+    from scribe.events_cli import main as events_main
+
+    root = tmp_path / "eventlogs"
+    log, _written = _write_log(root)
+
+    assert events_main([log.session_id, "--eventlog-dir", str(root)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["session_id"] == log.session_id
+    assert out == log.to_dict()
+
+
+def test_events_path_prints_only_the_path(tmp_path, capsys) -> None:
+    """The form that gets piped into `scribe qc --events`, so it must be the bare path."""
+    from scribe.events_cli import main as events_main
+
+    root = tmp_path / "eventlogs"
+    log, written = _write_log(root)
+
+    assert events_main([log.session_id, "--eventlog-dir", str(root), "--path"]) == 0
+    assert capsys.readouterr().out.strip() == str(written)
+
+
+def test_events_exits_one_when_there_is_no_log(tmp_path, capsys) -> None:
+    """Distinct from a usage error: "no evidence kept" is an answer, not a malfunction."""
+    from scribe.events_cli import main as events_main
+
+    assert events_main(["no-such-session", "--eventlog-dir", str(tmp_path)]) == 1
+    assert "no event log" in capsys.readouterr().err
+
+
+def test_events_refuses_a_traversing_session_id(tmp_path, capsys) -> None:
+    """A session id is untrusted input and this verb takes one straight off the command line.
+
+    The lookup must not be able to print an arbitrary file: `safe_stem` sends anything that
+    is not a bare identifier to a derived name, so the traversal resolves to a log that does
+    not exist rather than to `/etc/passwd`.
+    """
+    from scribe.events_cli import main as events_main
+
+    root = tmp_path / "eventlogs"
+    _write_log(root)
+    secret = tmp_path / "secret.json"
+    secret.write_text('{"a": 1}', encoding="utf-8")
+
+    assert events_main(["../secret", "--eventlog-dir", str(root)]) == 1
+    assert '"a": 1' not in capsys.readouterr().out
+
+
+def test_events_is_reachable_through_the_dispatcher(tmp_path, capsys) -> None:
+    """A verb absent from `__main__` is a verb nobody can run."""
+    from scribe.__main__ import main as dispatch
+
+    root = tmp_path / "eventlogs"
+    log, _w = _write_log(root)
+
+    assert dispatch(["events", log.session_id, "--eventlog-dir", str(root), "--path"]) == 0
+    assert str(root) in capsys.readouterr().out

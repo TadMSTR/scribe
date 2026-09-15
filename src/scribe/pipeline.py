@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .config import Config
 from .discovery import scan
+from .eventlog import write_eventlog
 from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
@@ -59,6 +60,10 @@ class SessionResult:
     #: Secrets caught by the last-line re-scrub of the rendered digest. Should always be
     #: zero -- see `process_session`. Any non-zero value is an extraction-layer miss.
     post_render_redactions: int = 0
+    #: Where this session's event log was persisted, or "" if it was not. Reported so a run
+    #: says out loud whether the drill-down tier exists for each session rather than leaving
+    #: it to be inferred from a directory listing.
+    eventlog_path: str = ""
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -83,6 +88,7 @@ class SessionResult:
             "qc_coverage": round(self.qc_coverage, 4),
             "qc_findings": self.qc_findings,
             "post_render_redactions": self.post_render_redactions,
+            "eventlog_path": self.eventlog_path,
             "errors": self.errors,
         }
 
@@ -190,6 +196,24 @@ def process_session(
 
     if dry_run or provider is None:
         return result
+
+    # Persist the event log HERE: past the dry-run guard, and strictly before the
+    # summarization call below.
+    #
+    # **Before the call**, because writing it afterwards would lose it in exactly the case it
+    # exists for -- a failed model call, where this is the only evidence of what the run saw,
+    # and the thing that lets a replay skip re-extraction.
+    #
+    # **After the dry-run guard**, because a dry run is documented to write nothing, and that
+    # inertness is what makes it safe to sweep the real corpus with. "Is the event log right"
+    # is answerable from `scribe extract --json` without giving that up.
+    #
+    # A failure to write must not abort the session: a digest without its drill-down tier is
+    # worth more than no digest. The error is recorded rather than swallowed.
+    try:
+        result.eventlog_path = str(write_eventlog(cfg.eventlog_dir, log))
+    except OSError as exc:
+        result.errors.append(f"eventlog: {exc}")
 
     with span(
         SPAN_SUMMARIZE, session_id=log.session_id, agent=result.agent, events=st.tool_events
@@ -314,6 +338,10 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "events_total": sum(r.events for r in results),
         "secrets_redacted": sum(r.secrets_redacted for r in results),
         "post_render_redactions": sum(r.post_render_redactions for r in results),
+        #: Sessions whose drill-down tier now exists. Counted rather than assumed: a digest
+        #: written without its event log is a digest that can never be re-checked, and that
+        #: is the state this build exists to end.
+        "eventlogs_written": sum(1 for r in results if r.eventlog_path),
         "input_tokens": sum(r.input_tokens for r in results),
         "output_tokens": sum(r.output_tokens for r in results),
         "degraded": sum(1 for r in results if r.degradation_level),

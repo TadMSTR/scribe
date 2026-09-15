@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .extract.models import EventLog
+from .writeback import ANCHOR_RE, TERMINATOR_RE
 
 #: Below this share of the session's non-trivial events, a digest is a FAIL rather than a
 #: terse success. Deliberately low: the floor exists to catch an extractor that has stopped
@@ -223,12 +224,34 @@ def grounding_terms(log: EventLog) -> dict[str, set[str]]:
     }
 
 
+def strip_scribe_markers(text: str) -> str:
+    """Remove scribe's own block markers before anything is read as a claim.
+
+    **A claim is something the model asserted.** The anchor and the terminator are written by
+    `writeback`, not by any summarizer, so grading them as model output is a category error —
+    and it is not a harmless one. The terminator is literally `<!-- /scribe turn:... -->`, and
+    `_PATH_RE` reads `/scribe` out of it as a file path that is in no event log. Every digest
+    file scribe writes therefore carries a guaranteed groundedness finding, which made
+    `scribe qc --digest <a file scribe wrote>` structurally incapable of passing.
+
+    That went unseen because the pipeline grades the rendered block *before* the markers are
+    attached, while the CLI grades the file *after* — the two graded different documents, and
+    only the CLI's is the one a human re-checking a digest later actually has.
+
+    Only the two known markers are removed, not all HTML comments. Stripping every comment
+    would also silence a hallucinated path a model happened to put inside one, which is a
+    hole this does not need to open.
+    """
+    return TERMINATOR_RE.sub(" ", ANCHOR_RE.sub(" ", text))
+
+
 def _claims(text: str) -> dict[str, set[str]]:
     """Concrete, checkable assertions in a digest, keyed by claim class.
 
     Backticked spans are split three ways by `classify_span` rather than all being called
     commands -- see vikunja#848.
     """
+    text = strip_scribe_markers(text)
     out: dict[str, set[str]] = {
         "paths": {m.group(0).strip().lower() for m in _PATH_RE.finditer(text)},
         "tools": {m.group(0).strip("`").lower() for m in _TOOL_RE.finditer(text)},

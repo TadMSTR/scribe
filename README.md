@@ -122,6 +122,7 @@ Exit codes: `0` success (including an empty session, which is a real outcome), `
 ```bash
 python -m scribe run                 # dry run: discover, extract, check. No network.
 python -m scribe run --live          # shadow run: also summarize and write
+python -m scribe events SESSION_ID   # print the event log behind a digest
 python -m scribe qc --digest D --events E   # exits non-zero on an ungrounded digest
 ```
 
@@ -134,6 +135,39 @@ hook fires per *turn* and there is no session-end signal. That inference can be 
 direction — Claude Code appends to an existing transcript when a session resumes — so state
 records how far the file was *read*, and growth past that offset makes a session live again
 regardless of its status.
+
+### Three tiers, and how to get between them
+
+What scribe keeps is layered by cost, and each layer is reachable from the one above it:
+
+| Tier | Where | Size per session | Indexed |
+|---|---|---|---|
+| **Digest** — what happened | `~/.local/share/scribe/digests/<agent>/<date>.md` | ~2 KB | yes — qmd `session-digests` |
+| **Event log** — the evidence | `~/.local/share/scribe/eventlogs/<session-id>.json` | ~190 KB | **no** |
+| **Raw transcript** — everything | `~/.claude/projects/*/*.jsonl`, and Backrest | ~2.5 MB | no |
+
+The middle tier is the one that makes a digest checkable after the fact. It is written
+**before** the summarization call, so a run whose model call failed still leaves a complete
+record of what it saw — which is the case you most want it for — and a replay can skip
+re-extraction.
+
+Going from a digest line to its evidence is a lookup, not a search. Every block carries its
+session id in the anchor comment above it:
+
+```bash
+sed -n 's/.*session:\([^ ]*\).*/\1/p' ~/.local/share/scribe/digests/research/2026-09-15.md
+python -m scribe events "$SESSION_ID" | jq '.turns[].rollup'
+python -m scribe qc --digest "$DIGEST" --events "$(python -m scribe events "$SESSION_ID" --path)"
+```
+
+**Event logs are deliberately not indexed**, and live in a sibling directory rather than
+under `digests/` so that stays true by construction. They are evidence reached *from* a
+digest, not a search target; indexing ~39 MB of tool arguments would swamp the digest signal
+in every semantic query. They are also the least redacted thing scribe keeps, so they are
+written `0600` inside a `0700` directory, like everything else derived from a transcript.
+
+Retention is settled: **keep everything.** The measured corpus is 429 sessions in ~39 MB,
+growing at roughly 0.46 GB/year. There is no pruning and none is planned.
 
 ### The QC gate
 
