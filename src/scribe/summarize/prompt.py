@@ -16,7 +16,24 @@ from __future__ import annotations
 import json
 
 from ..extract.models import EventLog
-from .schema import MAX_ITEMS, MAX_ROLLUP_ITEMS, json_schema
+from .schema import field_caps, json_schema
+
+
+def _caps_clause() -> str:
+    """The declared-limit sentence, built from `schema.field_caps()`.
+
+    Fields are grouped by the cap they share, so the sentence stays readable as the caps
+    diverge, and it cannot disagree with what `json_schema` emits or what `parse` enforces.
+    """
+    groups: dict[int, list[str]] = {}
+    for name, cap in field_caps().items():
+        groups.setdefault(cap, []).append(name)
+    parts = []
+    for cap, names in sorted(groups.items()):
+        subject = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+        parts.append(f"{cap} entries for {subject}")
+    return "; ".join(parts)
+
 
 SYSTEM = (
     "You summarize one software engineering session from a structured event log.\n"
@@ -43,12 +60,14 @@ SYSTEM = (
     # State the limit. The schema declares it as `maxItems`, but a field description that says
     # "the ticket references that appear in the log" and a cap the model is never told is a
     # contract the model cannot satisfy — it complies, and is rejected for complying.
-    f"Each list field has a limit, declared as maxItems in the schema below: {MAX_ITEMS} "
-    f"entries for done, found, decisions and open_items, and {MAX_ROLLUP_ITEMS} for artifacts "
-    "and tickets. Do not exceed them. If the log holds more entries than a field allows, list "
+    f"Each list field has a limit, declared as maxItems in the schema below: {_caps_clause()}. "
+    "Do not exceed them. If the log holds more entries than a field allows, list "
     "the most significant ones up to the limit and stop: a response over the limit is rejected "
     "outright and the whole summary is lost, so a field you have had to shorten is always "
     "better than one that runs over.\n"
+    "\n"
+    "A limit is a ceiling, not a target. Most sessions need far fewer entries than a field "
+    "allows; write as many as the log actually supports and no more.\n"
 )
 
 

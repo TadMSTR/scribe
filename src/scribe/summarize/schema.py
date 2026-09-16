@@ -56,11 +56,43 @@ class SchemaError(ValueError):
         self.retryable = retryable
 
 
-#: Cap for the four free-text fields. `done`, `found`, `decisions` and `open_items` are model
-#: prose with nothing behind them to bound them, so this is a genuine runaway guard: the event
-#: log does not say how many entries are correct. `rollup.commands` reaches 187 with 104 of 432
-#: sessions over 40, and that is the material `done` has to cover.
+#: Cap for `found`, `decisions` and `open_items` -- model prose with nothing behind it to
+#: bound it, so this is a genuine runaway guard: the event log does not say how many entries
+#: are correct. These three have never violated it once across 442 sessions, and that
+#: observation is **not** censored the way `done`'s was: a violation is written to the log
+#: whether or not the digest survives, so an absence of failures is real evidence of headroom.
+#: See `MAX_DONE_ITEMS` for the field where it was not.
 MAX_ITEMS = 40
+
+#: Cap for `done`, and the reason it is not `MAX_ITEMS`.
+#:
+#: `done` sat at 40 with the other three until vikunja#872. It was the only field ever to
+#: violate a cap -- 30 distinct failures, every one of them `done`, at 41, 42, 43, 44, 45, 46,
+#: 47, 49, 53, 65 and 67 items. Each one is a whole session lost, because a cap violation is
+#: `retryable=False` and goes straight to a placeholder.
+#:
+#: **Do not re-derive this number from the written digests.** Counted across 418 written
+#: blocks, `done` reads min 1 / median 14 / p90 26 / p99 37 / **max exactly 40**, zero above.
+#: That looks like comfortable headroom and it is an artefact: the distribution is
+#: **right-censored** at the cap, because everything above it was rejected and is therefore
+#: absent from the sample. The survivors top out at 40 *because* the cap is 40.
+#:
+#: The failure tail is the uncensored view of the same field, and it reaches 67 -- but 67 is
+#: a **floor** on the true ceiling, not the ceiling. `json_schema` declares `maxItems` to the
+#: model, and #849 measured that a declared cap makes the model shed items rather than exceed
+#: them (a declared 40 produced 27/35/28 tickets across three runs where 100 produced 53 each
+#: time). So the observed output tail is itself a function of the cap being set, and cannot
+#: be used to choose the cap without circularity.
+#:
+#: The only bound here that is independent of the cap is the **input**. `done` describes the
+#: work a session did, and the richest material it has to cover is `rollup.commands`, measured
+#: over 442 persisted event logs (#852): **max 187**, p99 164, 112 sessions over 40, 38 over
+#: 100. A faithful `done` cannot enumerate more distinct actions than the session contained.
+#:
+#: 200 is above that measured input ceiling. 100 -- the obvious candidate, matching
+#: `MAX_ROLLUP_ITEMS` -- is 1.5x a censored number and sits *below* the command counts of 38
+#: sessions in the corpus, which is how this bug would recur with a bigger number.
+MAX_DONE_ITEMS = 200
 
 #: Cap for `tickets` and `artifacts`. Both are drawn from the extractor's own rollup, so they
 #: have a knowable ceiling — the model cannot list more tickets than the log contains. Measured
@@ -81,16 +113,34 @@ MAX_ITEM_CHARS = 2000
 
 #: `(field, required, cap)`. Only `asked` is required: a session with no findings and no
 #: decisions is a real session, and forcing content into those fields is an invitation to
-#: invent it. The cap is per-field because a single constant cannot guard both a field with a
-#: rollup ceiling and one without — see `MAX_ITEMS` and `MAX_ROLLUP_ITEMS`.
+#: invent it. The cap is per-field because a single constant cannot guard a field with a
+#: rollup ceiling, one with an input ceiling and one with neither — see `MAX_ITEMS`,
+#: `MAX_DONE_ITEMS` and `MAX_ROLLUP_ITEMS`.
+#:
+#: **This tuple is the single source of the caps.** `json_schema` emits them as `maxItems`,
+#: `parse` enforces them, and `prompt.SYSTEM` states them in prose — all three read from here.
+#: The prose used to be hand-written, which is how `done` could be moved off `MAX_ITEMS`
+#: while the prompt still told the model 40 (vikunja#872).
 _LIST_FIELDS: tuple[tuple[str, bool, int], ...] = (
-    ("done", True, MAX_ITEMS),
+    ("done", True, MAX_DONE_ITEMS),
     ("found", False, MAX_ITEMS),
     ("decisions", False, MAX_ITEMS),
     ("open_items", False, MAX_ITEMS),
     ("artifacts", False, MAX_ROLLUP_ITEMS),
     ("tickets", False, MAX_ROLLUP_ITEMS),
 )
+
+
+def field_caps() -> dict[str, int]:
+    """Each list field's declared cap, in declaration order.
+
+    Exists so the prompt can state the caps without restating them. A hand-written sentence
+    and a validated constant are two copies of one fact, and they drifted: `done` moved from
+    40 to 200 and a literal in the prompt would still have said 40 — declaring a limit the
+    model then complies with, and is rejected for complying with, is exactly the failure
+    #849 fixed and #872 re-ran.
+    """
+    return {name: cap for name, _required, cap in _LIST_FIELDS}
 
 
 @dataclass
