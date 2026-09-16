@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config, ConfigError, load
-from .paths import secure_file
 from .state import Store
 from .summarize.contamination import SUPPRESSION_MARKER
 from .summarize.render import PLACEHOLDER_MARKER
@@ -41,6 +40,7 @@ from .writeback import (
     PROVISIONAL_PLACEHOLDER,
     PROVISIONAL_SUPPRESSED,
     TERMINATOR_RE,
+    atomic_replace,
 )
 
 
@@ -113,11 +113,7 @@ def stamp(path: Path, blocks: list[Found]) -> int:
     updated = ANCHOR_RE.sub(sub, text)
     if updated == text:
         return 0
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(updated, encoding="utf-8")
-    secure_file(tmp)
-    tmp.replace(path)
-    secure_file(path)
+    atomic_replace(path, updated)
     return len(wanted)
 
 

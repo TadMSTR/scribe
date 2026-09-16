@@ -36,7 +36,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .paths import secure_dir, secure_file
+from .paths import secure_create, secure_dir, secure_file
 
 ANCHOR_RE = re.compile(
     r"<!--\s*session:(\S+)\s+turn:(\S+)\s+transcript:(\S+?)"
@@ -134,6 +134,30 @@ def _block(
     )
 
 
+def atomic_replace(path: Path, text: str) -> None:
+    """Replace `path`'s whole contents, via a temp file and `os.replace`.
+
+    Used by every path that rewrites a daily file rather than appending to one — the digest
+    replace here, and `recover`'s anchor stamping. Shared rather than written twice because
+    the two easy mistakes are both invisible in the result:
+
+      * **No fsync.** `os.replace` is atomic with respect to other readers, not with respect
+        to a power loss: without the flush the rename can land before the bytes do.
+      * **A temp file at the process umask.** `open(path, "w")` creates 0644, and **rename
+        preserves the source's permissions**, so a 0644 temp file silently downgrades an
+        already-0600 daily file. A `chmod` after the rename closes the window but does not
+        remove it. `secure_create` applies the mode at `O_CREAT`, so there is none.
+        (FW-03 in the fleet's pattern knowledge base.)
+    """
+    secure_dir(path.parent)
+    tmp = path.with_name(path.name + ".tmp")
+    with secure_create(tmp) as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
 def replace_block(
     path: Path,
     *,
@@ -181,15 +205,7 @@ def replace_block(
     ).rstrip("\n")
     updated = text[:start] + replacement + text[end:]
 
-    secure_dir(path.parent)
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
-        fh.write(updated)
-        fh.flush()
-        os.fsync(fh.fileno())
-    secure_file(tmp)
-    os.replace(tmp, path)
-    secure_file(path)
+    atomic_replace(path, updated)
     return True
 
 

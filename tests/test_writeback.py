@@ -412,3 +412,36 @@ def test_the_replaced_file_keeps_owner_only_permissions(tmp_path) -> None:
     )
     assert path.stat().st_mode & 0o077 == 0
     assert not list(path.parent.glob("*.tmp"))
+
+
+def test_the_temp_file_is_owner_only_before_the_rename(tmp_path, monkeypatch) -> None:
+    """FW-03: rename preserves the *source's* permissions.
+
+    `test_the_replaced_file_keeps_owner_only_permissions` passes either way, because the
+    `chmod` afterwards closes the window — so it cannot see this. Inspect the temp file at
+    the moment of the rename instead, which is the only point the window is observable.
+
+    A 0644 temp file does not merely expose itself briefly: renaming it over an already-0600
+    daily file silently downgrades the destination.
+    """
+    import os as _os
+
+    seen: list[int] = []
+    real = _os.replace
+
+    def spy(src, dst, *a, **k):
+        seen.append(Path(src).stat().st_mode & 0o777)
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr("scribe.writeback.os.replace", spy)
+    path = _append_provisional(tmp_path)
+    append_block(
+        path,
+        body="- recovered\n",
+        session_id="s1",
+        turn_uuid="u1",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+    )
+    assert seen, "the replace path did not go through os.replace"
+    assert all(mode & 0o077 == 0 for mode in seen), f"temp file was {seen!r} at rename"
