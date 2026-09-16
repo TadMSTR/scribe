@@ -65,6 +65,32 @@ failure it guards against is silent: the hook keeps firing, the file keeps being
 the injected block is empty because the content stopped parsing. A test that asserted scribe
 wrote a file to a path would pass on every one of those days.
 
+**11. Never re-derive a cap from output the cap already filtered.**
+`done`'s written lengths read min 1 / median 14 / p99 37 / max exactly 40 / zero above, which
+looks like comfortable headroom under a cap of 40. It is right-censoring: everything over the
+cap was rejected and is absent from the sample, so the survivors top out at the cap *because*
+it is the cap. The failure log is the uncensored view, and it is still a floor rather than a
+ceiling — `json_schema` declares `maxItems`, and a declared cap makes the model shed items
+rather than exceed them, so the output distribution is a function of the number you are trying
+to choose. Measure the **input**: `MAX_DONE_ITEMS` is set above `rollup.commands`' observed
+maximum. This cost 30 sessions their digest once already (vikunja#872), and the reassuring
+version of the data is what is easy to find.
+
+**12. A block that is not a digest must say so in its anchor, and must stay replaceable.**
+`render_failure`'s placeholder and the contamination guard's suppression note both occupy a
+turn uuid like a real digest. Before `provisional:` existed, that made them permanent: the
+session retried, the model produced a digest, and `append_block` refused it as a duplicate.
+A final block is never overwritten; a provisional one always is. Note how this coexists with
+invariant 8 — `mark_provisional` *does* advance `last_offset`, because leaving it behind is
+what re-offered a failing session on every sweep forever. What says the session is not done is
+the absence of its turns from `processed_turns`, not the offset.
+
+**13. A counter that can only be inferred from a subtraction will not be noticed.**
+`written == summarized + suppressed + placeholder` exists because "13 lost sessions" once read
+as a clean backfill. The same mistake recurred one term along: a digest produced and *not*
+written showed up as `summarized` with `written: False`, and nothing subtracted those either.
+It has its own counter now (`discarded`). If you add an outcome, give it a name in the totals.
+
 ## Porting notes
 
 `_INJECTED_PREFIXES` and the `isMeta` guard are ported verbatim from

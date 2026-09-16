@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`done`'s item cap was below its real ceiling, and cost 30 sessions their digest**
+  (vikunja#872). It was the only field ever to violate a cap — 30 rejections at 41–67 items
+  against a limit of 40 — and a cap violation is `retryable=False`, so each one became a
+  placeholder immediately. `MAX_DONE_ITEMS = 200`, chosen against the *input* ceiling
+  (`rollup.commands` reaches 187 across the 442 persisted event logs), not against the
+  written digests: those top out at exactly 40 with nothing above, which reads as comfortable
+  headroom and is right-censoring. 100 would have been 1.5x a censored number and below 38
+  sessions' command counts.
+
+- **The prompt's declared caps are generated from `_LIST_FIELDS`** rather than hand-written.
+  The sentence and the validated constants were two copies of one fact; a prompt still saying
+  40 while the validator permits 200 declares a limit the model complies with and is never
+  rejected for, so it would have written short digests silently, every run.
+
+- **The contamination guard fired on any angle-bracketed word** (vikunja#868). It was the
+  only detector ever to fire in production — 51 fires, 22 sessions suppressed — and every one
+  was a session that talked *about* template syntax rather than reproducing it. It now fires
+  on a placeholder in *value position*: strip the placeholders from a line and judge what is
+  left. `build_fallback_note` keeps the broad pattern deliberately, and is tested for it.
+
+- **A digest that was never written is no longer terminal.** A suppression went straight to
+  `summarized`; a placeholder set `failed` but left `last_offset` behind, so the byte check
+  re-offered it on every sweep — one session reached 12 summarization calls and could never
+  have landed, because `append_block` refused the result. Both are now
+  `STATUS_PROVISIONAL`: offset advanced, turns unrecorded, retried a bounded number of times.
+
+- **A provisional block is replaceable on disk.** The block's anchor records whether its body
+  is final or a stand-in; `append_block` replaces a stand-in in place and still refuses a
+  final turn, so a real digest is never overwritten. Absent attribute means final, so blocks
+  written before this read correctly without being rewritten.
+
+- **`sessions.session_id` is populated.** It was empty on all 441 rows — `scan` upserts from
+  a filesystem stat and the id is inside the transcript — which made it look like a usable
+  join key when it matched nothing.
+
+### Added
+
+- **`scribe recover`** — reopens sessions whose digest was never written, for blocks that
+  predate the provisional marker. Identifies them by body rather than anchor, stamps the
+  anchors, and clears the state. Dry by default, idempotent, joins on `transcript_path`.
+
+- **A `discarded` run counter** — a digest produced and then not written. The term missing
+  from `written == summarized + suppressed + placeholder`, and the reason 30 lost sessions
+  reported as clean. It should be unreachable; it is counted so that is checkable.
+
 ## [0.1.0] — 2026-09-15
 
 **scribe's first tagged release.** No tag existed before this one, so there is no predecessor
