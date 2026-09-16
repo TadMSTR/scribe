@@ -32,9 +32,39 @@ STATUS_COMPLETE = "complete"
 STATUS_SUMMARIZED = "summarized"
 STATUS_FAILED = "failed"
 
+#: Written, but not with a digest. The block on disk is `render_failure`'s marked placeholder
+#: or the contamination guard's suppression note, and the real summary does not exist yet.
+#:
+#: This status is the state-side half of making a loss recoverable (vikunja#872, #868). What
+#: it replaces is worse than "terminal": a suppressed session went straight to `summarized`,
+#: and a placeholder set `failed` but left `last_offset` untouched, so it was re-offered on
+#: *every* sweep for the rest of its life — one session reached 12 attempts, each a ~50k-token
+#: call, and could never have succeeded because `append_block` would have refused the result.
+#: Neither "done" nor "retry forever" was right. `provisional` means retry, a bounded number
+#: of times, and say so in the totals meanwhile.
+STATUS_PROVISIONAL = "provisional"
+
+#: How many sweeps may retry a provisional session before it is left alone.
+#:
+#: Three, because the failures that produce a provisional block are overwhelmingly determined
+#: by the input rather than by the sample — a cap violation sees the same log every time, and
+#: the runner has already spent its own three in-call attempts on a contamination rejection.
+#: An unbounded retry is not free: it is a full summarization call per sweep, forever, on a
+#: session that by construction keeps failing.
+#:
+#: Exhausting the budget is not a terminal verdict on the session, only on the current code.
+#: `scribe recover` resets the counter, which is how a session becomes retryable again after
+#: the thing that was failing has been fixed — the case this whole build exists for.
+MAX_PROVISIONAL_ATTEMPTS = 3
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     transcript_path TEXT PRIMARY KEY,
+    -- Written when a session is summarized, not when it is observed: `scan` upserts a row
+    -- from a filesystem stat, and the session id is inside the transcript. It was empty on
+    -- all 441 rows until vikunja#872, because nothing ever supplied it after extraction --
+    -- an always-empty column that reads like a usable key. `transcript_path` is the primary
+    -- key and the join key; this is for correlating a row with a digest anchor.
     session_id      TEXT,
     agent           TEXT,
     size_bytes      INTEGER NOT NULL DEFAULT 0,
@@ -87,6 +117,16 @@ class SessionRow:
         that the bytes read *at the time* were summarized.
         """
         return self.size_bytes > self.last_offset
+
+    @property
+    def is_retryable_provisional(self) -> bool:
+        """True when the block on disk is a stand-in and the retry budget is not spent.
+
+        Deliberately independent of `has_unread_bytes`: a provisional session has had its
+        offset advanced precisely so it stops being re-offered by the byte check, and this is
+        what offers it instead — a bounded number of times rather than every sweep.
+        """
+        return self.status == STATUS_PROVISIONAL and self.attempts < MAX_PROVISIONAL_ATTEMPTS
 
 
 class Store:
@@ -204,6 +244,7 @@ class Store:
         offset: int,
         last_turn_uuid: str,
         turn_uuids: list[str],
+        session_id: str = "",
     ) -> int:
         """Advance the read offset and record which turns were written.
 
@@ -221,10 +262,80 @@ class Store:
             inserted = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
             conn.execute(
                 "UPDATE sessions SET last_offset = MAX(last_offset, ?), last_turn_uuid = ?, "
-                "status = ?, last_error = '', updated_at = ? WHERE transcript_path = ?",
-                (offset, last_turn_uuid, STATUS_SUMMARIZED, now, transcript_path),
+                "status = ?, last_error = '', "
+                "session_id = COALESCE(NULLIF(?, ''), session_id), updated_at = ? "
+                "WHERE transcript_path = ?",
+                (offset, last_turn_uuid, STATUS_SUMMARIZED, session_id, now, transcript_path),
             )
         return inserted
+
+    def mark_provisional(
+        self,
+        transcript_path: str,
+        *,
+        offset: int,
+        last_turn_uuid: str,
+        session_id: str = "",
+        error: str = "",
+    ) -> int:
+        """Record that a stand-in was written, and spend one of the retry budget.
+
+        The two halves are chosen against opposite failure modes:
+
+          * `last_offset` **is** advanced, so the byte check stops re-offering the session on
+            every sweep. That is what stops the 12-attempt token burn.
+          * `processed_turns` is **not** written, so the turn is still pending and the next
+            sweep genuinely re-summarizes it rather than short-circuiting on "nothing new".
+
+        Returns the new attempt count so the caller can report it.
+        """
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET last_offset = MAX(last_offset, ?), last_turn_uuid = ?, "
+                "status = ?, attempts = attempts + 1, last_error = ?, "
+                "session_id = COALESCE(NULLIF(?, ''), session_id), updated_at = ? "
+                "WHERE transcript_path = ?",
+                (
+                    offset,
+                    last_turn_uuid,
+                    STATUS_PROVISIONAL,
+                    error,
+                    session_id,
+                    now,
+                    transcript_path,
+                ),
+            )
+            r = conn.execute(
+                "SELECT attempts FROM sessions WHERE transcript_path = ?", (transcript_path,)
+            ).fetchone()
+        return int(r["attempts"]) if r else 0
+
+    def reset_for_retry(self, transcript_path: str) -> bool:
+        """Make a session summarizable again: clear its turns, offset and attempt budget.
+
+        The deliberate counterpart to `mark_provisional`, and the only thing that reopens a
+        session whose budget is spent. Used by `scribe recover` once the defect that was
+        failing has been fixed — without it, "retry a bounded number of times" would mean a
+        session lost to a bug stays lost after the bug is gone.
+
+        Returns False for a transcript the store has never seen.
+        """
+        with self._connect() as conn:
+            r = conn.execute(
+                "SELECT 1 FROM sessions WHERE transcript_path = ?", (transcript_path,)
+            ).fetchone()
+            if r is None:
+                return False
+            conn.execute(
+                "DELETE FROM processed_turns WHERE transcript_path = ?", (transcript_path,)
+            )
+            conn.execute(
+                "UPDATE sessions SET status = ?, last_offset = 0, attempts = 0, "
+                "last_error = '', updated_at = ? WHERE transcript_path = ?",
+                (STATUS_COMPLETE, _now(), transcript_path),
+            )
+        return True
 
     def unprocessed_turns(self, transcript_path: str, turn_uuids: list[str]) -> list[str]:
         """Filter `turn_uuids` down to those not already written, preserving order."""

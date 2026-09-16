@@ -12,6 +12,7 @@ check the two halves against each other rather than each against itself.
 from __future__ import annotations
 
 import json
+import re
 
 from scribe.extract.models import EventLog, Rollup, Stats, Turn
 from scribe.summarize.prompt import SYSTEM, build_user_prompt
@@ -33,8 +34,11 @@ def _log() -> EventLog:
 
 def test_there_is_more_than_one_declared_cap() -> None:
     """Non-vacuity guard. With a single blanket cap the test below would still pass, and the
-    per-field split is the substance of the fix — so assert the split exists first."""
-    assert len(DECLARED_CAPS) == 2
+    per-field split is the substance of the fix — so assert the split exists first.
+
+    Three since #872, not two: `done` moved off the free-text cap onto its own.
+    """
+    assert len(DECLARED_CAPS) == 3
 
 
 def test_the_system_prompt_states_every_declared_limit() -> None:
@@ -63,3 +67,34 @@ def test_the_user_prompt_carries_the_schema_with_its_caps() -> None:
     schema = json_schema()
     assert json.dumps(schema, ensure_ascii=False) in rendered
     assert schema["properties"]["tickets"]["maxItems"] != schema["properties"]["done"]["maxItems"]
+
+
+def test_the_prompt_pairs_each_field_with_its_own_cap() -> None:
+    """Not just "the numbers appear somewhere" — the right number against the right field.
+
+    The caps clause used to be a hand-written sentence naming four fields and one number.
+    That is how #872 could have shipped silently: `done` moves from 40 to 200 in `schema.py`
+    and the prose still says 40, so the model is told a limit, complies with it, and the
+    validator — which now permits 200 — is not the thing that rejects it. The model just
+    writes a shorter digest than the log supports, every run, invisibly.
+
+    This reads the pairing back out of `SYSTEM`'s own text and checks it against
+    `json_schema()`, so the two halves are compared with each other rather than each with
+    itself. It fails on a clause that goes stale *and* on one that is quietly dropped.
+    """
+    clause = re.search(r"declared as maxItems in the schema below: (.+?)\. Do not", SYSTEM)
+    assert clause, "the system prompt no longer states the caps at all"
+
+    stated: dict[str, int] = {}
+    for cap, subject in re.findall(
+        r"(\d+) entries for ([a-z_, ]+?(?: and [a-z_]+)?)(?=;|$)", clause.group(1)
+    ):
+        for name in re.split(r",\s*|\s+and\s+", subject.strip()):
+            stated[name] = int(cap)
+
+    declared = {
+        name: prop["maxItems"]
+        for name, prop in json_schema()["properties"].items()
+        if "maxItems" in prop
+    }
+    assert stated == declared

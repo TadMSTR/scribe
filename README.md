@@ -125,6 +125,8 @@ python -m scribe run --live          # shadow run: also summarize and write
 python -m scribe events SESSION_ID   # print the event log behind a digest
 python -m scribe qc --digest D --events E   # exits non-zero on an ungrounded digest
 python -m scribe journal             # SessionStart hook payload for this agent
+python -m scribe recover             # report sessions whose digest was never written
+python -m scribe recover --apply     # reopen them, so the next run redoes them
 ```
 
 **`run` defaults to a dry run.** It discovers finished sessions, extracts them and reports —
@@ -205,6 +207,48 @@ injecting an empty block and say nothing about it.
 Absence is reported rather than inferred. "scribe has not run yet" and "scribe is writing
 somewhere else" produce the same empty injection and are distinguished only by the status
 line, which names the directory it looked in.
+
+### When a digest is not written
+
+Not every run produces a digest. Two outcomes write a block that is *not* a summary, and both
+are marked as such in the block's own anchor:
+
+| body | anchor | meaning |
+|---|---|---|
+| a digest | no `provisional:` attribute | final; never overwritten |
+| `render_failure` placeholder | `provisional:placeholder` | the model call or the schema failed |
+| suppression note | `provisional:suppressed` | the contamination guard fired |
+
+A provisional block is **replaced in place** by the first real digest that arrives for the
+same turn, and its session is offered again for a bounded number of sweeps
+(`state.MAX_PROVISIONAL_ATTEMPTS`). A final block is never overwritten by anything, including
+by a later placeholder for the same turn.
+
+This is what the run totals mean:
+
+```
+written == summarized + suppressed + placeholder
+```
+
+plus a fourth counter, `discarded`, for a digest that was produced and then *not* written.
+That should be unreachable — it is printed so the claim is checkable rather than assumed. It
+was not always: before the provisional marker existed, a placeholder occupied its turn uuid,
+the retry succeeded, and `append_block` refused the result. 30 sessions were summarized,
+paid for and discarded, and every run reported them as clean (vikunja#872, #868).
+
+`scribe recover` reopens sessions whose blocks predate the marker. It identifies them by
+body rather than by anchor — which is exactly why they were unrecoverable — stamps the
+anchors, and clears the state so the next run redoes them. Dry by default and idempotent:
+
+```bash
+python -m scribe recover              # what would change
+python -m scribe recover --apply      # change it
+python -m scribe run --live           # then re-summarize
+```
+
+It joins on `transcript_path`. A session whose transcript has been deleted is reported rather
+than reopened — its event log survives, but there is no path from one to a digest yet
+(vikunja#873).
 
 ### The QC gate
 

@@ -50,6 +50,15 @@ def render_digest(digest: Digest, *, heading: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
+#: The line that identifies a placeholder block on disk.
+#:
+#: A constant because `scribe recover` has to find these blocks in a corpus written before
+#: provisional anchors existed, and matching on a prose literal copied into another module is
+#: how a reworded banner silently stops being recoverable. `test_render.py` pins the renderer
+#: to it, so the two cannot drift.
+PLACEHOLDER_MARKER = "**Summary unavailable — this block is a placeholder, not a summary.**"
+
+
 def render_failure(*, transcript_path: str, reason: str, attempts: int, heading: str = "") -> str:
     """Render a marked placeholder for a session that could not be summarized.
 
@@ -65,7 +74,7 @@ def render_failure(*, transcript_path: str, reason: str, attempts: int, heading:
     if heading:
         lines.append(f"### {heading}")
         lines.append("")
-    lines.append("**Summary unavailable — this block is a placeholder, not a summary.**")
+    lines.append(PLACEHOLDER_MARKER)
     lines.append("")
     lines.append(f"- Reason: {' '.join(reason.split())}")
     lines.append(f"- Attempts: {attempts}")

@@ -85,10 +85,22 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"  !! {totals['placeholders']} placeholder(s) written -- "
                 f"{totals['placeholders']} session summar"
-                f"{'y' if totals['placeholders'] == 1 else 'ies'} LOST"
+                f"{'y' if totals['placeholders'] == 1 else 'ies'} not yet written"
+                f" (retryable: `scribe recover --status`)"
             )
         if totals["suppressed"]:
             print(f"  {totals['suppressed']} suppressed (contamination fallback)")
+        # Louder than a placeholder, because a placeholder is a session waiting and this is a
+        # session whose digest was generated, paid for and thrown away. It happened 30 times
+        # and reported as a clean `summarized` every time. It should now be unreachable --
+        # printing it is how we find out if it is not.
+        if totals["discarded"]:
+            print(
+                f"  !! {totals['discarded']} digest(s) produced but NOT WRITTEN -- "
+                f"{totals['discarded']} session summar"
+                f"{'y' if totals['discarded'] == 1 else 'ies'} LOST; "
+                f"this should be unreachable, report it"
+            )
         if totals["errors"]:
             print(f"  {totals['errors']} error(s)")
             for r in results:

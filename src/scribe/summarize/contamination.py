@@ -16,6 +16,32 @@ import re
 
 _PLACEHOLDER_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9 _./-]{0,40}>")
 
+#: Real words that must remain on a line once its placeholders are removed, before the line
+#: counts as prose rather than scaffolding.
+#:
+#: The guard used to fire on `_PLACEHOLDER_RE.search(summary)` — **any** angle-bracketed word
+#: anywhere in the digest. It was the only detector that ever fired in production: 51 fires,
+#: 22 sessions suppressed, and on inspection every one was a session that had *talked about*
+#: template syntax rather than reproduced it (vikunja#868). This fleet writes `<build-name>`,
+#: `<agent>` and `<programme>` constantly, so a faithful digest of a session about naming
+#: conventions was indistinguishable from a failed generation.
+#:
+#: Same shape as #848, where the QC classifier treated every backticked span as a command
+#: needing a verbatim log match and 72 of 73 flags were false positives. The lesson there
+#: applies unchanged: a guard keyed on surface syntax cannot tell content *about* a form from
+#: content *in* that form — so key it on **position** instead.
+#:
+#: Scaffolding puts a placeholder where the *value* goes, which means the line around it is a
+#: label and little else: `- <specific step>`, `**Goal:** <1 sentence from plan>`, `<agent>`.
+#: Prose puts it inside a sentence: `Renamed <agent> to the real path`, `Wrote
+#: <programme>-p<N>-<slug> directories`. Strip the placeholders and the difference is what is
+#: left — nearly nothing, or a sentence.
+#:
+#: Three, not two or four. Two admits `**Asked:** <what the user wanted>` (two real tokens);
+#: four rejects `Discussed the <build-name> convention` (three). Tuned against #868's own
+#: table of real digest sentences, with `test_contamination.py` holding both directions.
+_MIN_PROSE_WORDS = 3
+
 # Structural signatures meaning the model reproduced source shape rather than describing it.
 _TEMPLATE_SIGNATURES: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?m)^\s*#{1,6}\s+Phase\s+\d"),
@@ -49,15 +75,44 @@ RETRY_REMINDER = (
 )
 
 
+#: The line that identifies a suppression block on disk. A constant for the same reason as
+#: `render.PLACEHOLDER_MARKER`: `scribe recover` matches it against a corpus written before
+#: provisional anchors existed.
+SUPPRESSION_MARKER = (
+    "- Summary suppressed: source contained template/skill text the summarizer could "
+    "not describe without copying it (contamination guard)."
+)
+
+
 def _normalize_line(s: str) -> str:
     return s.strip().lstrip("-*# ").strip()
+
+
+def _scaffold_line(line: str) -> bool:
+    """True when `line` uses a placeholder as a *value slot* rather than mentioning one.
+
+    Removing every placeholder leaves the line's real content behind. A template line is a
+    label with the value cut out, so almost nothing remains; a sentence that happens to name
+    a placeholder still reads as a sentence.
+
+    Markdown furniture is stripped before counting — `-`, `*`, `#`, `>` and the bold/emphasis
+    runs around a label — so `**Goal:** <1 sentence>` is judged on `Goal:`, which is what it
+    actually says. Without that, a template line dressed in bullet syntax would count its own
+    decoration as prose and slip through.
+    """
+    if not _PLACEHOLDER_RE.search(line):
+        return False
+    stripped = _PLACEHOLDER_RE.sub(" ", line)
+    stripped = re.sub(r"[*_`#>~|\[\]()]+", " ", stripped)
+    words = [w for w in re.split(r"[\s:;,.\-/]+", stripped) if w.strip()]
+    return len(words) < _MIN_PROSE_WORDS
 
 
 def detect_contamination(summary: str, raw: str) -> str | None:
     """Return a short reason if `summary` looks like copied template text, else None."""
     if not summary or not summary.strip():
         return "empty"
-    if _PLACEHOLDER_RE.search(summary):
+    if any(_scaffold_line(line) for line in summary.splitlines()):
         return "placeholder_token"
     for res in _RESIDUE_RES:
         if res.search(summary):
@@ -113,8 +168,4 @@ def build_fallback_note(raw: str) -> str:
         or any(res.search(first_user) for res in _RESIDUE_RES)
     ):
         first_user = ""
-    marker = (
-        "- Summary suppressed: source contained template/skill text the summarizer could "
-        "not describe without copying it (contamination guard)."
-    )
-    return f"- User turn: {first_user}\n{marker}" if first_user else marker
+    return f"- User turn: {first_user}\n{SUPPRESSION_MARKER}" if first_user else SUPPRESSION_MARKER

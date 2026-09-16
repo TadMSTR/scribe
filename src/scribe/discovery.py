@@ -85,11 +85,18 @@ def iter_transcripts(
 def scan(cfg: Config, store: Store, *, now: float | None = None) -> list[SessionRow]:
     """Observe every transcript, update state, and return those ready to summarize.
 
-    A session is ready when it has been idle past the quiet period **and** has bytes that
-    have not been read yet. The second half is what stops a completed session from being
-    re-summarized on every scan for the rest of its life — without it, "idle for 15 minutes"
-    is permanently true of every transcript that will never be touched again, which is most
-    of them.
+    A session is ready when it has been idle past the quiet period **and** either has bytes
+    that have not been read yet, or holds a stand-in block with retry budget left.
+
+    The unread-bytes half is what stops a completed session from being re-summarized on every
+    scan for the rest of its life — without it, "idle for 15 minutes" is permanently true of
+    every transcript that will never be touched again, which is most of them.
+
+    The provisional half is what makes a lost digest recoverable (vikunja#872, #868). Note
+    that readiness has never consulted `status`, and still does not: a `failed` session was
+    re-offered by the byte check alone, which is why one reached 12 summarization calls. The
+    new branch is not "also retry failures" — it is a *bounded* offer for the sessions whose
+    block on disk is admittedly not an answer. See `SessionRow.is_retryable_provisional`.
     """
     quiet_seconds = cfg.quiet_period_minutes * 60
     ready: list[SessionRow] = []
@@ -104,7 +111,7 @@ def scan(cfg: Config, store: Store, *, now: float | None = None) -> list[Session
             if row.status != STATUS_ACTIVE:
                 store.set_status(str(found.path), STATUS_ACTIVE)
             continue
-        if not row.has_unread_bytes:
+        if not (row.has_unread_bytes or row.is_retryable_provisional):
             continue
         if row.status != STATUS_COMPLETE:
             store.set_status(str(found.path), STATUS_COMPLETE)

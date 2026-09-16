@@ -7,6 +7,7 @@ import json
 import pytest
 
 from scribe.summarize.schema import (
+    MAX_DONE_ITEMS,
     MAX_ITEMS,
     MAX_ROLLUP_ITEMS,
     SCHEMA_VERSION,
@@ -101,7 +102,9 @@ def test_a_json_array_is_rejected() -> None:
 
 def test_item_cap_is_enforced() -> None:
     with pytest.raises(SchemaError, match="more than the"):
-        parse({"asked": "a", "done": [f"item {i}" for i in range(MAX_ITEMS + 1)]})
+        parse({"asked": "a", "done": [f"item {i}" for i in range(MAX_DONE_ITEMS + 1)]})
+    with pytest.raises(SchemaError, match="more than the"):
+        parse({"asked": "a", "done": ["d"], "found": [f"f{i}" for i in range(MAX_ITEMS + 1)]})
 
 
 def test_long_items_are_truncated_not_rejected() -> None:
@@ -176,24 +179,56 @@ def test_a_rollup_backed_field_takes_the_real_over_cap_session() -> None:
     assert len(d.tickets) == 58
 
 
-def test_the_free_text_cap_is_genuinely_lower_than_the_rollup_cap() -> None:
-    """One constant cannot guard both classes, which is the whole argument of #849.
+def test_there_are_three_distinct_caps_not_one() -> None:
+    """One constant cannot guard three classes of field, which is the argument of #849 and
+    then again of #872.
 
-    `tickets` is bounded by the log's own rollup; `done` is unbounded model prose. A refactor
-    that collapses the two back into a single constant fails here whichever value it picks.
+    `tickets` is bounded by the log's own rollup. `found` is unbounded model prose. `done` is
+    prose too, but prose *about* a bounded thing — the session's commands — so its ceiling is
+    the input's, not zero and not the rollup's. A refactor that collapses any two of these
+    back into one constant fails here whichever value it picks.
     """
-    assert MAX_ITEMS < MAX_ROLLUP_ITEMS
+    assert MAX_ITEMS < MAX_ROLLUP_ITEMS < MAX_DONE_ITEMS
     size = MAX_ROLLUP_ITEMS
     assert len(parse({"asked": "a", "done": ["x"], "tickets": ["#1"] * size}).tickets) == size
     with pytest.raises(SchemaError, match="more than the"):
-        parse({"asked": "a", "done": [f"d{i}" for i in range(size)]})
+        parse({"asked": "a", "done": ["x"], "found": [f"f{i}" for i in range(size)]})
+
+
+@pytest.mark.parametrize("observed", [41, 42, 43, 44, 45, 46, 47, 49, 53, 65, 67])
+def test_every_done_length_that_cost_a_session_now_parses(observed: int) -> None:
+    """The uncensored failure tail from production, item for item.
+
+    These are the exact `done` lengths that appeared in `field 'done' has N items` across 30
+    distinct rejections — every one of them a whole session written as a placeholder instead
+    of a digest (vikunja#872). No other field violated a cap once.
+
+    Asserted individually rather than as "67 < the cap" so the test names what it is
+    protecting. A cap moved back under any of these breaks a case with a session behind it.
+    """
+    d = parse({"asked": "a", "done": [f"d{i}" for i in range(observed)]})
+    assert len(d.done) == observed
+
+
+def test_the_done_cap_clears_the_measured_input_ceiling() -> None:
+    """187 is `rollup.commands`' maximum across the 442 persisted event logs, and `commands`
+    is the material `done` has to cover.
+
+    This is the bound the cap was actually chosen against, and the reason it is not 100:
+    38 sessions in that corpus carry more than 100 commands, so a cap of 100 would have
+    reproduced #872 with a bigger number. The written digests cannot supply this number —
+    they are right-censored at whatever the cap is.
+    """
+    assert MAX_DONE_ITEMS > 187
+    d = parse({"asked": "a", "done": [f"d{i}" for i in range(187)]})
+    assert len(d.done) == 187
 
 
 def test_a_cap_violation_is_not_retryable() -> None:
     """It is a property of the input: every attempt sees the same log and overruns the same
     way. Retrying bought two more ~50k-token calls for an identical rejection."""
     with pytest.raises(SchemaError) as exc:
-        parse({"asked": "a", "done": [f"d{i}" for i in range(MAX_ITEMS + 1)]})
+        parse({"asked": "a", "done": [f"d{i}" for i in range(MAX_DONE_ITEMS + 1)]})
     assert exc.value.retryable is False
 
 
