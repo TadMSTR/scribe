@@ -94,10 +94,34 @@ def _complete_blocks(text: str) -> dict[str, str]:
     a session would be lost forever: `append_block` would skip it, and the store would too.
     Omitting it makes the next sweep rewrite it.
     """
-    closed = {m.group(1) for m in TERMINATOR_RE.finditer(text)}
-    return {
-        m.group(2): (m.group(4) or "") for m in ANCHOR_RE.finditer(text) if m.group(2) in closed
-    }
+    return {a.group(2): (a.group(4) or "") for a, _c in paired_blocks(text)}
+
+
+def paired_blocks(text: str) -> list[tuple[re.Match[str], re.Match[str]]]:
+    """Each anchor with **its own** terminator, where the two are adjacent and in order.
+
+    A block's extent is the span between them, so pairing has to be exact. Two things make a
+    naive pairing wrong, and both are real:
+
+      * **A model can emit a terminator.** One digest in the live corpus contains the literal
+        text `<!-- /scribe turn:... -->`, because the session was *about* this format. Taking
+        the first terminator after an anchor would end the block inside its own body; a global
+        set of "uuids that appear as a terminator somewhere" would mark a torn block closed.
+      * **A torn write leaves an anchor with no terminator.** The next block's terminator must
+        not be borrowed to close it — that is the exact failure `terminator()` was added to
+        make detectable, and borrowing would hide it again.
+
+    So: scan to the next anchor, and accept only a terminator carrying this anchor's own uuid.
+    """
+    anchors = list(ANCHOR_RE.finditer(text))
+    out: list[tuple[re.Match[str], re.Match[str]]] = []
+    for i, a in enumerate(anchors):
+        limit = anchors[i + 1].start() if i + 1 < len(anchors) else len(text)
+        for c in TERMINATOR_RE.finditer(text, a.end(), limit):
+            if c.group(1) == a.group(2):
+                out.append((a, c))
+                break
+    return out
 
 
 def _read(path: Path) -> str:
@@ -185,13 +209,10 @@ def replace_block(
         return False
 
     start = end = -1
-    for m in ANCHOR_RE.finditer(text):
-        if m.group(2) != turn_uuid:
+    for a, c in paired_blocks(text):
+        if a.group(2) != turn_uuid:
             continue
-        close = TERMINATOR_RE.search(text, m.end())
-        if close is None:
-            return False
-        start, end = m.start(), close.end()
+        start, end = a.start(), c.end()
         break
     if start < 0:
         return False

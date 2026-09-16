@@ -445,3 +445,85 @@ def test_the_temp_file_is_owner_only_before_the_rename(tmp_path, monkeypatch) ->
     )
     assert seen, "the replace path did not go through os.replace"
     assert all(mode & 0o077 == 0 for mode in seen), f"temp file was {seen!r} at rename"
+
+
+# --- a model can emit the block structure it is describing ----------------------------
+
+
+#: Taken verbatim from a digest in the live corpus (developer/2026-09-15.md). The session was
+#: about the QC gate's treatment of the terminator, so the digest quotes the terminator.
+_MODEL_EMITTED_TERMINATOR = (
+    "- QC gate defect: terminator <!-- /scribe turn:... --> was read as a /scribe path claim\n"
+)
+
+
+def test_a_terminator_inside_a_body_does_not_end_the_block(tmp_path) -> None:
+    """The extent of a block is the span between an anchor and *its own* terminator.
+
+    Taking the first terminator after the anchor would end the block inside its own body, so
+    a replace would cut there and orphan the rest — including the real terminator, which
+    would then close the *next* block.
+    """
+    path = daily_path(tmp_path, "research", WHEN)
+    append_block(
+        path,
+        body="- before\n" + _MODEL_EMITTED_TERMINATOR + "- after\n",
+        session_id="s1",
+        turn_uuid="u1",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+        provisional="placeholder",
+    )
+    assert provisional_turns(path) == {"u1": "placeholder"}
+
+    assert append_block(
+        path,
+        body="- recovered\n",
+        session_id="s1",
+        turn_uuid="u1",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+    )
+    text = path.read_text()
+    assert "- recovered" in text
+    assert "- before" not in text and "- after" not in text
+    assert "/scribe turn:..." not in text
+    assert text.count("<!-- /scribe turn:u1 -->") == 1
+    assert existing_turns(path) == {"u1"}
+
+
+def test_a_body_terminator_for_a_real_uuid_does_not_close_a_torn_block(tmp_path) -> None:
+    """A global "uuids seen as a terminator" set would mark a torn block complete.
+
+    That is the exact failure `terminator()` exists to make detectable: an anchor above a
+    truncated body, with both dedup guards agreeing never to retry it.
+    """
+    path = daily_path(tmp_path, "research", WHEN)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# 2026-09-13\n\n## Session 14:52\n\n"
+        "<!-- session:s1 turn:torn transcript:/h/t.jsonl -->\n"
+        "**Asked:** truncated mid-w"
+        # the next block's body happens to quote the torn block's terminator
+        "\n\n## Session 15:10\n\n"
+        "<!-- session:s2 turn:later transcript:/h/u.jsonl -->\n"
+        "- discussed <!-- /scribe turn:torn -->\n"
+        "<!-- /scribe turn:later -->\n"
+    )
+    assert existing_turns(path) == {"later"}
+    assert "torn" not in existing_turns(path)
+
+
+def test_a_torn_block_does_not_borrow_the_next_blocks_terminator(tmp_path) -> None:
+    """Scanning past the next anchor would close a torn block with a stranger's terminator."""
+    path = daily_path(tmp_path, "research", WHEN)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# 2026-09-13\n\n"
+        "<!-- session:s1 turn:torn transcript:/h/t.jsonl -->\n"
+        "**Asked:** truncated mid-w\n"
+        "<!-- session:s2 turn:whole transcript:/h/u.jsonl -->\n"
+        "**Asked:** fine\n"
+        "<!-- /scribe turn:whole -->\n"
+    )
+    assert existing_turns(path) == {"whole"}

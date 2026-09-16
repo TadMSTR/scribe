@@ -39,8 +39,8 @@ from .writeback import (
     ANCHOR_RE,
     PROVISIONAL_PLACEHOLDER,
     PROVISIONAL_SUPPRESSED,
-    TERMINATOR_RE,
     atomic_replace,
+    paired_blocks,
 )
 
 
@@ -70,10 +70,7 @@ def scan_corpus(output_dir: Path) -> list[Found]:
             text = md.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for m in ANCHOR_RE.finditer(text):
-            close = TERMINATOR_RE.search(text, m.end())
-            if close is None or close.group(1) != m.group(2):
-                continue
+        for m, close in paired_blocks(text):
             body = text[m.end() : close.start()]
             if PLACEHOLDER_MARKER in body:
                 kind = PROVISIONAL_PLACEHOLDER
