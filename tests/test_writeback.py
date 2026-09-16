@@ -527,3 +527,57 @@ def test_a_torn_block_does_not_borrow_the_next_blocks_terminator(tmp_path) -> No
         "<!-- /scribe turn:whole -->\n"
     )
     assert existing_turns(path) == {"whole"}
+
+
+def test_a_quoted_anchor_does_not_hide_the_block_containing_it(tmp_path) -> None:
+    """A complete, FINAL digest whose body quotes an anchor must stay visible.
+
+    Regression from `56ab8ce`, found by the 2026-09-16 audit's adjacent finding. That commit
+    bounded the terminator search at the next anchor to stop a torn block borrowing a
+    stranger's terminator — correct — but an anchor quoted inside a body then became that
+    bound, putting the containing block's own terminator out of range. The block read as
+    torn, dropped out of `existing_turns` AND `provisional_turns`, and the next sweep would
+    have appended a duplicate over a perfectly good digest.
+
+    The pre-`56ab8ce` code got this case right, so the fix has to hold both: a quoted
+    terminator must not close a block, and a quoted anchor must not open one.
+    """
+    path = daily_path(tmp_path, "research", WHEN)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# 2026-09-13\n\n## Session 14:52\n\n"
+        "<!-- session:s1 turn:real transcript:/h/x.jsonl -->\n"
+        "**Asked:** How the anchor format works\n"
+        "- The anchor is <!-- session:s2 turn:other transcript:/h/y.jsonl --> on its own line\n"
+        "<!-- /scribe turn:real -->\n"
+    )
+    assert existing_turns(path) == {"real"}
+    assert provisional_turns(path) == {}
+
+
+def test_structure_is_recognised_only_alone_on_a_line(tmp_path) -> None:
+    """The discriminator, stated directly.
+
+    Every block scribe writes puts its anchor and terminator on their own lines, and the live
+    corpus bears that out exactly: 444 of 444 anchors and 444 of 445 terminators are alone on
+    theirs — the one exception being the quoted terminator that started all of this.
+    """
+    from scribe.writeback import ANCHOR_RE, TERMINATOR_RE
+
+    assert ANCHOR_RE.search("<!-- session:s turn:t transcript:/p.jsonl -->")
+    assert TERMINATOR_RE.search("<!-- /scribe turn:t -->")
+    assert not ANCHOR_RE.search("see <!-- session:s turn:t transcript:/p.jsonl -->")
+    assert not ANCHOR_RE.search("<!-- session:s turn:t transcript:/p.jsonl --> see")
+    assert not TERMINATOR_RE.search("- terminator <!-- /scribe turn:t --> was misread")
+
+
+def test_the_patterns_never_span_a_newline() -> None:
+    """`\\s` matches a newline; `[ \\t]` does not.
+
+    With `(?m)^...$` anchoring, a `\\s`-based separator could start on one line and finish on
+    the next, which would defeat the line anchoring it is paired with.
+    """
+    from scribe.writeback import ANCHOR_RE, TERMINATOR_RE
+
+    assert not ANCHOR_RE.search("<!-- session:s turn:t transcript:/p.jsonl\n-->")
+    assert not TERMINATOR_RE.search("<!-- /scribe\nturn:t -->")

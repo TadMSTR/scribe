@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from scribe.recover_cli import recover, scan_corpus
+from scribe.recover_cli import recover, scan_corpus, stamp
 from scribe.state import STATUS_COMPLETE, Store
 from scribe.summarize.contamination import SUPPRESSION_MARKER
 from scribe.summarize.render import PLACEHOLDER_MARKER, render_failure, render_suppressed
@@ -174,3 +174,48 @@ def test_stamping_survives_several_blocks_in_one_file(corpus) -> None:
     assert text.count("provisional:") == 2
     assert text.count("<!-- session:") == 3
     assert text.startswith("# 2026-08-19\n")
+
+
+# --- MEDIUM, 2026-09-16 audit: stamp must rewrite the block it found ------------------
+
+
+def test_stamp_rewrites_only_the_block_scan_found(corpus) -> None:
+    """The audit's finding: `stamp` keyed on uuid text, not on the occurrence it identified.
+
+    `ANCHOR_RE.sub` ran over the whole file and rewrote every match whose `turn` group was in
+    `wanted` — so a second anchor-shaped substring carrying a found block's uuid was stamped
+    too. `scan_corpus` already knows which occurrence is the real block; looking it up again
+    by uuid discards that and guesses.
+
+    Here the *good* block's body quotes the provisional block's anchor. Only the real
+    provisional anchor may gain the attribute.
+    """
+    cfg, store, md, paths = corpus
+    text = md.read_text()
+    quoted = f"<!-- session:sess-u-lost turn:u-lost transcript:{paths['lost']} -->"
+    text = text.replace(
+        "**Asked:** A real question\n",
+        f"**Asked:** A real question\n- the lost block's anchor is {quoted} inline\n",
+    )
+    md.write_text(text)
+
+    recover(cfg, store, apply=True)
+    out = md.read_text()
+
+    assert out.count("provisional:placeholder") == 1
+    assert "inline" in out
+    # the quoted copy is untouched, character for character
+    assert f"is {quoted} inline" in out
+    assert provisional_turns(md) == {"u-lost": "placeholder", "u-supp": "suppressed"}
+    assert "u-good" in existing_turns(md)
+
+
+def test_a_stale_span_is_skipped_rather_than_written_blind(corpus) -> None:
+    """If the file changes between scan and stamp, the recorded offsets no longer describe
+    an anchor. Writing at a stale offset is the one case that would land the attribute
+    somewhere arbitrary, so the splice re-checks the span and skips when it does not match."""
+    cfg, _store, md, _paths = corpus
+    found = scan_corpus(Path(cfg.output_dir))
+    md.write_text("# 2026-08-19\n\nfile replaced between scan and stamp\n")
+    assert stamp(md, found) == 0
+    assert md.read_text() == "# 2026-08-19\n\nfile replaced between scan and stamp\n"

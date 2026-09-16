@@ -44,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a filesystem stat and the id is inside the transcript — which made it look like a usable
   join key when it matched nothing.
 
+- **`recover` stamped anchors by uuid text rather than by the block it found**
+  (audit finding, Medium). `ANCHOR_RE.sub` rewrote every anchor-shaped match carrying a found
+  block's uuid, including one quoted inside another block's body. `stamp` now splices the exact
+  byte spans `scan_corpus` recorded, in reverse order, re-checking each span before writing.
+
+- **An anchor or terminator is recognised only alone on its line.** A digest body can contain
+  this syntax — one live digest quotes the terminator, because the session was about the
+  format. Bounding the terminator search at the next anchor (the first half of this fix) made
+  a *quoted* anchor able to hide the block containing it: the containing block's real
+  terminator fell outside the bound, so a complete, final digest read as torn and invited a
+  duplicate over the top of it. Line anchoring separates structure from quotation, and matches
+  the live corpus exactly: 444 of 444 anchors and 444 of 445 terminators are alone on theirs.
+
 ### Added
 
 - **`scribe recover`** — reopens sessions whose digest was never written, for blocks that

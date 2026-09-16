@@ -38,9 +38,19 @@ from pathlib import Path
 
 from .paths import secure_create, secure_dir, secure_file
 
+#: An anchor, **alone on its line**. The line anchoring is the load-bearing part, not
+#: punctuation: a digest body can contain this syntax, because sessions about scribe's own
+#: format produce digests that quote it — one live digest quotes the terminator, for exactly
+#: that reason. Every block scribe writes puts the anchor on its own line (`_block`), and all
+#: 444 anchors in the live corpus are alone on theirs, while the one quoted terminator is
+#: embedded in prose. So "alone on the line" separates structure from quotation with no
+#: false positives and no false negatives on the real corpus.
+#:
+#: Horizontal whitespace only (`[ \t]`, never `\s`): `\s` matches a newline, which would let
+#: a match run across lines and defeat the anchoring it is paired with.
 ANCHOR_RE = re.compile(
-    r"<!--\s*session:(\S+)\s+turn:(\S+)\s+transcript:(\S+?)"
-    r"(?:\s+provisional:(\S+))?\s*-->"
+    r"(?m)^<!--[ \t]*session:(\S+)[ \t]+turn:(\S+)[ \t]+transcript:(\S+?)"
+    r"(?:[ \t]+provisional:(\S+))?[ \t]*-->[ \t]*$"
 )
 
 #: A block whose body is a marked placeholder — `render_failure` output. The summary is gone.
@@ -49,7 +59,7 @@ PROVISIONAL_PLACEHOLDER = "placeholder"
 PROVISIONAL_SUPPRESSED = "suppressed"
 #: Written after the body. Its presence is what proves the block was written whole --
 #: see `existing_turns`.
-TERMINATOR_RE = re.compile(r"<!--\s*/scribe\s+turn:(\S+)\s*-->")
+TERMINATOR_RE = re.compile(r"(?m)^<!--[ \t]*/scribe[ \t]+turn:(\S+)[ \t]*-->[ \t]*$")
 
 
 def terminator(turn_uuid: str) -> str:
@@ -103,10 +113,15 @@ def paired_blocks(text: str) -> list[tuple[re.Match[str], re.Match[str]]]:
     A block's extent is the span between them, so pairing has to be exact. Two things make a
     naive pairing wrong, and both are real:
 
-      * **A model can emit a terminator.** One digest in the live corpus contains the literal
-        text `<!-- /scribe turn:... -->`, because the session was *about* this format. Taking
-        the first terminator after an anchor would end the block inside its own body; a global
-        set of "uuids that appear as a terminator somewhere" would mark a torn block closed.
+      * **A model can emit either half of the syntax.** One digest in the live corpus contains
+        the literal text `<!-- /scribe turn:... -->`, because the session was *about* this
+        format. Taking the first terminator after an anchor would end the block inside its own
+        body; a global set of "uuids that appear as a terminator somewhere" would mark a torn
+        block closed. The **anchor** half is the more dangerous one and is handled by
+        `ANCHOR_RE`'s line anchoring rather than here: a quoted anchor inside a body would
+        otherwise become the `limit` below, putting the containing block's real terminator out
+        of range and making a complete, final digest read as torn — which is an invitation to
+        append a duplicate over the top of it.
       * **A torn write leaves an anchor with no terminator.** The next block's terminator must
         not be borrowed to close it — that is the exact failure `terminator()` was added to
         make detectable, and borrowing would hide it again.

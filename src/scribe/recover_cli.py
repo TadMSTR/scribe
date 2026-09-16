@@ -26,7 +26,6 @@ any row written before that.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,8 +52,11 @@ class Found:
     transcript_path: str
     kind: str
     #: True when the anchor already says so. False means a block from before the marker
-    #: existed, which is every one of the 30 this was written for.
+    #: existed, which is every one of the 22 this was written for.
     stamped: bool
+    #: Byte span of **this** anchor in the file. Carried so `stamp` can rewrite the exact
+    #: occurrence `paired_blocks` identified, rather than re-finding it by uuid.
+    span: tuple[int, int]
 
 
 def scan_corpus(output_dir: Path) -> list[Found]:
@@ -85,6 +87,7 @@ def scan_corpus(output_dir: Path) -> list[Found]:
                     transcript_path=m.group(3),
                     kind=kind,
                     stamped=bool(m.group(4)),
+                    span=(m.start(), m.end()),
                 )
             )
     return found
@@ -93,25 +96,41 @@ def scan_corpus(output_dir: Path) -> list[Found]:
 def stamp(path: Path, blocks: list[Found]) -> int:
     """Write `provisional:` into the anchors of `blocks`, all of which are in `path`.
 
-    One read-modify-replace per file rather than per block: rewriting the same file once per
-    stamped anchor would make the offsets of every later match stale.
+    **Splices the exact byte spans `scan_corpus` recorded**, rather than re-finding the
+    anchors by uuid. The difference is not stylistic. The previous version ran
+    `ANCHOR_RE.sub` over the whole file and decided per match on `wanted.get(turn)`, which
+    rewrites *every* anchor-shaped match carrying that uuid — including one quoted inside
+    another block's body, which this corpus has already been shown to produce for the
+    terminator half of the syntax. `scan_corpus` knows which occurrence is the real block; a
+    uuid lookup throws that knowledge away and then guesses. (MEDIUM, scribe-digest-loss
+    audit 2026-09-16.)
+
+    Spans are applied in reverse order so that each splice cannot shift the offsets of the
+    ones not yet applied. One read-modify-replace per file for the same reason.
     """
     text = path.read_text(encoding="utf-8", errors="replace")
-    wanted = {b.turn_uuid: b.kind for b in blocks if not b.stamped}
-    if not wanted:
+    pending = sorted((b for b in blocks if not b.stamped), key=lambda b: b.span, reverse=True)
+    if not pending:
         return 0
 
-    def sub(m: re.Match[str]) -> str:
-        session, turn, transcript, existing = m.groups()
-        kind = wanted.get(turn, existing)
-        tail = f" provisional:{kind}" if kind else ""
-        return f"<!-- session:{session} turn:{turn} transcript:{transcript}{tail} -->"
+    updated = text
+    for b in pending:
+        start, end = b.span
+        m = ANCHOR_RE.match(text, start, end)
+        if m is None or m.group(2) != b.turn_uuid:
+            # The file changed under us between scan and stamp. Skipping is correct: a stale
+            # span is the one case where writing would land the attribute somewhere arbitrary.
+            continue
+        session, turn, transcript, _existing = m.groups()
+        replacement = (
+            f"<!-- session:{session} turn:{turn} transcript:{transcript} provisional:{b.kind} -->"
+        )
+        updated = updated[:start] + replacement + updated[end:]
 
-    updated = ANCHOR_RE.sub(sub, text)
     if updated == text:
         return 0
     atomic_replace(path, updated)
-    return len(wanted)
+    return len(pending)
 
 
 def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
