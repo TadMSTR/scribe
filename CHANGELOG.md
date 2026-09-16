@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-16
+
+**Minor, not patch.** These are bug fixes, but two of them change contracts: `scribe recover`
+is a new verb, and a digest block's anchor now carries a `provisional:` attribute. Absent
+attribute still means a finished digest, so every block written by 0.1.0 reads correctly
+without being rewritten — but the format grew, and a release that says "patch" while adding a
+subcommand and an on-disk field is lying to whoever reads the tag.
+
+**What this release is.** 0.1.0 shipped with two defects that between them wrote a placeholder
+instead of a digest for ~5% of sessions, and a third that made those losses permanent and
+invisible. 22 blocks had no usable digest behind them; 20 have been recovered, 2 cannot be
+(their transcripts are deleted — vikunja#873).
+
 ### Fixed
 
 - **`done`'s item cap was below its real ceiling, and cost 30 sessions their digest**
