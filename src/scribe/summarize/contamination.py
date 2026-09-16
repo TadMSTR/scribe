@@ -75,6 +75,15 @@ RETRY_REMINDER = (
 )
 
 
+#: The line that identifies a suppression block on disk. A constant for the same reason as
+#: `render.PLACEHOLDER_MARKER`: `scribe recover` matches it against a corpus written before
+#: provisional anchors existed.
+SUPPRESSION_MARKER = (
+    "- Summary suppressed: source contained template/skill text the summarizer could "
+    "not describe without copying it (contamination guard)."
+)
+
+
 def _normalize_line(s: str) -> str:
     return s.strip().lstrip("-*# ").strip()
 
@@ -159,8 +168,4 @@ def build_fallback_note(raw: str) -> str:
         or any(res.search(first_user) for res in _RESIDUE_RES)
     ):
         first_user = ""
-    marker = (
-        "- Summary suppressed: source contained template/skill text the summarizer could "
-        "not describe without copying it (contamination guard)."
-    )
-    return f"- User turn: {first_user}\n{marker}" if first_user else marker
+    return f"- User turn: {first_user}\n{SUPPRESSION_MARKER}" if first_user else SUPPRESSION_MARKER

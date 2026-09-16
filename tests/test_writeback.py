@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from scribe.writeback import anchor, append_block, daily_path, existing_turns
+from scribe.writeback import (
+    anchor,
+    append_block,
+    daily_path,
+    existing_turns,
+    provisional_turns,
+    replace_block,
+)
 
 WHEN = datetime(2026, 9, 13, 14, 52, tzinfo=UTC)
 
@@ -121,7 +128,36 @@ def test_anchor_format_is_parseable_by_its_own_regex() -> None:
 
     m = ANCHOR_RE.search(anchor("s", "t", "/p.jsonl"))
     assert m is not None
-    assert m.groups() == ("s", "t", "/p.jsonl")
+    assert m.groups() == ("s", "t", "/p.jsonl", None)
+
+
+def test_a_provisional_anchor_is_parseable_and_a_final_one_carries_no_attribute() -> None:
+    """The attribute is optional in the regex, and absent from a final block's anchor.
+
+    That absence is load-bearing rather than cosmetic: 444 blocks were on disk before this
+    existed, all of them real digests, and they have to keep reading as final without being
+    rewritten. "No attribute" has always meant finished, so it still does.
+    """
+    from scribe.writeback import ANCHOR_RE
+
+    assert " provisional:" not in anchor("s", "t", "/p.jsonl")
+    m = ANCHOR_RE.search(anchor("s", "t", "/p.jsonl", "placeholder"))
+    assert m is not None
+    assert m.groups() == ("s", "t", "/p.jsonl", "placeholder")
+
+
+def test_a_pre_existing_anchor_still_reads_as_final(tmp_path) -> None:
+    """A block written before provisional markers existed, byte for byte from the corpus."""
+    path = tmp_path / "d" / "2026-08-19.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "# 2026-08-19\n\n## Session 09:14\n\n"
+        "<!-- session:a278a0f2 turn:a6c70569 transcript:/h/t.jsonl -->\n"
+        "**Asked:** Something real\n"
+        "<!-- /scribe turn:a6c70569 -->\n"
+    )
+    assert existing_turns(path) == {"a6c70569"}
+    assert provisional_turns(path) == {}
 
 
 @pytest.mark.parametrize("agent", ["research", "developer", "writer"])
@@ -204,3 +240,175 @@ def test_a_digest_carries_no_expires_frontmatter(tmp_path) -> None:
     # And no YAML frontmatter block at all -- `expires` is only reachable inside one, so the
     # absence of the container is the durable form of the claim.
     assert not text.lstrip().startswith("---")
+
+
+# --- #872/#868: a provisional block is replaceable, a final one is not ----------------
+
+
+def _append_provisional(
+    root: Path, kind="placeholder", turn="u1", body="**Summary unavailable**\n"
+):
+    path = daily_path(root, "research", WHEN)
+    append_block(
+        path,
+        body=body,
+        session_id="s1",
+        turn_uuid=turn,
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+        provisional=kind,
+    )
+    return path
+
+
+@pytest.mark.parametrize("kind", ["placeholder", "suppressed"])
+def test_a_real_digest_replaces_a_provisional_block(tmp_path, kind: str) -> None:
+    """The write-side half of the fix, and the exact 30-session failure.
+
+    Before this, the second call returned False: the uuid was on disk, so the digest that had
+    just been generated and paid for was discarded, and the state was then marked summarized.
+    """
+    path = _append_provisional(tmp_path, kind=kind)
+    assert provisional_turns(path) == {"u1": kind}
+
+    assert append_block(
+        path,
+        body="- Ran the real work\n",
+        session_id="s1",
+        turn_uuid="u1",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+    )
+    text = path.read_text()
+    assert "- Ran the real work" in text
+    assert "Summary unavailable" not in text
+    assert existing_turns(path) == {"u1"}
+    assert provisional_turns(path) == {}
+
+
+def test_replacing_leaves_exactly_one_block_and_one_heading(tmp_path) -> None:
+    """A replace must not become an append. Duplicate blocks under one turn uuid is the
+    class of bug the anchor exists to prevent (vikunja#844), and a rewrite is the one path
+    that could reintroduce it."""
+    path = _append_provisional(tmp_path)
+    append_block(
+        path,
+        body="- Ran the real work\n",
+        session_id="s1",
+        turn_uuid="u1",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+    )
+    text = path.read_text()
+    assert text.count("<!-- session:") == 1
+    assert text.count("<!-- /scribe turn:u1 -->") == 1
+    assert text.count("## Session ") == 1
+    assert text.count("# 2026-09-13") == 1
+    assert text.endswith("\n")
+
+
+def test_replacing_preserves_the_blocks_around_it(tmp_path) -> None:
+    """The neighbours are the reason this reads the file rather than truncating to the
+    anchor: a daily file holds every session for that agent that day."""
+    path = daily_path(tmp_path, "research", WHEN)
+    _append(tmp_path, turn="before", body="- earlier session\n")
+    _append_provisional(tmp_path, turn="middle")
+    _append(tmp_path, turn="after", body="- later session\n")
+
+    assert append_block(
+        path,
+        body="- recovered\n",
+        session_id="s1",
+        turn_uuid="middle",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+    )
+    text = path.read_text()
+    assert "- earlier session" in text
+    assert "- later session" in text
+    assert "- recovered" in text
+    assert existing_turns(path) == {"before", "middle", "after"}
+    assert text.index("earlier") < text.index("recovered") < text.index("later")
+
+
+def test_a_final_block_is_never_overwritten(tmp_path) -> None:
+    """The check order matters. A real digest must survive a later placeholder for the same
+    turn — otherwise a transient provider failure on a re-run could destroy a good digest,
+    which would be a strictly worse bug than the one being fixed."""
+    path, _ = _append(tmp_path, body="- the real digest\n")
+    assert not append_block(
+        path,
+        body="**Summary unavailable**\n",
+        session_id="s1",
+        turn_uuid="u1",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+        provisional="placeholder",
+    )
+    assert "- the real digest" in path.read_text()
+    assert "Summary unavailable" not in path.read_text()
+
+
+def test_a_placeholder_can_be_replaced_by_another_placeholder(tmp_path) -> None:
+    """A retry that fails again refreshes the stand-in rather than stacking a second one."""
+    path = _append_provisional(tmp_path, body="**Summary unavailable** attempt 1\n")
+    assert append_block(
+        path,
+        body="**Summary unavailable** attempt 2\n",
+        session_id="s1",
+        turn_uuid="u1",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+        provisional="placeholder",
+    )
+    text = path.read_text()
+    assert text.count("<!-- session:") == 1
+    assert "attempt 2" in text and "attempt 1" not in text
+    assert provisional_turns(path) == {"u1": "placeholder"}
+
+
+def test_replace_block_refuses_a_turn_that_is_not_provisional(tmp_path) -> None:
+    path, _ = _append(tmp_path)
+    assert not replace_block(
+        path, body="x\n", session_id="s1", turn_uuid="u1", transcript_path="/h/t.jsonl"
+    )
+    assert not replace_block(
+        path, body="x\n", session_id="s1", turn_uuid="nope", transcript_path="/h/t.jsonl"
+    )
+
+
+def test_a_torn_provisional_block_is_not_replaced(tmp_path) -> None:
+    """No terminator means the block was never written whole, so its extent is unknown.
+
+    Rewriting from an anchor to a guessed end would corrupt whatever followed. Reporting it
+    as neither final nor provisional makes the next sweep append a fresh block instead, which
+    is the same answer `existing_turns` has always given for a tear.
+    """
+    path = daily_path(tmp_path, "research", WHEN)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# 2026-09-13\n\n## Session 14:52\n\n"
+        "<!-- session:s1 turn:u1 transcript:/h/t.jsonl provisional:placeholder -->\n"
+        "**Summary unavail"
+    )
+    assert provisional_turns(path) == {}
+    assert existing_turns(path) == set()
+    assert not replace_block(
+        path, body="x\n", session_id="s1", turn_uuid="u1", transcript_path="/h/t.jsonl"
+    )
+
+
+def test_the_replaced_file_keeps_owner_only_permissions(tmp_path) -> None:
+    """Digests are derived from 0600 transcripts. The temp-file-and-rename path is a second
+    place that creates a file, and a fresh temp file gets 0644 from the umask."""
+    path = _append_provisional(tmp_path)
+    append_block(
+        path,
+        body="- recovered\n",
+        session_id="s1",
+        turn_uuid="u1",
+        transcript_path="/h/t.jsonl",
+        when=WHEN,
+    )
+    assert path.stat().st_mode & 0o077 == 0
+    assert not list(path.parent.glob("*.tmp"))

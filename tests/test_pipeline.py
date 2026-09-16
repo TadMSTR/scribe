@@ -29,7 +29,13 @@ from scribe.pipeline import (
     session_when,
     summarize_run,
 )
-from scribe.state import STATUS_FAILED, STATUS_SUMMARIZED, Store
+from scribe.state import (
+    MAX_PROVISIONAL_ATTEMPTS,
+    STATUS_FAILED,
+    STATUS_PROVISIONAL,
+    STATUS_SUMMARIZED,
+    Store,
+)
 from scribe.summarize.providers import Completion, Provider, ProviderError
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -200,16 +206,107 @@ def test_a_permanent_provider_failure_writes_a_marked_placeholder(env) -> None:
     assert r.summarized is False
     (written,) = list(output_root(cfg).rglob("*.md"))
     assert "placeholder, not a summary" in written.read_text()
-    assert store.get(str(target)).status == STATUS_FAILED
+    row = store.get(str(target))
+    assert row.status == STATUS_PROVISIONAL
+    # Not `failed`: the status now says what is actually on disk. A placeholder is a block
+    # that exists and is not an answer, and the old `failed` left `last_offset` behind, so
+    # the byte check re-offered the session on every sweep forever -- 12 calls on one real
+    # session, none of which could have landed.
+    assert row.last_offset > 0
+    assert row.attempts == 1
 
 
 def test_a_failed_session_is_retried_on_the_next_sweep(env) -> None:
-    cfg, store, _t = env
+    """End to end: placeholder, then a real digest that *replaces* it.
+
+    This is the whole of #872/#868 in one test. Before the fix the second sweep really did
+    run and really did produce this digest -- and `append_block` refused it, because the
+    placeholder already held the turn uuid.
+    """
+    cfg, store, target = env
     err = ProviderError("bad request", retryable=False)
     run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
     again = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
     assert len(again) == 1
     assert again[0].summarized is True
+    assert again[0].written is True
+    assert again[0].discarded is False
+
+    (written,) = list(output_root(cfg).rglob("*.md"))
+    text = written.read_text()
+    assert "placeholder, not a summary" not in text
+    assert "provisional:" not in text
+    assert text.count("<!-- session:") == 1
+    assert store.get(str(target)).status == "summarized"
+
+
+def test_the_retry_budget_is_bounded(env) -> None:
+    """A session that keeps failing stops costing a summarization call per sweep.
+
+    The failure this guards is measured, not hypothetical: one production session reached
+    **12 attempts**, each a ~50k-token call, because a placeholder left `last_offset` behind
+    and the byte check re-offered it indefinitely.
+    """
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    for _ in range(MAX_PROVISIONAL_ATTEMPTS):
+        assert len(run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))) == 1
+    assert store.get(str(target)).attempts == MAX_PROVISIONAL_ATTEMPTS
+    assert run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err)) == []
+
+
+def test_an_exhausted_session_is_reopened_by_a_reset(env) -> None:
+    """Spending the budget is a verdict on the current code, not on the session.
+
+    Without this, "retry a bounded number of times" would mean a session lost to a bug stays
+    lost after the bug is fixed — which is exactly the 30-session position this build is in.
+    """
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    for _ in range(MAX_PROVISIONAL_ATTEMPTS):
+        run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    assert run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub()) == []
+
+    assert store.reset_for_retry(str(target)) is True
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.summarized is True and r.written is True
+
+
+def test_a_suppressed_session_is_provisional_not_summarized(env) -> None:
+    """#868's half. A suppression note went straight to `summarized` — terminal, on a session
+    that was never summarized — so a re-run skipped it and the digest never existed."""
+    cfg, store, target = env
+    scaffold = json.dumps({"asked": "x", "done": ["- <specific step>"]})
+    # Three, because the runner retries a contamination rejection with a reminder and the
+    # stub falls back to a good response once its script runs out — two would test the
+    # reminder rescuing the run, which is a different (and also correct) behaviour.
+    (r,) = run_once(
+        cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(scaffold, scaffold, scaffold)
+    )
+    assert r.suppressed is True
+    assert r.summarized is False
+    assert store.get(str(target)).status == STATUS_PROVISIONAL
+
+    (again,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert again.summarized is True
+    (written,) = list(output_root(cfg).rglob("*.md"))
+    assert "Summary suppressed" not in written.read_text()
+
+
+def test_the_session_id_column_is_populated(env) -> None:
+    """It was empty on all 441 production rows, because `scan` upserts from a filesystem stat
+    and the id lives inside the transcript. An always-empty column reads like a usable key:
+    matching the 30 affected sessions by `session_id` returned 0 of 30."""
+    cfg, store, target = env
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert store.get(str(target)).session_id
+
+
+def test_the_session_id_column_is_populated_on_the_provisional_path_too(env) -> None:
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    assert store.get(str(target)).session_id
 
 
 def test_an_unreadable_transcript_is_recorded_not_fatal(env, monkeypatch) -> None:

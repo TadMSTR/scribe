@@ -27,7 +27,12 @@ from .state import STATUS_FAILED, SessionRow, Store
 from .summarize.providers import Provider, build
 from .summarize.runner import Outcome, summarize_log
 from .telemetry import SPAN_EXTRACT, SPAN_SUMMARIZE, record_spend, set_span_attributes, span
-from .writeback import append_block, daily_path
+from .writeback import (
+    PROVISIONAL_PLACEHOLDER,
+    PROVISIONAL_SUPPRESSED,
+    append_block,
+    daily_path,
+)
 
 
 @dataclass
@@ -51,6 +56,12 @@ class SessionResult:
     #: are what make the totals readable: `written == summarized + suppressed + placeholder`.
     suppressed: bool = False
     placeholder: bool = False
+    #: A digest was produced and then NOT written, because the turn already held a final
+    #: block. This is the term that was missing from the identity above: `written` was False
+    #: while `summarized` was True, 30 times, and nothing reported the difference. The replace
+    #: path should make it unreachable; it is counted so that claim is checkable rather than
+    #: assumed.
+    discarded: bool = False
     dry_run: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
@@ -85,6 +96,7 @@ class SessionResult:
             "written": self.written,
             "suppressed": self.suppressed,
             "placeholder": self.placeholder,
+            "discarded": self.discarded,
             "dry_run": self.dry_run,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -356,6 +368,16 @@ def process_session(
     result.qc_findings = [f"{f.check}: {f.detail}" for f in report.findings]
 
     path = daily_path(cfg.output_dir, result.agent, when)
+    # What kind of body is going to disk, recorded in the block's own anchor. Empty for a real
+    # digest. This is what lets a later sweep tell a stand-in from an answer and replace it --
+    # before it existed, `append_block` refused the replacement and the digest was discarded.
+    if outcome.ok:
+        provisional = ""
+    elif outcome.suppressed:
+        provisional = PROVISIONAL_SUPPRESSED
+    else:
+        provisional = PROVISIONAL_PLACEHOLDER
+
     result.written = append_block(
         path,
         body=markdown,
@@ -363,17 +385,41 @@ def process_session(
         turn_uuid=_last_turn_uuid(log),
         transcript_path=row.transcript_path,
         when=when,
+        provisional=provisional,
     )
-    if outcome.ok or outcome.suppressed:
+    # A digest that was produced and NOT written. `append_block` returns False for a turn that
+    # is already final, and the one thing that must never happen quietly is for that to swallow
+    # a real summary -- it did, 30 times, and the run totals said `summarized` each time. The
+    # replace path should make this unreachable for a stand-in; counting it is how we find out
+    # if some other route reaches it. Same argument as the placeholder counter in #849:
+    # inferring loss from a difference between two totals is how loss stays invisible.
+    result.discarded = bool(not result.written and (outcome.ok or outcome.suppressed))
+    if result.discarded:
+        result.errors.append(
+            "digest produced but not written: the turn already holds a final block"
+        )
+
+    if outcome.ok:
         store.mark_summarized(
             row.transcript_path,
             offset=st.raw_file_bytes,
             last_turn_uuid=_last_turn_uuid(log),
             turn_uuids=pending,
+            session_id=log.session_id,
         )
     else:
-        attempts = store.record_attempt(row.transcript_path, error=outcome.reason)
-        store.set_status(row.transcript_path, STATUS_FAILED, error=outcome.reason)
+        # Provisional, not failed and not summarized. A suppression used to be marked
+        # `summarized` -- terminal on a session that was never summarized -- and a placeholder
+        # used to be marked `failed` with its offset left behind, which re-offered it on every
+        # sweep forever. Both are the same mistake from opposite ends: the status did not say
+        # what was actually on disk. See `state.STATUS_PROVISIONAL`.
+        attempts = store.mark_provisional(
+            row.transcript_path,
+            offset=st.raw_file_bytes,
+            last_turn_uuid=_last_turn_uuid(log),
+            session_id=log.session_id,
+            error=outcome.reason,
+        )
         result.errors.append(f"attempt {attempts}: {outcome.reason}")
     return result
 
@@ -418,6 +464,7 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "suppressed": sum(1 for r in results if r.suppressed),
         #: Non-zero means summaries were LOST, not merely degraded. Treat it as loud.
         "placeholders": sum(1 for r in results if r.placeholder),
+        "discarded": sum(1 for r in results if r.discarded),
         "events_total": sum(r.events for r in results),
         "secrets_redacted": sum(r.secrets_redacted for r in results),
         "post_render_redactions": sum(r.post_render_redactions for r in results),

@@ -230,17 +230,38 @@ def _with_placeholder(monkeypatch, **flags):
 
 
 def test_a_placeholder_is_reported_loudly(workspace, capsys, monkeypatch) -> None:
-    """A run that lost a summary must not read like a clean one.
+    """A run that did not write a summary must not read like a clean one.
 
     The counter existing in the JSON is not the same as an operator seeing it: the backfill
     is driven from the printed output, and `written: 5 / summarized: 4` is what made 13 lost
     sessions look like a successful run.
+
+    The wording changed with #872: a placeholder is no longer a loss, because the session is
+    retryable and the block will be replaced. It is still shouted about — it is a digest that
+    does not exist yet — but the word LOST now belongs to the `discarded` line, which is the
+    case where a digest really was destroyed.
     """
     cfg, _tmp = workspace
     _with_placeholder(monkeypatch, placeholder=True, written=True)
     run_main(["--config", str(cfg)])
     out = capsys.readouterr().out
     assert "1 placeholder(s) written" in out
+    assert "!!" in out
+    assert "scribe recover" in out
+
+
+def test_a_discarded_digest_is_the_one_reported_as_lost(workspace, capsys, monkeypatch) -> None:
+    """The genuinely unrecoverable case, and the one that was silent for 30 sessions.
+
+    `summarized` and `written: False` together mean the model produced a digest that never
+    reached disk. The replace path should make this unreachable; the line exists so that is
+    observable rather than assumed.
+    """
+    cfg, _tmp = workspace
+    _with_placeholder(monkeypatch, placeholder=False, written=False, discarded=True)
+    run_main(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert "NOT WRITTEN" in out
     assert "LOST" in out
 
 
