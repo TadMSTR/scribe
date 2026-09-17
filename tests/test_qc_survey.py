@@ -251,7 +251,7 @@ def test_home_forms_swaps_in_both_directions() -> None:
     both directions or it will attribute a tilde-written claim to the wrong bucket."""
     assert home_forms("~/repos/x.md", "/home/ted") == ["/home/ted/repos/x.md"]
     assert home_forms("/home/ted/repos/x.md", "/home/ted") == ["~/repos/x.md"]
-    assert home_forms("/etc/forge/x.yml", "/home/ted") == []
+    assert home_forms("/etc/example/x.yml", "/home/ted") == []
     assert home_forms("~/repos/x.md", "") == []
 
 
@@ -263,3 +263,35 @@ def test_qc_survey_is_reachable_through_the_dispatcher(corpus, capsys) -> None:
     digests, events = corpus
     assert dispatch(["qc-survey", "--digests", str(digests), "--events", str(events)]) == 0
     assert "blocks graded: 2" in capsys.readouterr().out
+
+
+def test_a_traversal_payload_in_an_anchor_cannot_escape_the_eventlog_root(corpus) -> None:
+    """The session id is attacker-controllable in the only sense that matters here: it is read
+    back out of a digest file, which holds model output.
+
+    `ANCHOR_RE` captures it as `\\S+`, so `../outside/evil` is a syntactically valid anchor and
+    the survey hands it straight to `eventlog_path`. `safe_stem` is what contains it — anything
+    that is not a bare identifier is **replaced** with a hash rather than scrubbed, because
+    scrubbing produces names that collide with a real session's.
+
+    A planted file at the traversal destination is what makes this test discriminating. Without
+    one, the id resolves to a path that does not exist either way and the assertion passes with
+    the containment removed — which is what the first version of this test did.
+    """
+    digests, events = corpus
+    outside = events.parent / "outside"
+    outside.mkdir()
+    planted = _log("planted", "this log is outside the event log root")
+    (outside / "evil.json").write_text(
+        json.dumps(planted.to_dict(), ensure_ascii=False), encoding="utf-8"
+    )
+
+    digest = next((digests / "developer").glob("*.md"))
+    digest.write_text(
+        digest.read_text().replace("session:aaaaaaaa", "session:../outside/evil"),
+        encoding="utf-8",
+    )
+
+    result = survey(digests, events)
+    assert result.blocks == 1, "the planted log outside the root was read"
+    assert result.blocks_no_log == 1

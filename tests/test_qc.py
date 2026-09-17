@@ -860,16 +860,22 @@ def test_the_pre_876_rule_is_still_available_and_still_strict() -> None:
     assert not path_literal(claim, allowed, corpus)
 
 
-#: Real claims from the live corpus's `absent` bucket -- the control set the phase 1 survey
-#: produced. Every one of these was measured to be absent from its own session's log, and each
-#: is the shape of a plausible invention: a real directory, a filename that was never there.
+#: The `absent` bucket's shapes -- the control set the phase 1 survey produced, transposed onto
+#: a fictional host. Every one is the shape of a plausible invention: a directory the session
+#: really worked in, and a filename that was never there. A timestamped backup, a provisioning
+#: tree, a per-agent config, the same written `~`-first, and a dated artifact.
+#:
+#: **Transposed, not copied.** The measured claims name a private host's credential directory,
+#: agent manifest paths and config layout, and this repository is public. The shape is what the
+#: test needs; the real layout is not, and publishing it would point a reader at where that host
+#: keeps its secrets for no gain. Regenerate the live set on the host that holds the corpus with
+#: `python -m scribe qc-survey --bucket absent`.
 CONTROL_SET = (
-    "/home/ted/.secrets/forge.env.bak-20260829-1934",
-    "/home/ted/repos/gitea/host-forge-configs/appdata/observability/grafana/"
-    "provisioning/dashboards/forge/disk-space.json",
-    "/etc/forge/manifests/research-agent.yml",
-    "~/repos/gitea/host-forge-scripts/manifests/sysadmin-agent.yml",
-    "/home/ted/.claude/comms/artifacts/config-proposals/2026-08-18-research-remove-plane-mcp.md",
+    "/home/alice/.credentials/service.env.bak-20260829-1934",
+    "/home/alice/repos/infra-configs/appdata/observability/dashboards/site/disk-space.json",
+    "/etc/example/manifests/reader-agent.yml",
+    "~/repos/infra-scripts/manifests/writer-agent.yml",
+    "/home/alice/artifacts/config-proposals/2026-08-18-reader-remove-thing.md",
 )
 
 
@@ -882,9 +888,9 @@ def test_the_control_set_still_fails(claim: str) -> None:
     worth running. Against an empty log they would fail with the tolerance removed entirely.
     """
     log = _log_naming(
-        "worked under /home/ted/.secrets and /etc/forge/manifests today",
-        "read /home/ted/repos/gitea/host-forge-configs and ~/repos/gitea/host-forge-scripts",
-        "also /home/ted/.claude/comms/artifacts/config-proposals",
-        "the files were forge.env, developer-agent.yml, host-overview.json and index.md",
+        "worked under /home/alice/.credentials and /etc/example/manifests today",
+        "read /home/alice/repos/infra-configs and ~/repos/infra-scripts",
+        "also /home/alice/artifacts/config-proposals",
+        "the files were service.env, editor-agent.yml, host-overview.json and index.md",
     )
     assert not _grounded(claim, log)
