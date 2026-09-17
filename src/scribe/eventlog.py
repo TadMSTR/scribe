@@ -32,9 +32,10 @@ import json
 import os
 import re
 from collections.abc import Iterator
+from dataclasses import MISSING
 from pathlib import Path
 
-from .extract.models import EventLog
+from .extract.models import EventLog, Rollup, Stats, ToolEvent, Turn
 from .paths import secure_create, secure_dir
 
 #: A session id usable as a filename verbatim. Deliberately narrower than "no separators":
@@ -75,6 +76,22 @@ def eventlog_path(root: str | Path, session_id: str, transcript_path: str = "") 
     At ~475 sessions a year a flat directory is not a problem worth solving.
     """
     return Path(root).expanduser() / (safe_stem(session_id, transcript_path) + SUFFIX)
+
+
+def session_eventlog(root: str | Path, session_id: str, transcript_path: str) -> Path:
+    """Where the event log for one *state row* lives.
+
+    `eventlog_path` keys on the session id, which is the right key and is exactly what a
+    legacy state row does not have -- `scan` upserts a row from a filesystem stat, and the id
+    lives inside the transcript. The stem of the transcript path is that same id by
+    construction, so it is the fallback rather than a guess.
+
+    Factored out because two callers need the rule and they must not drift: the replay path in
+    `pipeline._load_session` and the discovery of orphaned sessions in `discovery.orphaned`.
+    One resolving a row to a different file than the other would mean a session that discovery
+    offers and the pipeline then cannot load.
+    """
+    return eventlog_path(root, session_id or Path(transcript_path).stem, transcript_path)
 
 
 def write_eventlog(root: str | Path, log: EventLog) -> Path:
@@ -166,3 +183,145 @@ def read_eventlog(root: str | Path, session_id: str) -> Path | None:
     """
     path = eventlog_path(root, session_id)
     return path if path.is_file() else None
+
+
+class EventLogError(ValueError):
+    """An event log that cannot be read back. Raised by `load_eventlog` only."""
+
+
+def _rebuild(cls, data: dict, **overrides):
+    """Reconstruct one dataclass from its own `to_dict` output, field by field.
+
+    Driven by `__dataclass_fields__` rather than a hand-written list. The hand-written
+    version drifted: it rebuilt the rollup and the event skeleton but dropped `user_text`,
+    `assistant_text` and `result_digest`, so this CLI graded the *same* digest against the
+    *same* log more strictly than the pipeline did -- the model's own turns and every tool
+    result were missing from the corpus, and true claims drawn from them read as ungrounded.
+    Since the CLI is what CI runs, that is the path that would have reported the phantom
+    findings. Deriving the field list from the dataclass means adding a field to the schema
+    cannot silently reintroduce it.
+    """
+    kwargs = {}
+    for name, spec in cls.__dataclass_fields__.items():
+        if name in overrides:
+            kwargs[name] = overrides[name]
+            continue
+        want = spec.type if isinstance(spec.type, str) else ""
+        required = spec.default is MISSING and spec.default_factory is MISSING
+        if name not in data:
+            # A field the dataclass has no default for must still be supplied, or an event log
+            # missing `session_id` or a turn missing `turn_uuid` raises TypeError instead of
+            # being graded. `to_dict` omits empty values, so this is an ordinary round trip,
+            # not a malformed-input case.
+            if required:
+                kwargs[name] = 0 if want.startswith("int") else ""
+            continue
+        value = data[name]
+        if want.startswith("list["):
+            kwargs[name] = [str(x) for x in value] if isinstance(value, list) else []
+        elif want.startswith("int"):
+            kwargs[name] = _as_int(cls, name, value)
+        elif want.startswith("str"):
+            kwargs[name] = str(value)
+        else:
+            kwargs[name] = value
+    try:
+        return cls(**kwargs)
+    except TypeError as exc:
+        # Key names only -- they are schema field names, not data. See `_as_int` for why the
+        # distinction between naming a key and quoting a value is enforced at all.
+        raise EventLogError(f"{cls.__name__}: {exc}") from None
+
+
+def _as_int(cls, field: str, value: object) -> int:
+    """Coerce one integer field, reporting the field and the TYPE -- never the value.
+
+    `int("sk-live-...")` raises `ValueError: invalid literal for int() with base 10:
+    'sk-live-...'`, quoting its input verbatim. That matters here specifically: `load_eventlog`
+    is called from `pipeline.process_session`, which appends the failure to `result.errors` --
+    a sink the module documents as UNREDACTED and reaching both the JSON run report and the
+    CLI. Event logs are the least-redacted artefact scribe keeps, so a malformed field would
+    carry its own contents out to a file the redaction model never covers.
+
+    The field name and the type are enough to diagnose a malformed log. The value is not
+    needed and cannot be safely shown.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise EventLogError(
+            f"{cls.__name__}.{field} is not an integer (got {type(value).__name__})"
+        ) from None
+
+
+def log_from_dict(data: dict) -> EventLog:
+    """Rebuild an `EventLog` from one already-decoded serialized log.
+
+    The in-memory half of `load_eventlog`, split out because `scribe qc --events` reads and
+    decodes the file itself in order to give its own message for malformed JSON.
+
+    Everything `EventLog.grounding_text()` reads must be reconstructed, because that text is
+    the ground truth the groundedness gate checks against. See `_rebuild`.
+
+    **`stats` is reconstructed, not discarded.** It used to be dropped -- `qc` grades from
+    `turns` and never reads it, so for the gate it was dead weight. A REPLAY is the other
+    caller, and it needs `raw_file_bytes` to record the offset and the turn and event counts
+    to report what it did. Dropping them there would produce a digest that looks entirely
+    normal over a session the state DB then believes it has read nothing of.
+    """
+    turns = []
+    for t in data.get("turns") or []:
+        turn: Turn = _rebuild(Turn, t, rollup=_rebuild(Rollup, t.get("rollup") or {}), events=[])
+        for e in t.get("events") or []:
+            turn.events.append(_rebuild(ToolEvent, e))
+        turns.append(turn)
+    return _rebuild(
+        EventLog,
+        data,
+        turns=turns,
+        rollup=_rebuild(Rollup, data.get("rollup") or {}),
+        stats=_rebuild(Stats, data.get("stats") or {}),
+    )
+
+
+def load_eventlog(path: str | Path) -> EventLog:
+    """Read one persisted event log back into an `EventLog`. The inverse of `write_eventlog`.
+
+    This module's own docstring has promised since it was written that the persisted log
+    "lets a replay skip re-extraction", and until now there was no reader to do it with:
+    `write_eventlog` wrote, `read_eventlog` returned a *path*, and `pipeline.process_session`
+    reconstructed by calling `extract(transcript_path)`. So a deleted transcript was terminal
+    even though the evidence survived -- and transcripts age out at 30 days while
+    `eventlogs/` has no cleanup policy at all (vikunja#873, #778).
+
+    A dataclass round trip, not a re-derivation. The serialized form is `EventLog.to_dict()`
+    verbatim and carries every field on the dataclass, so this reads what was written rather
+    than inferring it.
+
+    **Raises rather than returning None**, unlike `contains_value` and `read_eventlog`. Those
+    two answer a question where "cannot tell" is a real and useful third answer. This one is
+    an input to summarization: a caller that silently received an empty log would write a
+    digest that looks normal and says nothing, which is the failure this whole component
+    exists to make impossible.
+    """
+    p = Path(path).expanduser()
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise EventLogError(f"cannot read event log {p}: {exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise EventLogError(f"{p} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise EventLogError(f"{p} is not an event log: top level is {type(payload).__name__}")
+    try:
+        return log_from_dict(payload)
+    except EventLogError:
+        # Already shaped to name a field and a type without quoting its value. See `_as_int`.
+        raise
+    except (AttributeError, TypeError, ValueError) as exc:
+        # Anything else: report the exception TYPE only. An unanticipated error from deep in
+        # the reconstruction could have interpolated a field's contents into its message, and
+        # this message reaches an unredacted sink.
+        raise EventLogError(f"{p} is not an event log ({type(exc).__name__})") from exc

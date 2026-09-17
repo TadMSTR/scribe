@@ -36,7 +36,28 @@ from .writeback import ANCHOR_RE, TERMINATOR_RE
 #: extracting, not to mandate a verbose summary.
 DEFAULT_COVERAGE_FLOOR = 0.10
 
-_PATH_RE = re.compile(r"(?:(?<=\s)|^)(?:~|\.{0,2})/[\w./~-]{3,}")
+#: A file-path claim. The last character is constrained SEPARATELY from the body, and that
+#: is the whole point: `.` is both a legal path character and the character an English
+#: sentence ends with, so a body-only class captures the terminator as part of the path.
+#: Observed live 2026-09-16 -- a digest truthfully citing `.../request.md` was graded against
+#: `.../request.md.`, which appears in no event log, so a TRUE claim was recorded as
+#: ungrounded (vikunja#874). Two thirds of real groundedness findings were this artifact.
+#:
+#: A bare `rstrip(".")` is the obvious fix and is wrong on its own: `/repo/src/..` and
+#: `../../..` are real paths whose last character is a dot. The distinction that holds is
+#: POSITIONAL -- trailing dots are legitimate only as a complete final segment, i.e. when
+#: preceded by `/`. Prefixes (`./`, `../`) were never at risk; they are matched before the
+#: body. A dotted extension is not at risk either; its last character is a word character.
+#: The `{2,}` body plus one final character preserves the original 3-character floor.
+_PATH_RE = re.compile(
+    r"""
+    (?:(?<=\s)|^)              # a claim starts a token, never mid-word
+    (?:~|\.{0,2})/             # ~/ | / | ./ | ../
+    [\w./~-]{2,}               # the body, where a dot is an ordinary path character
+    (?:[\w~/-]|(?<=/)\.{1,2}) # the last: not a bare dot, unless it IS the final segment
+    """,
+    re.VERBOSE,
+)
 _TICKET_RE = re.compile(r"(?<![/\w\d])#([1-9]\d{0,5})\b")
 # Tool claims are split by ambiguity, because several tool names are also ordinary English.
 # A digest saying "Read the logs" or "Task complete" is not naming a tool, and flagging it

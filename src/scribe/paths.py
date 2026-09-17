@@ -26,11 +26,48 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 from pathlib import Path
 from typing import IO
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
+
+
+#: An agent name is one path component and is used as one, on BOTH sides of the corpus: the
+#: journal reads `<digest_root>/<agent>` and the pipeline writes it. `.` and `..` match this
+#: pattern and are excluded separately, because a character class cannot express "is not a
+#: traversal".
+AGENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def valid_agent(name: str) -> bool:
+    """Whether `name` is safe to use as a directory component.
+
+    The agent name is an external identifier that reaches a path. It arrives from
+    `$CLAUDE_PROJECT_DIR`, from `--agent`, or -- the route that is easiest to miss -- from a
+    transcript's own top-level `cwd` field, via `extract.parser._agent_from_cwd`. `..` clears
+    a naive check twice over: it is a legal directory name AND
+    `Path('.../projects/..').name` really is `".."`, so every one of those three routes can
+    produce it.
+
+    **Lives here rather than in either consumer.** The read side (`journal.agent_dir`) had
+    this guard and the write side (`writeback.daily_path`) did not, which is how a single-level
+    traversal stayed live on the write path while the read path was correctly defended. One
+    definition, so the two cannot drift apart again.
+    """
+    return bool(AGENT_RE.match(name)) and name not in {".", ".."}
+
+
+def contained(root: str | os.PathLike[str], child: str) -> bool:
+    """Whether `root / child` really resolves to somewhere under `root`.
+
+    The guard that actually holds. A character allowlist states an intention about *names*;
+    the property that matters is about *paths*, and it is asserted against the resolved path
+    so it cannot be satisfied by a name that merely looks well-formed.
+    """
+    base = Path(root).expanduser()
+    return base.resolve(strict=False) in (base / child).resolve(strict=False).parents
 
 
 def secure_dir(path: str | os.PathLike[str]) -> Path:

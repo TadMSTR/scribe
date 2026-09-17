@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from scribe.config import Config, ProviderConfig, StageConfig
+from scribe.eventlog import write_eventlog
 from scribe.extract.models import EventLog
 from scribe.pipeline import (
     _CAUSE_DETAIL,
@@ -835,3 +836,162 @@ def test_the_event_log_path_is_carried_into_the_per_session_report(env) -> None:
     cfg, store, _t = env
     (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
     assert r.to_dict()["eventlog_path"] == r.eventlog_path
+
+
+# --- vikunja#873: a session survives its transcript ----------------------------------------
+
+
+def _lose_the_session_then_the_transcript(cfg, store, target) -> None:
+    """Reproduce the state #873 is actually about, in the order it really happens.
+
+    A provider failure leaves a marked placeholder on disk and the row `provisional` -- the
+    event log is persisted BEFORE the model call precisely so it survives this. The transcript
+    then ages out at 30 days. What is left is a digest that is not an answer, and an event log
+    that is the only remaining evidence of the session.
+    """
+    err = ProviderError("bad request", retryable=False)
+    (first,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    assert first.placeholder is True, "precondition: the session was lost"
+    assert first.eventlog_path, "precondition: its event log was persisted"
+    assert store.get(str(target)).status == STATUS_PROVISIONAL
+    target.unlink()
+
+
+def test_a_session_whose_transcript_is_gone_still_produces_a_real_digest(env) -> None:
+    """The end-to-end this whole phase exists for.
+
+    Transcripts age out at 30 days (`cleanupPeriodDays` unset, vikunja#778) and `eventlogs/`
+    has no cleanup policy, so the log outlives its source. Before `load_eventlog`,
+    `process_session` reconstructed by calling `extract(transcript_path)` and a deleted
+    transcript was terminal.
+    """
+    cfg, store, target = env
+    _lose_the_session_then_the_transcript(cfg, store, target)
+
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+
+    assert len(results) == 1, "the reopened session was not offered"
+    result = results[0]
+    assert result.replayed is True
+    assert result.summarized is True
+    assert result.placeholder is False
+    assert result.written is True
+    assert result.events == 3, "a replay must carry the same events the extract did"
+    digest = next(output_root(cfg).rglob("*.md"))
+    assert "First real question" in digest.read_text(encoding="utf-8")
+
+
+def test_a_replay_is_reported_as_one_rather_than_passing_for_an_extraction(env) -> None:
+    """A replayed digest is as good as its log and no better. An operator reading a run report
+    should be able to see which sessions were reconstructed rather than read."""
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    (first,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    assert first.replayed is False
+    assert first.to_dict()["replayed"] is False
+
+    target.unlink()
+    (second,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert second.to_dict()["replayed"] is True
+
+
+def test_a_transcript_that_exists_is_always_preferred_over_the_log(env) -> None:
+    """The log is a fallback, not a cache. A session that resumed has grown since its log was
+    written, and re-extracting is what picks that up -- measured live, the one session of 429
+    that differed was exactly this case."""
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    (first,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    # A log that would be obviously wrong if it were read in preference to the transcript.
+    stale = EventLog(session_id=first.session_id, transcript_path=str(target), agent="research")
+    write_eventlog(cfg.eventlog_dir, stale)
+
+    (second,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert second.replayed is False
+    assert second.events == 3, "the transcript on disk was not what got read"
+
+
+def test_an_unreadable_transcript_is_a_failure_not_a_silent_replay(env) -> None:
+    """`OSError` is NOT "transcript absent". Replaying an older log on a permissions fault
+    would hide a real problem behind a stale-but-plausible digest, and the session would be
+    recorded as summarized."""
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    target.chmod(0o000)
+    try:
+        row = store.get(str(target))
+        result = process_session(row, cfg, store, provider=Stub())
+    finally:
+        target.chmod(0o600)
+    assert result.replayed is False
+    assert result.summarized is False
+    assert any("extract:" in e for e in result.errors)
+    assert store.get(str(target)).status == STATUS_FAILED
+
+
+# --- the traversal, end to end through a real transcript ----------------------------------
+
+
+def _inject_cwd(target: Path, cwd: str) -> None:
+    """Put a top-level `cwd` on the transcript's first well-formed record, leaving the rest
+    byte-identical.
+
+    Rewriting the whole file through `json.loads`/`json.dumps` would silently drop the
+    deliberately malformed line the fixture carries for `records_unparsable` -- so the
+    transcript under test would stop being the one the other tests use.
+    """
+    lines = target.read_text(encoding="utf-8").splitlines()
+    for i, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        record["cwd"] = str(pathlib.Path(cwd).expanduser())
+        lines[i] = json.dumps(record)
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+    raise AssertionError("fixture has no parsable record to carry cwd")
+
+
+def test_a_crafted_cwd_cannot_write_a_digest_outside_the_output_root(env, tmp_path) -> None:
+    """The Medium from the p4 audit, driven the whole way rather than asserted at the unit.
+
+    `log.cwd` is taken from the first top-level `cwd` key in the transcript's own records with
+    no shape check, `_agent_from_cwd` returns `Path(cwd).name`, and `daily_path` used to join
+    that straight onto the output root. A `cwd` of `~/.claude/projects/..` therefore put a
+    digest one level above the tree, under a predictable `YYYY-MM-DD.md` name.
+
+    Unit tests on `daily_path` alone would not have caught the introduction of this, because
+    the interesting part is that `cwd` reaches it at all.
+    """
+    cfg, store, target = env
+    _inject_cwd(target, "~/.claude/projects/..")
+    old = 1_000_000.0 - 3600
+    os.utime(target, (old, old))
+
+    (result,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+
+    assert result.written is True, "the digest must still be written, not discarded"
+    root = output_root(cfg).resolve()
+    written = list(root.rglob("*.md"))
+    assert written, "no digest was written at all"
+    for path in written:
+        assert root in path.resolve().parents
+    # And nothing landed in the parent, which is where it used to go.
+    assert not list(root.parent.glob("*.md"))
+
+
+def test_that_crafted_cwd_really_did_reach_the_agent_field(env) -> None:
+    """Control for the test above. If the extractor stopped reading `cwd` from that record,
+    the traversal test would pass while exercising nothing."""
+    _cfg, _store, target = env
+    _inject_cwd(target, "~/.claude/projects/..")
+
+    from scribe.extract import extract
+    from scribe.extract.parser import _agent_from_cwd
+
+    log = extract(target)
+    assert log.cwd.endswith("/projects/..")
+    assert _agent_from_cwd(log.cwd) == "..", "the unsafe value no longer reaches attribution"
+    assert log.agent == ".."

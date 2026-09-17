@@ -13,7 +13,18 @@ from pathlib import Path
 
 import pytest
 
-from scribe.recover_cli import recover, scan_corpus, stamp
+from scribe.eventlog import write_eventlog
+from scribe.extract.models import EventLog, Turn
+from scribe.recover_cli import (
+    EXIT_CONFIG,
+    EXIT_OK,
+    EXIT_RECOVERABLE,
+    EXIT_UNRECOVERABLE,
+    recover,
+    scan_corpus,
+    stamp,
+)
+from scribe.recover_cli import main as recover_main
 from scribe.state import STATUS_COMPLETE, Store
 from scribe.summarize.contamination import SUPPRESSION_MARKER
 from scribe.summarize.render import PLACEHOLDER_MARKER, render_failure, render_suppressed
@@ -23,8 +34,9 @@ WHEN = datetime(2026, 8, 19, 9, 14, tzinfo=UTC)
 
 
 class _Cfg:
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Path, eventlog_dir: Path) -> None:
         self.output_dir = str(output_dir)
+        self.eventlog_dir = str(eventlog_dir)
 
 
 def _legacy_block(turn: str, transcript: str, body: str) -> str:
@@ -35,6 +47,24 @@ def _legacy_block(turn: str, transcript: str, body: str) -> str:
         f"{body}"
         f"<!-- /scribe turn:{turn} -->\n\n"
     )
+
+
+def _persist_eventlog(cfg, store, transcript_path: str) -> Path:
+    """Write a real event log for `transcript_path`, the way a live run would have."""
+    row = store.get(transcript_path)
+    log = EventLog(
+        session_id=row.session_id,
+        transcript_path=transcript_path,
+        agent="developer",
+        turns=[Turn(turn_uuid="u-lost", index=0, user_text="the question that was asked")],
+    )
+    return write_eventlog(cfg.eventlog_dir, log) if log.session_id else _write_by_stem(cfg, log)
+
+
+def _write_by_stem(cfg, log: EventLog) -> Path:
+    """A legacy row has no `session_id`; the transcript stem is that id by construction."""
+    log.session_id = Path(log.transcript_path).stem
+    return write_eventlog(cfg.eventlog_dir, log)
 
 
 @pytest.fixture
@@ -67,7 +97,7 @@ def corpus(tmp_path):
         store.mark_summarized(
             paths[name], offset=100, last_turn_uuid=f"u-{name}", turn_uuids=[f"u-{name}"]
         )
-    return _Cfg(out), store, md, paths
+    return _Cfg(out, tmp_path / "eventlogs"), store, md, paths
 
 
 def test_a_legacy_block_is_found_by_body_not_by_anchor(corpus) -> None:
@@ -146,15 +176,44 @@ def test_a_stamped_block_is_replaceable_by_the_ordinary_write_path(corpus) -> No
     assert text.count("<!-- session:") == 3
 
 
-def test_a_vanished_transcript_is_reported_not_reopened(corpus, tmp_path) -> None:
-    """Reopening a row whose transcript is gone would burn a sweep rediscovering that there
-    is nothing to summarize."""
+def test_a_vanished_transcript_with_no_event_log_is_reported_not_reopened(corpus, tmp_path):
+    """Reopening a row with NO input at all would burn a sweep rediscovering that there is
+    nothing to summarize.
+
+    Retargeted for vikunja#873 rather than deleted: before `load_eventlog` the transcript was
+    the only input, so "transcript gone" and "nothing survives" were the same condition. They
+    are now two, and this is the one that is still terminal.
+    """
     cfg, store, _md, paths = corpus
     Path(paths["lost"]).unlink()
     report = recover(cfg, store, apply=True)
     assert paths["lost"] in report["missing"]
     assert paths["lost"] not in report["reset"]
     assert store.get(paths["lost"]).status == "summarized"
+
+
+def test_a_vanished_transcript_whose_event_log_survives_is_reopened(corpus) -> None:
+    """The point of vikunja#873. `eventlogs/` has no cleanup policy and transcripts age out at
+    30 days, so the log is the durable copy -- it just had no reader."""
+    cfg, store, _md, paths = corpus
+    _persist_eventlog(cfg, store, paths["lost"])
+    Path(paths["lost"]).unlink()
+    report = recover(cfg, store, apply=True)
+    assert paths["lost"] in report["reset"]
+    assert paths["lost"] not in report["missing"]
+
+
+def test_an_unloadable_event_log_does_not_count_as_a_surviving_input(corpus) -> None:
+    """Present is not the same as loadable. A truncated log would have `recover` promise a
+    recovery that the next `scribe run` then fails -- splitting one diagnosis across two runs.
+    """
+    cfg, store, _md, paths = corpus
+    written = _persist_eventlog(cfg, store, paths["lost"])
+    written.write_text('{"session_id": "x", "turns": [', encoding="utf-8")
+    Path(paths["lost"]).unlink()
+    report = recover(cfg, store, apply=True)
+    assert paths["lost"] in report["missing"]
+    assert paths["lost"] not in report["reset"]
 
 
 def test_the_markers_are_what_the_renderers_actually_emit() -> None:
@@ -219,3 +278,88 @@ def test_a_stale_span_is_skipped_rather_than_written_blind(corpus) -> None:
     md.write_text("# 2026-08-19\n\nfile replaced between scan and stamp\n")
     assert stamp(md, found) == 0
     assert md.read_text() == "# 2026-08-19\n\nfile replaced between scan and stamp\n"
+
+
+# --- vikunja#875: the exit code is an interface, and part 5's detector is wired to it -------
+#
+# Every case below asserts a code a scheduled job will branch on. The three the build plan
+# names are here, plus the one it asked to be DECIDED rather than inherited: what `missing`
+# does. See the module docstring in `recover_cli` for the contract these enforce.
+
+
+def _run(cfg, store, tmp_path, *apply_flag: str) -> int:
+    """Drive `main` the way a cron does -- through argv, reading only the exit code."""
+    toml = tmp_path / "scribe.toml"
+    toml.write_text(f'[discovery]\noutput_dir = "{cfg.output_dir}"\n', encoding="utf-8")
+    return recover_main(["--config", str(toml), "--state", str(store.path), *apply_flag])
+
+
+def test_a_dry_run_with_provisional_blocks_exits_recoverable(corpus, tmp_path) -> None:
+    """The detector's signal. Before this, `recover` ended in an unconditional `return 0` and
+    no cron could tell a corpus with two lost sessions from a clean one."""
+    cfg, store, _md, _paths = corpus
+    assert _run(cfg, store, tmp_path) == EXIT_RECOVERABLE
+
+
+def test_a_dry_run_with_nothing_provisional_exits_ok(corpus, tmp_path) -> None:
+    """The other half of the pair. A code that is non-zero whatever the corpus holds is not a
+    signal, and this is the assertion that keeps the one above honest."""
+    cfg, store, md, _paths = corpus
+    md.write_text("# 2026-08-19\n\nnothing provisional here\n", encoding="utf-8")
+    assert _run(cfg, store, tmp_path) == EXIT_OK
+
+
+def test_apply_exits_ok_when_it_succeeds(corpus, tmp_path) -> None:
+    """`--apply` is the repair, not the detector. A repair that reports failure every time it
+    works pages an operator into ignoring it -- the vikunja#398 shape."""
+    cfg, store, _md, _paths = corpus
+    assert _run(cfg, store, tmp_path, "--apply") == EXIT_OK
+
+
+def test_apply_still_exits_ok_with_blocks_left_on_disk(corpus, tmp_path) -> None:
+    """The specific trap. After `--apply` the blocks are still there -- stamped, awaiting
+    `scribe run --live` -- so an exit code derived from `report["blocks"]` would be non-zero
+    on every successful repair, forever."""
+    cfg, store, _md, _paths = corpus
+    assert _run(cfg, store, tmp_path, "--apply") == EXIT_OK
+    assert recover(cfg, store, apply=False)["blocks"] > 0
+
+
+def test_the_dry_run_signal_persists_across_apply_until_the_digest_is_rewritten(
+    corpus, tmp_path
+) -> None:
+    """`1` means "there is unrepaired loss on disk", not "there is work for --apply".
+
+    A stamped block is still a stand-in. Clearing the signal when `--apply` runs would report
+    the loss as fixed while the digest still says nothing -- which is the exact confusion that
+    let 30 sessions stay lost.
+    """
+    cfg, store, md, _paths = corpus
+    assert _run(cfg, store, tmp_path, "--apply") == EXIT_OK
+    assert _run(cfg, store, tmp_path) == EXIT_RECOVERABLE
+    md.write_text("# 2026-08-19\n\nreplaced by real digests\n", encoding="utf-8")
+    assert _run(cfg, store, tmp_path) == EXIT_OK
+
+
+def test_an_unrecoverable_session_outranks_a_recoverable_one(corpus, tmp_path) -> None:
+    """`missing` is not bad luck this sweep, it is "no input exists" -- re-running will not
+    help, so it must not read as the retry signal. The corpus here holds both kinds at once,
+    which is what makes this a precedence test rather than a second smoke test."""
+    cfg, store, _md, paths = corpus
+    Path(paths["lost"]).unlink()
+    assert _run(cfg, store, tmp_path) == EXIT_UNRECOVERABLE
+
+
+def test_a_config_error_still_exits_two(corpus, tmp_path) -> None:
+    """`2` was taken before this change and stays taken. A detector that read a malformed
+    config as "loss detected" would send someone looking for a lost session that never was."""
+    _cfg, store, _md, _paths = corpus
+    bad = tmp_path / "bad.toml"
+    bad.write_text("output_dir = [not valid\n", encoding="utf-8")
+    assert recover_main(["--config", str(bad), "--state", str(store.path)]) == EXIT_CONFIG
+
+
+def test_the_four_exit_codes_are_distinct() -> None:
+    """They are branched on by a cron that does different things for each. Two collapsing to
+    the same integer would silently merge two responses."""
+    assert len({EXIT_OK, EXIT_RECOVERABLE, EXIT_CONFIG, EXIT_UNRECOVERABLE}) == 4

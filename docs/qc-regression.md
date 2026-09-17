@@ -114,7 +114,8 @@ still bite do:
 
 ## A related fix in the same area
 
-`scribe.qc_cli._log_from_dict` rebuilt only the rollup and an event skeleton, dropping
+`scribe.eventlog.log_from_dict` (then `scribe.qc_cli._log_from_dict`) rebuilt only the
+rollup and an event skeleton, dropping
 `user_text`, `assistant_text` and `result_digest`. The corpus it produced was therefore much
 thinner than the pipeline's, and the *same* digest graded against the *same* log was stricter
 through `python -m scribe.qc` than through the pipeline -- which matters because the CLI is

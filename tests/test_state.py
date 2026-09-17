@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+
 import pytest
 
+from scribe.eventlog import session_eventlog
 from scribe.state import (
+    _SCHEMA,
     SCHEMA_VERSION,
     STATUS_ACTIVE,
     STATUS_COMPLETE,
@@ -165,3 +170,100 @@ def test_forget_removes_session_and_its_turns(store: Store) -> None:
 def test_session_row_unread_property_is_pure() -> None:
     assert SessionRow("/x", size_bytes=10, last_offset=3).has_unread_bytes is True
     assert SessionRow("/x", size_bytes=3, last_offset=3).has_unread_bytes is False
+
+
+# --- schema 2: the session_id backfill ------------------------------------------------------
+
+
+def _legacy_db(tmp_path, rows: list[tuple[str, str]]) -> Path:
+    """A store at schema 1, holding rows as they were actually written before #872.
+
+    Built with raw SQL rather than by calling `Store`, because `Store.__init__` is the thing
+    under test -- constructing the fixture through it would migrate the rows before the
+    assertion ever ran.
+    """
+    path = tmp_path / "legacy.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA)
+    conn.executemany(
+        "INSERT INTO sessions (transcript_path, session_id, status, first_seen, updated_at) "
+        "VALUES (?, ?, 'summarized', '2026-08-01', '2026-08-01')",
+        rows,
+    )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _ids(path: Path) -> dict[str, str]:
+    conn = sqlite3.connect(path)
+    try:
+        return {
+            r[0]: r[1] for r in conn.execute("SELECT transcript_path, session_id FROM sessions")
+        }
+    finally:
+        conn.close()
+
+
+def test_opening_a_legacy_store_backfills_the_empty_ids(tmp_path) -> None:
+    """The repair. A 6%-populated column is worse than an empty one: a query keyed on it
+    returns rows and looks like it works while omitting the other 94%."""
+    db = _legacy_db(
+        tmp_path, [("/p/-home-ted--x/sess-aaa.jsonl", ""), ("/p/-y/sess-bbb.jsonl", "")]
+    )
+    store = Store(db)
+    assert _ids(db) == {
+        "/p/-home-ted--x/sess-aaa.jsonl": "sess-aaa",
+        "/p/-y/sess-bbb.jsonl": "sess-bbb",
+    }
+    assert store.schema_version == 2
+
+
+def test_the_backfill_never_overwrites_a_real_extracted_id(tmp_path) -> None:
+    """A value that came from an actual extraction beats one derived from a filename. The
+    two agree on every row measured, but where they ever disagreed the extractor is right."""
+    db = _legacy_db(tmp_path, [("/p/-x/sess-aaa.jsonl", "id-from-the-transcript")])
+    Store(db)
+    assert _ids(db) == {"/p/-x/sess-aaa.jsonl": "id-from-the-transcript"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/p/-x/..jsonl", "/p/-x/-leading-dash.jsonl", "/p/-x/has space.jsonl", "/p/-x/.jsonl"],
+)
+def test_a_stem_that_is_not_a_bare_identifier_is_left_empty(tmp_path, path: str) -> None:
+    """Skipped rather than cleaned up. A scrubbed name can collide with a real session's, and
+    a wrong id is worse than no id -- it would resolve to another session's event log."""
+    db = _legacy_db(tmp_path, [(path, "")])
+    Store(db)
+    assert _ids(db) == {path: ""}
+
+
+def test_the_backfill_is_idempotent_and_does_not_rerun(tmp_path) -> None:
+    """It is gated on `user_version`, so reopening the store must not touch the rows again --
+    including a row an operator has deliberately cleared."""
+    db = _legacy_db(tmp_path, [("/p/-x/sess-aaa.jsonl", "")])
+    Store(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE sessions SET session_id = '' WHERE transcript_path = '/p/-x/sess-aaa.jsonl'"
+    )
+    conn.commit()
+    conn.close()
+    Store(db)
+    assert _ids(db) == {"/p/-x/sess-aaa.jsonl": ""}
+
+
+def test_a_fresh_store_is_created_at_the_current_schema(tmp_path) -> None:
+    assert Store(tmp_path / "fresh.sqlite3").schema_version == SCHEMA_VERSION
+
+
+def test_the_backfill_matches_what_the_event_log_lookup_expects(tmp_path) -> None:
+    """The backfilled id is not decorative -- it is what `session_eventlog` resolves a row to.
+    If the two rules ever disagreed, a replay would look for the wrong file."""
+    tpath = "/p/-home-ted--claude-projects-developer/sess-ccc.jsonl"
+    db = _legacy_db(tmp_path, [(tpath, "")])
+    Store(db)
+    backfilled = _ids(db)[tpath]
+    assert session_eventlog(tmp_path, backfilled, tpath) == session_eventlog(tmp_path, "", tpath)

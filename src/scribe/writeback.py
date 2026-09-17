@@ -36,7 +36,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .paths import secure_create, secure_dir, secure_file
+from .paths import contained, secure_create, secure_dir, secure_file, valid_agent
 
 #: An anchor, **alone on its line**. The line anchoring is the load-bearing part, not
 #: punctuation: a digest body can contain this syntax, because sessions about scribe's own
@@ -91,9 +91,39 @@ def anchor(session_id: str, turn_uuid: str, transcript_path: str, provisional: s
     return f"<!-- session:{session_id} turn:{turn_uuid} transcript:{transcript_path}{tail} -->"
 
 
+#: Where a digest goes when its agent cannot be trusted as a directory name. Shared with the
+#: empty case, which already landed here -- an unattributable digest is a real outcome and it
+#: has always had a bucket.
+UNATTRIBUTED = "unknown"
+
+
 def daily_path(root: str | Path, agent: str, when: datetime) -> Path:
-    """`<root>/<agent>/YYYY-MM-DD.md`, mirroring the live memory layout."""
-    return Path(root).expanduser() / (agent or "unknown") / f"{when:%Y-%m-%d}.md"
+    """`<root>/<agent>/YYYY-MM-DD.md`, mirroring the live memory layout.
+
+    **`agent` is untrusted, and that is not obvious from where it comes from.** It is
+    `result.agent`, which is `log.agent`, which `extract()` re-resolves from
+    `_agent_from_cwd(log.cwd)` -- and `log.cwd` is taken from the first top-level `cwd` key in
+    the transcript's own JSONL records, with no shape check. `_agent_from_cwd` returns
+    `Path(cwd).name`, so a `cwd` of `~/.claude/projects/..` yields `".."` and this function
+    would then have written a digest one level ABOVE `root`, with a predictable filename.
+    Bounded to a single level, since `Path.name` cannot contain a separator -- but a real
+    write outside the digest tree.
+
+    The read side already defended this exact value: `journal.agent_dir` has had `valid_agent`
+    plus a containment check since it was written. The write side did not, so the guard was
+    present on the half that reads digests and absent on the half that creates them. Both now
+    use the one definition in `paths.py`.
+
+    **This falls back where `agent_dir` raises, and the asymmetry is deliberate.** Refusing to
+    read yields an empty injection, which `agent_dir`'s docstring rightly calls
+    indistinguishable from a quiet day. Refusing to *write* would discard a summary that has
+    already been paid for -- the failure this component exists to prevent. So a rejected name
+    is attributed to `unknown`, where an empty one has always gone, and the digest survives.
+    """
+    base = Path(root).expanduser()
+    if not (valid_agent(agent) and contained(base, agent)):
+        agent = UNATTRIBUTED
+    return base / agent / f"{when:%Y-%m-%d}.md"
 
 
 def _complete_blocks(text: str) -> dict[str, str]:

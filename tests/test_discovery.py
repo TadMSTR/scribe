@@ -7,11 +7,14 @@ instead of approximately.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
 from scribe.config import Config
-from scribe.discovery import iter_transcripts, scan
+from scribe.discovery import iter_transcripts, orphaned, scan
+from scribe.eventlog import write_eventlog
+from scribe.extract.models import EventLog
 from scribe.state import STATUS_ACTIVE, STATUS_COMPLETE, Store
 
 QUIET = 15  # minutes
@@ -174,3 +177,62 @@ def test_scan_records_the_agent(env) -> None:
 def test_empty_project_tree_yields_nothing(env) -> None:
     cfg, store, _projects = env
     assert scan(cfg, store, now=1_000_000.0) == []
+
+
+# --- vikunja#873: the second source, and the thing it must never touch ---------------------
+
+
+@pytest.fixture
+def orphan_env(tmp_path):
+    """A session whose transcript is gone and whose event log survives."""
+    cfg = Config(
+        quiet_period_minutes=QUIET,
+        project_globs=(str(tmp_path / "projects" / "*") + "/",),
+        eventlog_dir=str(tmp_path / "eventlogs"),
+    )
+    store = Store(tmp_path / "s.sqlite3")
+    tpath = str(tmp_path / "projects" / "-home-ted--claude-projects-research" / "sess-a.jsonl")
+    store.upsert_observed(tpath, size_bytes=4096, mtime_ns=1, agent="research", session_id="sess-a")
+    write_eventlog(cfg.eventlog_dir, EventLog(session_id="sess-a", transcript_path=tpath))
+    return cfg, store, tpath
+
+
+def test_a_reopened_session_with_no_transcript_is_offered(orphan_env) -> None:
+    """`scan` cannot reach these -- it discovers from the filesystem and the file is gone."""
+    cfg, store, tpath = orphan_env
+    store.reset_for_retry(tpath)
+    assert [r.transcript_path for r in orphaned(cfg, store)] == [tpath]
+    assert scan(cfg, store, now=1_000_000.0) == [], "scan cannot see a file that is not there"
+
+
+def test_a_summarized_orphan_is_never_offered(orphan_env) -> None:
+    """The guard that stops this feature destroying something.
+
+    18 event logs on forge currently have no transcript and **16 of them already hold real
+    digests**. A rule phrased as "replay every orphaned log" would re-summarize those sixteen
+    and overwrite good digests with a replay. Replay is opt-in: only a deliberate
+    `scribe recover --apply` moves a row out of `summarized`, and it only does that for a
+    session whose block on disk is admittedly a stand-in.
+    """
+    cfg, store, tpath = orphan_env
+    store.mark_summarized(tpath, offset=4096, last_turn_uuid="u1", turn_uuids=["u1"])
+    assert orphaned(cfg, store) == []
+
+
+def test_an_orphan_with_no_event_log_is_not_offered(tmp_path) -> None:
+    """Nothing to replay from. Offering it would burn a sweep rediscovering that."""
+    cfg = Config(eventlog_dir=str(tmp_path / "eventlogs"))
+    store = Store(tmp_path / "s.sqlite3")
+    tpath = str(tmp_path / "gone.jsonl")
+    store.upsert_observed(tpath, size_bytes=4096, mtime_ns=1, agent="research")
+    store.reset_for_retry(tpath)
+    assert orphaned(cfg, store) == []
+
+
+def test_a_session_whose_transcript_still_exists_is_left_to_scan(orphan_env, tmp_path) -> None:
+    """The two sources must not both yield the same row, or it is processed twice in a sweep."""
+    cfg, store, tpath = orphan_env
+    _touch(Path(tpath), age_seconds=QUIET_S + 1)
+    store.reset_for_retry(tpath)
+    assert orphaned(cfg, store) == []
+    assert [r.transcript_path for r in scan(cfg, store, now=1_000_000.0)] == [tpath]

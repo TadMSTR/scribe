@@ -16,11 +16,43 @@ Both are idempotent. Running twice stamps nothing new and resets rows that are a
 resettable, which is the property that makes it safe to run before you have decided whether
 you meant it.
 
-**The join key is `transcript_path`, not `session_id`.** The state DB's `session_id` column
-was empty on all 441 rows — `scan` upserts from a filesystem stat, and the id lives inside the
-transcript. Matching the 30 affected sessions by `session_id` returned 0 of 30; by
-`transcript_path`, 30 of 30. The column is populated going forward, which does not help for
-any row written before that.
+**The join key is `transcript_path`, not `session_id`.** `scan` upserts from a filesystem
+stat, and the id lives inside the transcript, so the column was empty on every legacy row.
+Matching the 30 affected sessions by `session_id` returned 0 of 30; by `transcript_path`,
+30 of 30. `transcript_path` remains the join key — the backfill that populated `session_id`
+for the legacy rows does not change that, because the two are equivalent only where the
+basename convention holds.
+
+## Exit codes — this is an INTERFACE
+
+A scheduled detector is wired to these (part 5 of the memory-consolidation-2026-09 programme,
+vikunja#875), so they are a contract rather than an implementation detail.
+
+===  ============================================================================
+  0  Nothing is lost. A dry run found no provisional block on disk, **or** an
+     `--apply` run completed without error.
+  1  Unrepaired loss, and it is recoverable. Provisional blocks are on disk and
+     every affected session can be re-summarized.
+  2  `ConfigError`. Pre-existing, unchanged.
+  3  Unrepaired loss that re-running will NOT fix -- at least one affected session
+     has neither a transcript nor a usable event log. Needs a human.
+===  ============================================================================
+
+Two properties are load-bearing and easy to break:
+
+**The DRY RUN is the detector; `--apply` is the repair.** `--apply` returns 0 whenever it
+completes, even if it leaves unrecoverable blocks behind. A cron that repairs and then reports
+failure pages every single time it works -- that is the vikunja#398 shape, where a QC script's
+success path was indistinguishable from a dead pipeline. Poll with a dry run.
+
+**`1` clears when the loss is repaired, not when `--apply` runs.** `scan_corpus` counts
+stamped blocks too, deliberately: a stamped block is still a stand-in, and the loss is only
+actually gone once `scribe run --live` has replaced it with a digest. So the signal stays red
+across `--apply` until the summarizer has done its half. That is the honest reading of "is
+anything lost", and it is why the two verbs return different things for the same corpus.
+
+`3` outranks `1`, because the response differs: `1` is "run the repair", `3` is "this one is
+not coming back by itself".
 """
 
 from __future__ import annotations
@@ -31,6 +63,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config, ConfigError, load
+from .eventlog import EventLogError, load_eventlog, session_eventlog
 from .state import Store
 from .summarize.contamination import SUPPRESSION_MARKER
 from .summarize.render import PLACEHOLDER_MARKER
@@ -41,6 +74,13 @@ from .writeback import (
     atomic_replace,
     paired_blocks,
 )
+
+#: See the module docstring -- these are consumed by a scheduled detector, not just by a human
+#: reading a terminal, so they are named rather than written as literals at the return sites.
+EXIT_OK = 0
+EXIT_RECOVERABLE = 1
+EXIT_CONFIG = 2
+EXIT_UNRECOVERABLE = 3
 
 
 @dataclass
@@ -133,6 +173,26 @@ def stamp(path: Path, blocks: list[Found]) -> int:
     return len(pending)
 
 
+def _has_eventlog(cfg: Config, store: Store, transcript_path: str) -> bool:
+    """Whether this session's persisted event log is on disk and actually loadable.
+
+    Loadable, not merely present. A truncated or half-written file passes `is_file()` and
+    then fails at replay time -- which would have `recover` report a session as recoverable
+    and the next `scribe run` quietly fail it, splitting the diagnosis across two runs and
+    two logs. The parse is cheap next to the model call it precedes.
+    """
+    row = store.get(transcript_path)
+    session_id = row.session_id if row else ""
+    path = session_eventlog(cfg.eventlog_dir, session_id, transcript_path)
+    if not path.is_file():
+        return False
+    try:
+        load_eventlog(path)
+    except EventLogError:
+        return False
+    return True
+
+
 def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
     """Find every stand-in block, stamp it, and reopen its session. Returns a report."""
     found = scan_corpus(Path(cfg.output_dir))
@@ -150,9 +210,11 @@ def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
             stamped += sum(1 for b in blocks if not b.stamped)
 
     for tpath in sorted({f.transcript_path for f in found}):
-        if not Path(tpath).exists():
-            # The transcript is the only input a re-run has. Without it there is nothing to
-            # summarize, so reopening the row would just burn a sweep rediscovering that.
+        if not Path(tpath).exists() and not _has_eventlog(cfg, store, tpath):
+            # Neither input exists. THIS is the terminal case -- and it used to be reached by
+            # a missing transcript alone, because the transcript was the only thing a re-run
+            # could read. `load_eventlog` gives the replay a second source (vikunja#873), so
+            # "the transcript aged out" is no longer the same condition as "nothing survives".
             missing.append(tpath)
             continue
         if apply:
@@ -196,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load(args.config)
     except ConfigError as exc:
         print(f"scribe: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_CONFIG
     store = Store(args.state or cfg.state_path)
     report = recover(cfg, store, apply=args.apply)
 
@@ -209,9 +271,24 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  {len(report['reset'])} session(s) {'reopened' if args.apply else 'to reopen'}")
     for tpath in report["missing"]:
         print(f"  !! no transcript or state row: {tpath}")
-    if not args.apply and report["blocks"]:
-        print("  re-run with --apply, then `scribe run --live`")
-    return 0
+
+    # `--apply` is the REPAIR, and a repair that worked exits 0. Reporting the blocks it just
+    # stamped as a failure would page an operator every time the thing succeeded (vikunja#398).
+    if args.apply:
+        return EXIT_OK
+
+    if not report["blocks"]:
+        return EXIT_OK
+
+    print("  re-run with --apply, then `scribe run --live`")
+    # `missing` is not "worse luck this sweep", it is "no input exists" -- re-running changes
+    # nothing, so it gets its own code and outranks the recoverable one. Phase 3's
+    # `load_eventlog` shrinks this set rather than redefining it: a session whose transcript
+    # is gone but whose event log survives stops being missing and becomes recoverable, so
+    # the signal improves without the contract moving.
+    if report["missing"]:
+        return EXIT_UNRECOVERABLE
+    return EXIT_RECOVERABLE
 
 
 if __name__ == "__main__":

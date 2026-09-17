@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-17
+
+**Minor, not patch.** Three contract changes: `scribe recover` now returns meaningful exit
+codes where it always returned `0`, the state DB moves to schema 2, and `eventlog` gains a
+public reader. A release that called this a patch would be lying to whoever wires a cron to
+the exit code — which is precisely what happens next.
+
+**What this release is.** scribe could lose a session silently and, after 30 days, permanently.
+Transcripts age out at 30 days (`cleanupPeriodDays` unset, vikunja#778) while `eventlogs/` has
+no cleanup policy, so the evidence outlived its source and nothing could read it. Nothing
+tested whether a loss had happened, and the gate that could have was failing true claims on
+punctuation.
+
+### Added
+
+- **`eventlog.load_eventlog()` — the reader the module always promised** (vikunja#873). The
+  module docstring has said since it was written that the persisted log "lets a replay skip
+  re-extraction"; `write_eventlog` wrote, `read_eventlog` returned a *path*, and
+  `pipeline.process_session` reconstructed by calling `extract(transcript_path)`. A deleted
+  transcript was therefore terminal. `process_session` now falls back to the persisted log
+  when the transcript is absent, `discovery.orphaned()` offers those sessions (which `scan`
+  structurally cannot see), and `SessionResult.replayed` reports it — a replayed digest is as
+  good as its log and no better.
+
+  **Replay is opt-in, and that gate is load-bearing.** Only a row a deliberate
+  `scribe recover --apply` reopened is offered. 18 event logs on forge have no transcript and
+  **16 already hold real digests**; a rule phrased as "replay every orphaned log" would
+  overwrite them.
+
+  Verified as a differential against the whole live corpus rather than a fixture: across all
+  429 sessions holding both inputs, `load_eventlog(log)` equalled `extract(transcript)` on
+  every field for 428. The one that differed had grown since its log was written, its
+  persisted turns an exact prefix of the fresh extract. No field fails to round-trip.
+
+- **`scribe recover` exit codes — an interface, not a convenience** (vikunja#875). `main` ended
+  in an unconditional `return 0`, so a corpus with two lost sessions was indistinguishable from
+  a clean one.
+
+  | code | meaning |
+  |---:|---|
+  | `0` | nothing lost, **or** `--apply` completed |
+  | `1` | unrepaired loss, recoverable |
+  | `2` | config error (pre-existing) |
+  | `3` | unrepaired loss that re-running will not fix |
+
+  **Poll with the dry run; `--apply` is the repair** and returns `0` whenever it completes — a
+  repair that reports failure every time it works pages an operator into ignoring it
+  (vikunja#398). `1` clears when the *loss* is repaired, not when `--apply` runs: a stamped
+  block is still a stand-in until `scribe run --live` replaces it. `missing` gets its own code
+  and outranks `1`, because a session with no input is not having a bad sweep.
+
+### Fixed
+
+- **`qc`'s `_PATH_RE` swallowed a sentence-ending period** (vikunja#874). The body character
+  class held a literal `.`, so a path claim ending a sentence was extracted *with* the
+  terminator — a string in no event log — and a true claim graded ungrounded. The last
+  character is now constrained separately from the body: a trailing dot is legitimate only as
+  a complete final segment, so `/repo/src/..` and `../../..` survive while `…/request.md.`
+  does not. Measured per block across the whole corpus (451 blocks / 181 files, each graded
+  against its own event log): 116 terminator artifacts → 0, block pass rate 45.7% → 56.8%.
+
+  That is 12% of path findings, **not** the two thirds estimated. The dominant artifact is
+  separate and larger — 813 of 963 are a digest expanding a relative path into an absolute
+  one, which the exact-substring corpus check cannot match. Tracked as vikunja#876.
+
+- **`daily_path` wrote wherever `agent` said, and `agent` can be `".."`** — path traversal,
+  Medium, found by the security audit of this release. `log.cwd` comes from a transcript's own
+  top-level `cwd` key with no shape check, `_agent_from_cwd` returns `Path(cwd).name`, and
+  `daily_path` joined that onto the output root — writing a digest one level above the tree.
+  The rule already existed on the read side (`journal.agent_dir`); `valid_agent`/`AGENT_RE`
+  and a new `contained()` moved to `paths.py` so both halves share one definition. The write
+  side falls back to `unknown` where the read side raises: refusing to write would discard a
+  summary already paid for. No evidence of exploitation — 0 digests outside an agent directory.
+
+- **A malformed event log quoted itself into an unredacted sink** — found by this release's own
+  pre-audit baseline. `int("sk-live-…")` raises a ValueError quoting its input, and
+  `process_session` appends that to `result.errors`, documented as unredacted and reaching the
+  JSON run report. Integer coercion now reports the field and the value's *type*, never the
+  value. JSON syntax errors are still reported in full, deliberately — `JSONDecodeError`
+  gives a position and never the document.
+
+- **`__version__` said `0.1.0` for the whole of 0.2.0.** `pyproject.toml` was bumped at release
+  and `__init__.py` was not, so the package under-reported itself by a full version — and did
+  so inside a security audit request, where the deployed venv was described as v0.1.0 when it
+  was v0.2.0. Now pinned by a test that reads `pyproject.toml` rather than
+  `importlib.metadata`, since metadata lags a source tree.
+
+### Changed
+
+- **State DB schema 2 — the `session_id` backfill.** 0.2.0 populated the column going forward,
+  leaving 421 of 447 legacy rows permanently empty. **A 6%-populated column is worse than an
+  empty one:** an always-empty column is an obvious trap, whereas this returned rows and looked
+  like it worked while omitting 94% of the corpus. Backfilled from the transcript basename,
+  which was checked rather than assumed — it matched 26/26 on the rows already populated, and
+  447 stems are distinct across 447 rows. A stem that is not a bare identifier is skipped
+  rather than scrubbed: a wrong id would resolve to another session's event log.
+
+- **One loader, not two.** `qc_cli._log_from_dict` moved to `eventlog.log_from_dict` and now
+  reconstructs `stats` rather than discarding it — `qc` grades from `turns`, but a replay needs
+  `raw_file_bytes`. `contains_value` deliberately does **not** share the parse: it walks raw
+  string leaves to classify a redaction fire (vikunja#856), where "there is no log" and "the
+  log says no" support different claims.
+
 ## [0.2.0] — 2026-09-16
 
 **Minor, not patch.** These are bug fixes, but two of them change contracts: `scribe recover`

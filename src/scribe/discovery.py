@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config
-from .state import STATUS_ACTIVE, STATUS_COMPLETE, SessionRow, Store
+from .eventlog import session_eventlog
+from .state import STATUS_ACTIVE, STATUS_COMPLETE, STATUS_PROVISIONAL, SessionRow, Store
 
 
 @dataclass(frozen=True)
@@ -117,4 +118,32 @@ def scan(cfg: Config, store: Store, *, now: float | None = None) -> list[Session
             store.set_status(str(found.path), STATUS_COMPLETE)
             row.status = STATUS_COMPLETE
         ready.append(row)
+    return ready
+
+
+def orphaned(cfg: Config, store: Store) -> list[SessionRow]:
+    """Sessions whose transcript is gone but whose event log survives (vikunja#873).
+
+    `scan` cannot reach these: it discovers from the filesystem, and the file it discovers by
+    no longer exists. Transcripts age out at 30 days (`cleanupPeriodDays` is unset, #778)
+    while `eventlogs/` has no cleanup policy at all, so this is the set that grows.
+
+    **Replay is opt-in, and the gate is the status.** Only rows a deliberate
+    `scribe recover --apply` reopened are offered -- `reset_for_retry` is what moves a row out
+    of `summarized`, and it is only called for a session whose block on disk is admittedly a
+    stand-in. That matters more than it looks: 18 event logs currently have no transcript and
+    **16 of them already hold real digests**. A rule phrased as "replay every orphaned log"
+    would re-summarize those sixteen and overwrite good digests with a replay -- the one way
+    this feature can destroy something. Requiring the reopen means an untouched session stays
+    untouched no matter how long its transcript has been gone.
+    """
+    ready: list[SessionRow] = []
+    for status in (STATUS_COMPLETE, STATUS_PROVISIONAL):
+        for row in store.list_by_status(status):
+            if Path(row.transcript_path).expanduser().exists():
+                continue
+            if not (row.has_unread_bytes or row.is_retryable_provisional):
+                continue
+            if session_eventlog(cfg.eventlog_dir, row.session_id, row.transcript_path).is_file():
+                ready.append(row)
     return ready
