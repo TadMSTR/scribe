@@ -297,8 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     except SchemaTooNewError as exc:
         print(f"scribe: {exc}", file=sys.stderr)
         return EXIT_STATE_INCOMPATIBLE
-    except Exception as exc:  # noqa: BLE001 -- deliberate: see below
-        # Broad on purpose. The point is not to handle these individually but to stop ANY of
+    except Exception as exc:
+        # Deliberately broad. The point is not to handle these individually but to stop ANY of
         # them being reported as a finding, so narrowing this to the failures seen so far
         # would reopen the hole for the next one. `Exception` and not `BaseException`:
         # KeyboardInterrupt and SystemExit must still propagate.
