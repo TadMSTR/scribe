@@ -42,6 +42,7 @@ class SchemaTooNewError(RuntimeError):
     still-deployed v0.2.0 cron reset the marker on its next hourly run (vikunja#877).
     """
 
+
 STATUS_ACTIVE = "active"
 STATUS_COMPLETE = "complete"
 STATUS_SUMMARIZED = "summarized"
