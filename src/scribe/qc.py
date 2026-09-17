@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .extract.models import EventLog
+from .summarize.render import TRUNCATION_RE
 from .writeback import ANCHOR_RE, TERMINATOR_RE
 
 #: Below this share of the session's non-trivial events, a digest is a FAIL rather than a
@@ -259,11 +260,16 @@ def strip_scribe_markers(text: str) -> str:
     attached, while the CLI grades the file *after* — the two graded different documents, and
     only the CLI's is the one a human re-checking a digest later actually has.
 
-    Only the two known markers are removed, not all HTML comments. Stripping every comment
+    Only the known markers are removed, not all HTML comments. Stripping every comment
     would also silence a hallucinated path a model happened to put inside one, which is a
     hole this does not need to open.
+
+    `TRUNCATION_RE` is here on the same argument and not as an afterthought: the truncation
+    note is written by `render_digest` when an unbounded field overflows (vikunja#884), so it
+    is scribe's prose, not the model's. Grading it would attach a guaranteed finding to
+    exactly the digests this build exists to stop losing.
     """
-    return TERMINATOR_RE.sub(" ", ANCHOR_RE.sub(" ", text))
+    return TRUNCATION_RE.sub(" ", TERMINATOR_RE.sub(" ", ANCHOR_RE.sub(" ", text)))
 
 
 def _claims(text: str) -> dict[str, set[str]]:

@@ -7,6 +7,7 @@ import json
 import pytest
 
 from scribe.summarize.schema import (
+    _LIST_FIELDS,
     MAX_DONE_ITEMS,
     MAX_ITEMS,
     MAX_ROLLUP_ITEMS,
@@ -16,6 +17,12 @@ from scribe.summarize.schema import (
     json_schema,
     parse,
 )
+
+#: Which fields reject an overflow and which shorten it. Derived from the contract itself so
+#: that moving a field between the two classes updates every test that depends on the split
+#: rather than leaving one asserting the old behaviour.
+BOUNDED = sorted(f.name for f in _LIST_FIELDS if f.bounded)
+UNBOUNDED = sorted(f.name for f in _LIST_FIELDS if not f.bounded)
 
 VALID = {
     "asked": "Check the release workflow",
@@ -100,11 +107,21 @@ def test_a_json_array_is_rejected() -> None:
         parse("[1, 2, 3]")
 
 
-def test_item_cap_is_enforced() -> None:
+def test_item_cap_is_enforced_on_a_bounded_field_and_truncates_an_unbounded_one() -> None:
+    """The cap still bites both ways — what differs is what overflowing COSTS.
+
+    `done` is bounded by the session's own commands, so more entries than the cap means the
+    model invented some and the response is refused. `found` is free prose with no input-side
+    ceiling, so the surplus is dropped and the session survives (vikunja#884). Keeping both
+    halves in one test is deliberate: a change that made everything truncate would silently
+    delete the guard, and this is where that shows up.
+    """
     with pytest.raises(SchemaError, match="more than the"):
         parse({"asked": "a", "done": [f"item {i}" for i in range(MAX_DONE_ITEMS + 1)]})
-    with pytest.raises(SchemaError, match="more than the"):
-        parse({"asked": "a", "done": ["d"], "found": [f"f{i}" for i in range(MAX_ITEMS + 1)]})
+
+    d = parse({"asked": "a", "done": ["d"], "found": [f"f{i}" for i in range(MAX_ITEMS + 1)]})
+    assert len(d.found) == MAX_ITEMS
+    assert d.truncated == {"found": 1}
 
 
 def test_long_items_are_truncated_not_rejected() -> None:
@@ -164,9 +181,16 @@ def test_declared_maxitems_is_the_cap_parse_enforces(name: str) -> None:
     at_cap = {"asked": "a", "done": ["d"], name: [f"i{i}" for i in range(cap)]}
     assert len(getattr(parse(at_cap), name)) == cap
 
+    # One item over is where the declared number and the enforced number would diverge. Both
+    # classes are checked against the SAME cap read from the schema — only the consequence of
+    # passing it differs, so a drifted `maxItems` still fails here whichever class it is in.
     over = dict(at_cap, **{name: [f"i{i}" for i in range(cap + 1)]})
-    with pytest.raises(SchemaError, match="more than the"):
-        parse(over)
+    if name in BOUNDED:
+        with pytest.raises(SchemaError, match="more than the"):
+            parse(over)
+    else:
+        assert len(getattr(parse(over), name)) == cap
+        assert parse(over).truncated == {name: 1}
 
 
 def test_a_rollup_backed_field_takes_the_real_over_cap_session() -> None:
@@ -191,8 +215,12 @@ def test_there_are_three_distinct_caps_not_one() -> None:
     assert MAX_ITEMS < MAX_ROLLUP_ITEMS < MAX_DONE_ITEMS
     size = MAX_ROLLUP_ITEMS
     assert len(parse({"asked": "a", "done": ["x"], "tickets": ["#1"] * size}).tickets) == size
-    with pytest.raises(SchemaError, match="more than the"):
-        parse({"asked": "a", "done": ["x"], "found": [f"f{i}" for i in range(size)]})
+    # `found` at the same length is NOT accepted at that length -- it is cut back to its own,
+    # lower cap. The three caps stay distinct; collapsing them would show up as this digest
+    # keeping all `size` items.
+    d = parse({"asked": "a", "done": ["x"], "found": [f"f{i}" for i in range(size)]})
+    assert len(d.found) == MAX_ITEMS
+    assert d.truncated == {"found": size - MAX_ITEMS}
 
 
 @pytest.mark.parametrize("observed", [41, 42, 43, 44, 45, 46, 47, 49, 53, 65, 67])
@@ -281,3 +309,73 @@ def test_no_violation_message_quotes_the_response(bad) -> None:
     with pytest.raises(SchemaError) as exc:
         parse(bad)
     assert SENTINEL not in str(exc.value)
+
+
+def test_the_44_item_found_that_cost_a_session_now_parses() -> None:
+    """The real rejection, at its real length.
+
+    Session `6017c8ce` was discarded on 2026-09-17 with
+    `field 'found' has 44 items, more than the 40 cap` — one over-long prose field taking a
+    whole session's summary with it (vikunja#884). 44 rather than a synthetic `cap + 1`
+    because the point of the number is that it was observed: nothing in the written corpus
+    reaches 40, so a test tuned to the corpus would have been satisfied at 33 and proved
+    nothing.
+    """
+    d = parse({"asked": "a", "done": ["d"], "found": [f"f{i}" for i in range(44)]})
+    assert len(d.found) == MAX_ITEMS
+    assert d.truncated == {"found": 4}
+
+
+@pytest.mark.parametrize("name", UNBOUNDED)
+def test_every_unbounded_field_truncates_not_just_the_one_that_failed(name: str) -> None:
+    """`found` is the field that happened to fail first, not the only one exposed.
+
+    `decisions` and `open_items` share its shape exactly — free prose against `MAX_ITEMS`,
+    with nothing on the input side to bound them — and their written maxima (22 and 21) are
+    just as right-censored as `found`'s 33 was. Fixing only the field with a corpse attached
+    is how this bug reached its third occurrence.
+    """
+    d = parse({"asked": "a", "done": ["d"], name: [f"i{i}" for i in range(MAX_ITEMS + 7)]})
+    assert len(getattr(d, name)) == MAX_ITEMS
+    assert d.truncated == {name: 7}
+
+
+def test_truncation_does_not_swallow_a_genuinely_malformed_response() -> None:
+    """The half that proves the guard still exists.
+
+    Truncation is for a response that is too LONG. A response that is WRONG — not JSON, not an
+    object, missing `asked`, a non-string inside a list, or a bounded field past its ceiling —
+    must still be refused, or "we stopped discarding digests" would just mean the validator
+    was deleted. #848 and #868 were both gates that passed everything.
+    """
+    for bad in ("", "not json at all", "[1, 2, 3]", '{"done": ["d"]}'):
+        with pytest.raises(SchemaError):
+            parse(bad)
+    with pytest.raises(SchemaError, match="expected string"):
+        parse({"asked": "a", "done": ["d"], "found": ["ok", {"nested": "object"}]})
+    with pytest.raises(SchemaError, match="must be a list"):
+        parse({"asked": "a", "done": ["d"], "found": 17})
+
+
+def test_a_clean_digest_records_no_truncation() -> None:
+    """The overwhelmingly common case. A non-empty `truncated` on an ordinary digest would
+    put a note on every block in the corpus."""
+    assert parse(VALID).truncated == {}
+
+
+def test_which_fields_are_unbounded_is_pinned_not_merely_derived() -> None:
+    """The classification itself, stated once as a literal.
+
+    Every other test here reads `BOUNDED`/`UNBOUNDED` off `_LIST_FIELDS`, which keeps them
+    consistent but means none of them can notice a field CHANGING class — they would simply
+    re-derive and pass. Worse, `test_every_unbounded_field_truncates...` is parametrized over
+    `UNBOUNDED`, so emptying it collapses that test to zero cases and reports a skip rather
+    than a failure. Measured, by flipping every field to bounded: 5 tests fail and that one
+    silently skips.
+
+    So the split is written out here. Moving a field between the classes is a real decision
+    about whether its ceiling is knowable from the event log, and it should have to be made
+    twice.
+    """
+    assert UNBOUNDED == ["decisions", "found", "open_items"]
+    assert BOUNDED == ["artifacts", "done", "tickets"]

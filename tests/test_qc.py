@@ -705,3 +705,31 @@ def test_a_marker_shaped_span_inside_prose_is_still_graded(bare_log) -> None:
     report = Report()
     check_groundedness("- Note: <!-- /etc/shadow was read -->\n", bare_log, report)
     assert any("/etc/shadow" in f.detail for f in report.findings)
+
+
+def test_the_truncation_note_is_stripped_before_anything_reads_it() -> None:
+    """Asserted on `strip_scribe_markers` directly, and for the same reason as the anchor:
+    a groundedness-level test of it would prove nothing today.
+
+    **The note currently yields no claim even unstripped.** It carries no path, no backticked
+    span, no `#ticket` and no tool name, so `_claims` returns an empty set either way —
+    measured, not assumed. A `check_groundedness` test would therefore pass with this strip
+    deleted, which is precisely the vacuous shape the anchor test above refuses.
+
+    The strip is kept regardless, as defence in depth rather than a live fix. The note is
+    scribe's own prose (vikunja#884), it is a category error to grade it as a model claim, and
+    the only thing making it harmless right now is its wording. Adding a field name in
+    backticks — the obvious next edit — would turn it into an identifier claim grounded in no
+    event log, on every truncated digest.
+    """
+    note = "_Truncated: 4 further items dropped at the 40-item cap._"
+    assert note not in strip_scribe_markers(f"- A real bullet\n{note}\n- Another bullet")
+    assert "A real bullet" in strip_scribe_markers(f"- A real bullet\n{note}\n")
+
+
+def test_stripping_the_note_does_not_eat_an_ordinary_italic_line() -> None:
+    """The pattern is anchored to the marker prefix, not to underscores in general. A digest
+    bullet may legitimately contain emphasis, and a greedy pattern would silence real claims
+    — the hole `strip_scribe_markers` explicitly declines to open for HTML comments."""
+    text = "- Read _config.py_ and /repo/src/mod.py\n"
+    assert strip_scribe_markers(text) == text

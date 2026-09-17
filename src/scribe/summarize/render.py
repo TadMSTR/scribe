@@ -12,7 +12,9 @@ in whatever concatenates the blocks.
 
 from __future__ import annotations
 
-from .schema import Digest
+import re
+
+from .schema import Digest, field_caps
 
 _SECTIONS: tuple[tuple[str, str], ...] = (
     ("done", "Done"),
@@ -33,8 +35,34 @@ def _bullet(text: str) -> str:
     return "- " + " ".join(text.split())
 
 
+#: Prefix of the line that records a truncated field, and the pattern that matches the whole
+#: line. Both are constants for the same reason `PLACEHOLDER_MARKER` is: `qc` has to recognise
+#: this line to *exclude* it, and a reworded banner that silently stops being recognised would
+#: reintroduce the finding it exists to avoid.
+TRUNCATION_MARKER = "_Truncated:"
+TRUNCATION_RE = re.compile(rf"^{re.escape(TRUNCATION_MARKER)}[^\n]*_$", re.M)
+
+
+def _truncation_note(dropped: int, cap: int) -> str:
+    """The line that says items were dropped.
+
+    **Deliberately not a bullet.** The QC gate reads bullets as the model's claims and grades
+    each against the event log; a bullet asserting "4 further items were dropped" is a claim
+    scribe made, about scribe, which appears in no event log and would fail groundedness on
+    every truncated digest. That is the vikunja#848 shape — a gate that flags its own output.
+    `qc.strip_scribe_markers` removes this line for the same reason it removes the anchor.
+
+    It stays human-visible regardless, because the whole argument for truncating over
+    rejecting is that a shortened digest beats no digest — and that is only honest if the
+    reader can see it was shortened.
+    """
+    items = "item" if dropped == 1 else "items"
+    return f"{TRUNCATION_MARKER} {dropped} further {items} dropped at the {cap}-item cap._"
+
+
 def render_digest(digest: Digest, *, heading: str = "") -> str:
     """Render one session digest. Always terminated with a newline."""
+    caps = field_caps()
     lines: list[str] = []
     if heading:
         lines.append(f"### {heading}")
@@ -47,6 +75,9 @@ def render_digest(digest: Digest, *, heading: str = "") -> str:
         lines.append("")
         lines.append(f"**{label}:**")
         lines.extend(_bullet(v) for v in values)
+        dropped = digest.truncated.get(attr, 0)
+        if dropped:
+            lines.append(_truncation_note(dropped, caps[attr]))
     return "\n".join(lines) + "\n"
 
 

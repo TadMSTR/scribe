@@ -224,6 +224,26 @@ same turn, and its session is offered again for a bounded number of sweeps
 (`state.MAX_PROVISIONAL_ATTEMPTS`). A final block is never overwritten by anything, including
 by a later placeholder for the same turn.
 
+### Why a long field does not become a placeholder
+
+A schema violation produces a placeholder, so what counts as a violation decides what gets
+lost. Two things can be wrong with a response, and only one of them is worth discarding a
+session over:
+
+| class | fields | over the cap means | so |
+|---|---|---|---|
+| **bounded** | `done`, `artifacts`, `tickets` | the model invented entries — the log cannot support that many | reject, not retryable |
+| **unbounded** | `found`, `decisions`, `open_items` | the model went long — free prose, nothing bounds it | truncate, mark, and write |
+
+Any cap on free prose is an arbitrary cliff, so rejecting at one trades a whole session for a
+surplus bullet. The cap is still **declared** to the model in the JSON schema — that is what
+makes it shed to fit, and truncation is only the backstop for when shedding is not enough.
+
+This distinction is the one thing to preserve here. It was diagnosed three times as "the cap
+is too low" (#849, #872, #884) and fixed three times by raising a number, which relocates the
+cliff rather than removing it. Do not read the written corpus as evidence a cap is safe: it is
+right-censored by that very cap, so the survivors top out below it no matter where it is set.
+
 This is what the run totals mean:
 
 ```
@@ -265,6 +285,14 @@ contract rather than a convenience:
 | `1` | unrepaired loss, and it is recoverable |
 | `2` | config error |
 | `3` | unrepaired loss that re-running will not fix — no transcript *and* no usable event log |
+| `4` | **the tool failed** — it did not assess the corpus, so this says nothing about loss |
+| `5` | the state DB is newer than this build understands — upgrade scribe, don't edit the DB |
+
+**`4` and `5` were added in 0.4.0; `0`–`3` did not move.** Before `4` existed, an unhandled
+exception — a corrupt state DB, say — exited `1`, which is the code meaning "repairable loss".
+A crashed tool was indistinguishable from a real finding, and the only thing preventing an
+unattended page was the caller's own guard requiring a report line in the output. Keep that
+guard; it just should not have been the only one.
 
 **Poll with the dry run; `--apply` is the repair.** `--apply` returns `0` whenever it
 completes, because a repair that reports failure every time it works pages an operator into

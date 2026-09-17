@@ -36,7 +36,31 @@ vikunja#875), so they are a contract rather than an implementation detail.
   2  `ConfigError`. Pre-existing, unchanged.
   3  Unrepaired loss that re-running will NOT fix -- at least one affected session
      has neither a transcript nor a usable event log. Needs a human.
+  4  The tool FAILED. It did not assess the corpus, so nothing here is a statement
+     about whether anything is lost. A bug, or an environment failure.
+  5  The state database cannot be used by this binary -- its `user_version` is
+     newer than this build understands. Upgrade scribe; do not touch the DB.
 ===  ============================================================================
+
+**`4` and `5` are additions, and the existing four did not move.** A scheduled detector
+consumes these (`scribe-recover-check.sh`, in host-forge-scripts, which is not this repo's
+file) and documents the table verbatim, so renumbering would silently re-point a pager.
+Adding is safe; a consumer that does not know `4` sees an unrecognised non-zero code, which
+is the correct reaction to "the tool broke" anyway.
+
+**Why `4` had to exist.** `main` caught `ConfigError` and nothing else, so `Store(...)`
+opening a corrupt sqlite file -- or any other unhandled exception -- printed a traceback and
+exited **1**, which is the code that means "repairable digest loss, go run the repair". A
+crashed tool was indistinguishable from a real finding, and the only thing standing between
+that and an unattended page was the consumer's own guard requiring a `dry run:`/`applied:`
+report line. That guard is sound and should stay, but it was carrying a load that belongs
+here: a tool should say when it has failed rather than rely on the caller to notice it
+produced no output. (MEDIUM, part 4 audit, vikunja#880.)
+
+**Note the one pre-existing overlap this does not change.** `argparse` exits `2` on a usage
+error, which is also `EXIT_CONFIG`. Both mean "the operator got the invocation wrong", the
+scheduled caller passes fixed arguments, and moving `EXIT_CONFIG` would be exactly the
+renumbering ruled out above.
 
 Two properties are load-bearing and easy to break:
 
@@ -59,12 +83,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config, ConfigError, load
 from .eventlog import EventLogError, load_eventlog, session_eventlog
-from .state import Store
+from .state import SchemaTooNewError, Store
 from .summarize.contamination import SUPPRESSION_MARKER
 from .summarize.render import PLACEHOLDER_MARKER
 from .writeback import (
@@ -81,6 +106,8 @@ EXIT_OK = 0
 EXIT_RECOVERABLE = 1
 EXIT_CONFIG = 2
 EXIT_UNRECOVERABLE = 3
+EXIT_INTERNAL = 4
+EXIT_STATE_INCOMPATIBLE = 5
 
 
 @dataclass
@@ -259,8 +286,40 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"scribe: {exc}", file=sys.stderr)
         return EXIT_CONFIG
-    store = Store(args.state or cfg.state_path)
-    report = recover(cfg, store, apply=args.apply)
+
+    # Everything from here on is guarded. Opening the store and walking the corpus both touch
+    # the filesystem and a sqlite file, and an exception escaping either used to land on
+    # Python's default exit status -- 1, the code for "repairable loss". See the module
+    # docstring; this is the whole of vikunja#880.
+    try:
+        store = Store(args.state or cfg.state_path)
+        report = recover(cfg, store, apply=args.apply)
+    except SchemaTooNewError as exc:
+        print(f"scribe: {exc}", file=sys.stderr)
+        return EXIT_STATE_INCOMPATIBLE
+    except Exception as exc:
+        # Deliberately broad. The point is not to handle these individually but to stop ANY of
+        # them being reported as a finding, so narrowing this to the failures seen so far
+        # would reopen the hole for the next one. `Exception` and not `BaseException`:
+        # KeyboardInterrupt and SystemExit must still propagate.
+        print(f"scribe: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # SECURITY[accepted] 2026-09-17, audit scribe-schema-and-exit-contracts-2026-09 (LOW).
+        # This traceback reaches the #sysadmin Matrix room: `scribe-recover-check.sh` captures
+        # stdout+stderr, truncates to 300 chars and edge-triggers an alert. Accepted because
+        # the disclosure is bounded to local paths and library exception text -- `recover`
+        # touches no model output, so every exception reachable here is sqlite or filesystem
+        # in origin, and the room is internal and already carries the ConfigError path.
+        #
+        # **The premise, stated so it can be re-checked rather than inherited:** this holds
+        # only while nothing in this call path reads digest or transcript CONTENT into an
+        # exception message. If `recover` ever grows a step that parses session text, re-open
+        # this -- the reasoning expires with that assumption, not on a date.
+        #
+        # Keep the traceback. It is what makes EXIT_INTERNAL diagnosable at all; without it
+        # the operator gets an exit code and no cause. Narrowing to the first frame is a
+        # legibility preference, not a security fix.
+        traceback.print_exc(file=sys.stderr)
+        return EXIT_INTERNAL
 
     mode = "applied" if report["applied"] else "dry run"
     print(

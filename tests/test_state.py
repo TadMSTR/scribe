@@ -15,6 +15,7 @@ from scribe.state import (
     STATUS_COMPLETE,
     STATUS_FAILED,
     STATUS_SUMMARIZED,
+    SchemaTooNewError,
     SessionRow,
     Store,
 )
@@ -267,3 +268,54 @@ def test_the_backfill_matches_what_the_event_log_lookup_expects(tmp_path) -> Non
     Store(db)
     backfilled = _ids(db)[tpath]
     assert session_eventlog(tmp_path, backfilled, tpath) == session_eventlog(tmp_path, "", tpath)
+
+
+def test_an_older_binary_does_not_lower_the_schema_marker(tmp_path, monkeypatch) -> None:
+    """The hazard runs in the direction a naive test does not.
+
+    Opening an OLD database with a NEW binary passes whether or not the stamp is guarded —
+    the marker moves up either way, which is correct behaviour and proves nothing. What broke
+    (vikunja#877) is the reverse: a schema-N database opened by a schema-(N-1) build, which
+    stamped `user_version` unconditionally and quietly relabelled the DB downwards. Observed
+    live, when the still-deployed v0.2.0 cron reset a schema-2 marker on its next hourly run.
+
+    So: write the marker one AHEAD of what the binary claims to understand, and assert the
+    binary leaves it alone.
+    """
+    db = tmp_path / "state.sqlite3"
+    Store(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    # The older binary, simulated where it actually lives: the constant the running code
+    # compares against. It must not come away having rewritten the marker.
+    monkeypatch.setattr("scribe.state.SCHEMA_VERSION", SCHEMA_VERSION - 1)
+    with pytest.raises(SchemaTooNewError):
+        Store(db)
+
+    with sqlite3.connect(db) as conn:
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+
+
+def test_a_database_from_a_newer_scribe_is_refused_rather_than_used(tmp_path) -> None:
+    """An older binary meeting a newer database is the case most likely to lose data, and it
+    was completely silent. Refusing is the point — a `Store` that opened it and carried on
+    would write rows against a schema it does not know."""
+    db = tmp_path / "state.sqlite3"
+    Store(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+
+    with pytest.raises(SchemaTooNewError, match=f"schema {SCHEMA_VERSION + 1}"):
+        Store(db)
+
+
+def test_the_marker_still_advances_on_an_older_database(tmp_path) -> None:
+    """The true positive kept beside the guard. "Only ever advance" must not quietly become
+    "never write", which would leave every migration gate reading 0 forever."""
+    db = tmp_path / "state.sqlite3"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(_SCHEMA)
+        conn.execute("PRAGMA user_version = 0")
+
+    assert Store(db).schema_version == SCHEMA_VERSION

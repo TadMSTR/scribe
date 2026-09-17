@@ -68,6 +68,19 @@ class SessionResult:
     #: path should make it unreachable; it is counted so that claim is checkable rather than
     #: assumed.
     discarded: bool = False
+    #: Items dropped because an unbounded field overflowed its cap (vikunja#884).
+    #:
+    #: **Not a fourth term in the identity above.** A truncated digest is summarized and it is
+    #: written, so `written == summarized + suppressed + placeholder` is untouched — this is an
+    #: annotation on a success, not a new outcome. That identity is what made this whole family
+    #: of bugs visible, and a state that broke it would cost more than it reported.
+    #:
+    #: Counted in ITEMS rather than as a flag because the number is the evidence for whether
+    #: the cap is set anywhere near right. Nothing else measures the uncensored tail: the
+    #: written corpus is censored by the cap, and now that overflow no longer raises, the
+    #: rejection log will not record it either. If this is routinely large, `MAX_ITEMS` is
+    #: wrong; if it stays at zero, the declared cap is doing the work on its own.
+    truncated_items: int = 0
     dry_run: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
@@ -108,6 +121,7 @@ class SessionResult:
             "suppressed": self.suppressed,
             "placeholder": self.placeholder,
             "discarded": self.discarded,
+            "truncated_items": self.truncated_items,
             "dry_run": self.dry_run,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -350,6 +364,8 @@ def process_session(
     # gone. Recorded here so the run totals can say so out loud -- inferring it from
     # `written - summarized` is how 13 lost sessions would have read as a clean backfill.
     result.placeholder = not outcome.ok and not outcome.suppressed
+    if outcome.digest is not None:
+        result.truncated_items = sum(outcome.digest.truncated.values())
     result.errors.extend(outcome.errors)
     if outcome.input_tokens or outcome.output_tokens:
         record_spend(
@@ -506,6 +522,11 @@ def summarize_run(results: list[SessionResult]) -> dict:
         #: Non-zero means summaries were LOST, not merely degraded. Treat it as loud.
         "placeholders": sum(1 for r in results if r.placeholder),
         "discarded": sum(1 for r in results if r.discarded),
+        #: Sessions with at least one truncated field, and the total items dropped across the
+        #: sweep. Both, because they answer different questions: the first is how often the
+        #: declared cap fails to hold, the second is by how much.
+        "truncated": sum(1 for r in results if r.truncated_items),
+        "truncated_items": sum(r.truncated_items for r in results),
         "events_total": sum(r.events for r in results),
         "secrets_redacted": sum(r.secrets_redacted for r in results),
         "post_render_redactions": sum(r.post_render_redactions for r in results),
