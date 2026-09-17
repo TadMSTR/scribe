@@ -9,6 +9,7 @@ because it graded a summary against another summary rather than against the sour
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from scribe.extract.models import EventLog, Turn
 from scribe.qc import (
     DEFAULT_COVERAGE_FLOOR,
     Report,
+    _PATH_RE,
     _tokens_co_occur,
     check_digest,
     check_freshness,
@@ -102,6 +104,112 @@ def test_a_partial_path_is_accepted(log) -> None:
     equality would fail a true claim."""
     report = check_digest("**Asked:** x\n\n**Done:**\n- edited /repo/src/mod.py\n", log, floor=0.0)
     assert not any(f.check == "groundedness" for f in report.findings)
+
+
+# --- vikunja#874: a sentence-ending period is not part of the path -------------------------
+
+
+def _log_with_a_path_only_in_the_prose(path: str) -> EventLog:
+    """An event log whose only mention of `path` is in what the user said.
+
+    This is the live shape, and the distinction is what makes the test non-vacuous. A path in
+    `rollup.files_read` is excused by `_in_category`'s bidirectional containment -- the
+    terminator-bearing claim CONTAINS the real path, so it grades grounded even with the
+    defect present. The defect only bites on the second route, verbatim presence in the
+    corpus, where `.../request.md.` is simply absent. The 2026-09-16 case was exactly that:
+    an audit-request path Ted named in conversation, never opened as a file.
+    """
+    return EventLog(
+        session_id="s",
+        transcript_path="/var/tmp/projects/one/sess.jsonl",
+        turns=[Turn(turn_uuid="u1", index=0, user_text=f"file the audit request to {path}")],
+    )
+
+
+def test_a_true_path_claim_at_the_end_of_a_sentence_is_grounded() -> None:
+    """The live 2026-09-16 case. `_PATH_RE`'s body class held a literal `.`, so a path that
+    ended a sentence was extracted WITH the terminator -- a string that appears in no event
+    log -- and a true claim was recorded as ungrounded. Two thirds of real groundedness
+    findings were this one artifact."""
+    path = "~/.claude/comms/artifacts/audit-requests/scribe/request.md"
+    report = check_digest(
+        f"**Asked:** x\n\n**Done:**\n- Filed the audit request to {path}.\n",
+        _log_with_a_path_only_in_the_prose(path),
+        floor=0.0,
+    )
+    assert not any(f.check == "groundedness" for f in report.findings), [
+        f.detail for f in report.findings
+    ]
+
+
+def test_that_true_claim_really_was_failing_before(monkeypatch) -> None:
+    """The pair that proves the test above is not vacuous.
+
+    Re-grade the SAME digest against the SAME log with the pre-fix pattern restored. If this
+    does not fail, the test above is passing for some other reason and proves nothing about
+    vikunja#874.
+    """
+    import scribe.qc as qc
+
+    path = "~/.claude/comms/artifacts/audit-requests/scribe/request.md"
+    monkeypatch.setattr(
+        qc, "_PATH_RE", re.compile(r"(?:(?<=\s)|^)(?:~|\.{0,2})/[\w./~-]{3,}")
+    )
+    report = check_digest(
+        f"**Asked:** x\n\n**Done:**\n- Filed the audit request to {path}.\n",
+        _log_with_a_path_only_in_the_prose(path),
+        floor=0.0,
+    )
+    assert any("request.md." in f.detail for f in report.findings), [
+        f.detail for f in report.findings
+    ]
+
+
+def test_an_invented_path_at_the_end_of_a_sentence_still_fails(log) -> None:
+    """The true positive the fix must keep. #848 was tuned to ~4/5 passing WITH the real
+    defect still caught, and #868 was the same shape -- a guard tuned until everything passes
+    is not a guard. Trimming the terminator must not also excuse the claim."""
+    report = check_digest(
+        "**Asked:** x\n\n**Done:**\n- Also edited /etc/nginx/nginx.conf.\n", log, floor=0.0
+    )
+    assert not report.ok
+    assert any("nginx.conf" in f.detail for f in report.findings)
+    # The terminator is gone from the claim as reported, not merely tolerated in the compare.
+    assert not any("nginx.conf.'" in f.detail for f in report.findings), [
+        f.detail for f in report.findings
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The defect itself, in both prefix forms.
+        ("read /repo/src/mod.py.", "/repo/src/mod.py"),
+        ("read ~/notes/thing.md.", "~/notes/thing.md"),
+        # An ellipsis is three terminators, not a path component.
+        ("read /repo/a/b.md... and", "/repo/a/b.md"),
+        # ...and the cases a bare rstrip(".") would break. A trailing dot is legitimate
+        # exactly when it is a complete final segment.
+        ("walked /repo/src/.. back", "/repo/src/.."),
+        ("the tree at ../../.. root", "../../.."),
+        ("a dir /repo/src/. here", "/repo/src/."),
+        # Prefixes were never at risk -- they match before the body.
+        ("read ./scripts/run.sh first", "./scripts/run.sh"),
+        ("read ../relative/thing.py here", "../relative/thing.py"),
+        # A dotted extension ends in a word character, and a trailing slash or `~` is real.
+        ("a dir /repo/src/ ends", "/repo/src/"),
+        ("backup /repo/foo.py~ kept", "/repo/foo.py~"),
+    ],
+)
+def test_the_path_pattern_trims_a_terminator_and_only_a_terminator(text, expected) -> None:
+    assert _PATH_RE.findall(text) == [expected]
+
+
+def test_the_path_pattern_keeps_its_three_character_floor() -> None:
+    """The `{2,}` body plus one constrained final character is the SAME floor as the old
+    `{3,}`, not a loosening. A two-character path was never a claim worth grading."""
+    assert _PATH_RE.findall("under /ab floor") == []
+    assert _PATH_RE.findall("at /a/b floor") == ["/a/b"]
 
 
 def test_the_event_coverage_floor_fails_a_digest_that_ignores_the_session(log) -> None:
