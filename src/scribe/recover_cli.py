@@ -303,6 +303,21 @@ def main(argv: list[str] | None = None) -> int:
         # would reopen the hole for the next one. `Exception` and not `BaseException`:
         # KeyboardInterrupt and SystemExit must still propagate.
         print(f"scribe: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # SECURITY[accepted] 2026-09-17, audit scribe-schema-and-exit-contracts-2026-09 (LOW).
+        # This traceback reaches the #sysadmin Matrix room: `scribe-recover-check.sh` captures
+        # stdout+stderr, truncates to 300 chars and edge-triggers an alert. Accepted because
+        # the disclosure is bounded to local paths and library exception text -- `recover`
+        # touches no model output, so every exception reachable here is sqlite or filesystem
+        # in origin, and the room is internal and already carries the ConfigError path.
+        #
+        # **The premise, stated so it can be re-checked rather than inherited:** this holds
+        # only while nothing in this call path reads digest or transcript CONTENT into an
+        # exception message. If `recover` ever grows a step that parses session text, re-open
+        # this -- the reasoning expires with that assumption, not on a date.
+        #
+        # Keep the traceback. It is what makes EXIT_INTERNAL diagnosable at all; without it
+        # the operator gets an exit code and no cause. Narrowing to the first frame is a
+        # legibility preference, not a security fix.
         traceback.print_exc(file=sys.stderr)
         return EXIT_INTERNAL
 
