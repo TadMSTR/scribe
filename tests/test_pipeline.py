@@ -928,3 +928,70 @@ def test_an_unreadable_transcript_is_a_failure_not_a_silent_replay(env) -> None:
     assert result.summarized is False
     assert any("extract:" in e for e in result.errors)
     assert store.get(str(target)).status == STATUS_FAILED
+
+
+# --- the traversal, end to end through a real transcript ----------------------------------
+
+
+def _inject_cwd(target: Path, cwd: str) -> None:
+    """Put a top-level `cwd` on the transcript's first well-formed record, leaving the rest
+    byte-identical.
+
+    Rewriting the whole file through `json.loads`/`json.dumps` would silently drop the
+    deliberately malformed line the fixture carries for `records_unparsable` -- so the
+    transcript under test would stop being the one the other tests use.
+    """
+    lines = target.read_text(encoding="utf-8").splitlines()
+    for i, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        record["cwd"] = str(pathlib.Path(cwd).expanduser())
+        lines[i] = json.dumps(record)
+        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+    raise AssertionError("fixture has no parsable record to carry cwd")
+
+
+def test_a_crafted_cwd_cannot_write_a_digest_outside_the_output_root(env, tmp_path) -> None:
+    """The Medium from the p4 audit, driven the whole way rather than asserted at the unit.
+
+    `log.cwd` is taken from the first top-level `cwd` key in the transcript's own records with
+    no shape check, `_agent_from_cwd` returns `Path(cwd).name`, and `daily_path` used to join
+    that straight onto the output root. A `cwd` of `~/.claude/projects/..` therefore put a
+    digest one level above the tree, under a predictable `YYYY-MM-DD.md` name.
+
+    Unit tests on `daily_path` alone would not have caught the introduction of this, because
+    the interesting part is that `cwd` reaches it at all.
+    """
+    cfg, store, target = env
+    _inject_cwd(target, "~/.claude/projects/..")
+    old = 1_000_000.0 - 3600
+    os.utime(target, (old, old))
+
+    (result,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+
+    assert result.written is True, "the digest must still be written, not discarded"
+    root = output_root(cfg).resolve()
+    written = list(root.rglob("*.md"))
+    assert written, "no digest was written at all"
+    for path in written:
+        assert root in path.resolve().parents
+    # And nothing landed in the parent, which is where it used to go.
+    assert not list(root.parent.glob("*.md"))
+
+
+def test_that_crafted_cwd_really_did_reach_the_agent_field(env) -> None:
+    """Control for the test above. If the extractor stopped reading `cwd` from that record,
+    the traversal test would pass while exercising nothing."""
+    _cfg, _store, target = env
+    _inject_cwd(target, "~/.claude/projects/..")
+
+    from scribe.extract import extract
+    from scribe.extract.parser import _agent_from_cwd
+
+    log = extract(target)
+    assert log.cwd.endswith("/projects/..")
+    assert _agent_from_cwd(log.cwd) == "..", "the unsafe value no longer reaches attribution"
+    assert log.agent == ".."

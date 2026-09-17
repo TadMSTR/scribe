@@ -34,6 +34,7 @@ import re
 from pathlib import Path
 
 from .extract.parser import agent_for_path
+from .paths import contained, valid_agent
 
 #: Lines kept per file. The incumbent's `tail -n 40`, and the reason a long day's digest
 #: cannot crowd out the previous day's.
@@ -53,21 +54,6 @@ _BULLET_RE = re.compile(rf"^-{_SP}")
 
 #: `find -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md'`, as the incumbent globbed.
 _JOURNAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
-
-#: An agent name is one path component and is used as one. `.` and `..` match this pattern
-#: and are excluded separately, because a character class cannot express "is not a traversal".
-_AGENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
-def valid_agent(name: str) -> bool:
-    """Whether `name` is safe to use as a directory component.
-
-    The agent name arrives from `$CLAUDE_PROJECT_DIR` or from `--agent` and is then joined
-    onto the digest root, so it is an external identifier reaching a path. `..` clears a
-    naive check twice over -- it is a legal directory name and `Path('.../projects/..').name`
-    really is `".."`, so the environment form reaches here as readily as the flag does.
-    """
-    return bool(_AGENT_RE.match(name)) and name not in {".", ".."}
 
 
 def preview(text: str, max_lines: int = DEFAULT_MAX_LINES) -> str:
@@ -161,10 +147,9 @@ def agent_dir(digest_root: str | os.PathLike[str], agent: str) -> Path:
     root = Path(digest_root).expanduser()
     if not valid_agent(agent):
         raise ValueError(f"not a usable agent name: {agent!r}")
-    target = root / agent
-    if root.resolve(strict=False) not in target.resolve(strict=False).parents:
-        raise ValueError(f"agent directory escapes the digest root: {target}")
-    return target
+    if not contained(root, agent):
+        raise ValueError(f"agent directory escapes the digest root: {root / agent}")
+    return root / agent
 
 
 def agent_for_project(project_dir: str) -> str:

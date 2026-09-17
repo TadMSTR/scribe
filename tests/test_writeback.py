@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scribe.writeback import (
+    UNATTRIBUTED,
     anchor,
     append_block,
     daily_path,
@@ -581,3 +582,62 @@ def test_the_patterns_never_span_a_newline() -> None:
 
     assert not ANCHOR_RE.search("<!-- session:s turn:t transcript:/p.jsonl\n-->")
     assert not TERMINATOR_RE.search("<!-- /scribe\nturn:t -->")
+
+
+# --- the write path had no guard on `agent`, while the read path always had one ------------
+
+
+@pytest.mark.parametrize("agent", ["..", ".", "", "a/b", "../../etc", "/abs"])
+def test_an_unusable_agent_name_cannot_escape_the_digest_root(tmp_path, agent: str) -> None:
+    """`agent` reaches `daily_path` from a transcript's own top-level `cwd` field, via
+    `_agent_from_cwd`, which returns `Path(cwd).name`. A `cwd` of `~/.claude/projects/..`
+    therefore yields `".."` and this used to write one level ABOVE the digest root.
+
+    Medium, memory-consolidation-2026-09-p4 audit. The read side (`journal.agent_dir`) had
+    `valid_agent` plus containment from the start; the write side did not.
+    """
+    got = daily_path(tmp_path, agent, WHEN)
+    assert tmp_path.resolve() in got.resolve().parents
+    assert got.parent.name == UNATTRIBUTED
+
+
+@pytest.mark.parametrize("agent", ["developer", "doc-health", "memory-sync", "a.b", "A9_-"])
+def test_a_legitimate_agent_name_still_names_its_own_directory(tmp_path, agent: str) -> None:
+    """The true positive the guard must not eat. `doc-health` and `memory-sync` are the exact
+    hyphenated names `agent_for_path` exists to resolve correctly -- a guard that routed them
+    to `unknown` would recreate the bug that motivated it."""
+    assert daily_path(tmp_path, agent, WHEN).parent.name == agent
+
+
+def test_the_rejected_digest_is_still_written_rather_than_discarded(tmp_path) -> None:
+    """`daily_path` falls back where `journal.agent_dir` raises, deliberately.
+
+    Refusing to READ yields an empty injection -- indistinguishable from a quiet day. Refusing
+    to WRITE would discard a summary already paid for, which is the loss this whole component
+    exists to prevent. So the digest survives, in the bucket an empty agent always used.
+    """
+    path = daily_path(tmp_path, "..", WHEN)
+    assert append_block(
+        path,
+        body="**Asked:** something\n",
+        session_id="s",
+        turn_uuid="u1",
+        transcript_path="/t.jsonl",
+        when=WHEN,
+    )
+    assert path.is_file()
+    assert "**Asked:** something" in path.read_text(encoding="utf-8")
+
+
+def test_the_write_and_read_sides_agree_on_what_an_agent_name_is(tmp_path) -> None:
+    """One definition in `paths.py`, two consumers. They held different copies of this rule
+    once -- one of them empty -- which is exactly how the write path stayed unguarded while
+    the read path was correct."""
+    from scribe.journal import agent_dir
+
+    for name in ("developer", "doc-health", "a.b"):
+        assert agent_dir(tmp_path, name).name == daily_path(tmp_path, name, WHEN).parent.name
+    for bad in ("..", ".", "a/b"):
+        with pytest.raises(ValueError):
+            agent_dir(tmp_path, bad)
+        assert daily_path(tmp_path, bad, WHEN).parent.name == UNATTRIBUTED
