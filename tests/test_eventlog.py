@@ -352,3 +352,70 @@ def test_the_row_loader_falls_back_to_the_transcript_stem(tmp_path) -> None:
     written = write_eventlog(tmp_path, log)
     assert session_eventlog(tmp_path, "", "/p/abc-123.jsonl") == written
     assert session_eventlog(tmp_path, "abc-123", "/p/abc-123.jsonl") == written
+
+
+# --- the error message is itself an exfiltration path -------------------------------------
+
+_CANARY = "sk-live-AAAABBBBCCCCDDDD"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"session_id": "s", "transcript_path": "t", "stats": {"records": _CANARY}},
+        {
+            "session_id": "s",
+            "transcript_path": "t",
+            "turns": [{"turn_uuid": "u", "index": _CANARY}],
+        },
+        {"session_id": "s", "transcript_path": "t", "stats": {"turns": {"nested": _CANARY}}},
+    ],
+)
+def test_a_malformed_field_never_quotes_its_own_value(tmp_path, payload) -> None:
+    """`int("sk-live-...")` raises ValueError quoting its input verbatim.
+
+    That is normally harmless and here it is not. `load_eventlog` is called from
+    `process_session`, which appends the failure to `result.errors` -- documented in
+    `pipeline.py` as an UNREDACTED sink that reaches the JSON run report and the CLI. Event
+    logs are the least-redacted artefact scribe keeps (0600, derived from a 0600 transcript),
+    so a malformed field would carry its own contents out to a file the redaction model does
+    not cover.
+
+    The field name and the value's type are enough to diagnose a malformed log.
+    """
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(EventLogError) as caught:
+        load_eventlog(bad)
+    assert _CANARY not in str(caught.value)
+    assert "is not an integer" in str(caught.value)
+
+
+def test_the_canary_is_actually_reachable(tmp_path) -> None:
+    """The control for the test above.
+
+    A payload the loader happened to accept, or one that failed before reaching the coercion,
+    would make that test pass while proving nothing. This asserts the canary really is the
+    value the failing conversion receives.
+    """
+    bad = tmp_path / "bad.json"
+    bad.write_text(
+        json.dumps({"session_id": "s", "transcript_path": "t", "stats": {"records": _CANARY}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as raw:
+        int(_CANARY)
+    assert _CANARY in str(raw.value), "canary would not be quoted even by the raw conversion"
+    with pytest.raises(EventLogError):
+        load_eventlog(bad)
+
+
+def test_a_json_syntax_error_may_still_be_reported(tmp_path) -> None:
+    """Not a blanket gag. `JSONDecodeError.__str__` reports a position, never the document,
+    so it is safe and it is the most useful message of the three."""
+    bad = tmp_path / "bad.json"
+    bad.write_text(_CANARY[:10], encoding="utf-8")
+    with pytest.raises(EventLogError) as caught:
+        load_eventlog(bad)
+    assert _CANARY not in str(caught.value)
+    assert "line 1 column 1" in str(caught.value)

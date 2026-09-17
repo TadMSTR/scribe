@@ -220,12 +220,38 @@ def _rebuild(cls, data: dict, **overrides):
         if want.startswith("list["):
             kwargs[name] = [str(x) for x in value] if isinstance(value, list) else []
         elif want.startswith("int"):
-            kwargs[name] = int(value)
+            kwargs[name] = _as_int(cls, name, value)
         elif want.startswith("str"):
             kwargs[name] = str(value)
         else:
             kwargs[name] = value
-    return cls(**kwargs)
+    try:
+        return cls(**kwargs)
+    except TypeError as exc:
+        # Key names only -- they are schema field names, not data. See `_as_int` for why the
+        # distinction between naming a key and quoting a value is enforced at all.
+        raise EventLogError(f"{cls.__name__}: {exc}") from None
+
+
+def _as_int(cls, field: str, value: object) -> int:
+    """Coerce one integer field, reporting the field and the TYPE -- never the value.
+
+    `int("sk-live-...")` raises `ValueError: invalid literal for int() with base 10:
+    'sk-live-...'`, quoting its input verbatim. That matters here specifically: `load_eventlog`
+    is called from `pipeline.process_session`, which appends the failure to `result.errors` --
+    a sink the module documents as UNREDACTED and reaching both the JSON run report and the
+    CLI. Event logs are the least-redacted artefact scribe keeps, so a malformed field would
+    carry its own contents out to a file the redaction model never covers.
+
+    The field name and the type are enough to diagnose a malformed log. The value is not
+    needed and cannot be safely shown.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise EventLogError(
+            f"{cls.__name__}.{field} is not an integer (got {type(value).__name__})"
+        ) from None
 
 
 def log_from_dict(data: dict) -> EventLog:
@@ -291,5 +317,11 @@ def load_eventlog(path: str | Path) -> EventLog:
         raise EventLogError(f"{p} is not an event log: top level is {type(payload).__name__}")
     try:
         return log_from_dict(payload)
+    except EventLogError:
+        # Already shaped to name a field and a type without quoting its value. See `_as_int`.
+        raise
     except (AttributeError, TypeError, ValueError) as exc:
-        raise EventLogError(f"{p} is not an event log: {exc}") from exc
+        # Anything else: report the exception TYPE only. An unanticipated error from deep in
+        # the reconstruction could have interpolated a field's contents into its message, and
+        # this message reaches an unredacted sink.
+        raise EventLogError(f"{p} is not an event log ({type(exc).__name__})") from exc
