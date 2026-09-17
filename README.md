@@ -308,10 +308,36 @@ grader worked; it was pointed at the wrong artefact. So every check here asserts
 
 - **Groundedness** — every path, command, ticket and tool name a digest asserts must appear
   in the event log.
+
+  For a **path**, "appear" means the log holds it literally, *or* holds a directory prefix of
+  it together with the whole remaining relative tail — a tail of one segment only when the two
+  sit within 120 characters of each other — *or* holds it with the leading directories replaced
+  by `~`. A digest that writes `/home/ted/repos/personal/alpha/tests/unit/test_one.py` where the
+  session named the repo and the test file separately is making a true claim about what it was
+  shown, and grading it as a hallucination was the single largest source of findings on the live
+  corpus (vikunja#876). `~` is read as a literal in the log, never resolved against `$HOME`: a
+  gate whose verdict depends on which machine ran it is not one.
 - **Event-coverage floor** — a digest referencing too few of the session's events FAILS.
   Without a floor, an extractor regression that silently drops events reads as a clean pass:
   the digest stays perfectly grounded in a log that has lost most of its content.
 - **Freshness** — a digest exists and is newer than the transcript it summarizes.
+
+#### Measuring the gate
+
+```
+python -m scribe qc-survey                 # grade every block against its own event log
+python -m scribe qc-survey --rule literal  # ... under the pre-vikunja#876 rule, for comparison
+python -m scribe qc-survey --bucket absent # the claims no tolerance reaches — the control set
+python -m scribe qc-survey --probe         # re-derive the segment floors from foreign claims
+```
+
+Read-only: it writes only to stdout or an explicit `--out`. Grading is **per block**, each
+against the log named in its own anchor — a daily digest holds many sessions, and grading the
+file against one of their logs reports 92% failure with every finding false (vikunja#852).
+
+The floors in the composition rule are derived by `--probe`, which measures how often each
+candidate grounds a path harvested from a *different* session's digest — a claim that session
+demonstrably was not shown. A floor chosen against the corpus it judges measures nothing.
 
 ## Status
 

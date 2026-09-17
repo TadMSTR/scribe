@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-USAGE = "usage: python -m scribe {extract|events|journal|qc|recover|run} ..."
+USAGE = "usage: python -m scribe {extract|events|journal|qc|qc-survey|recover|run} ..."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,6 +25,10 @@ def main(argv: list[str] | None = None) -> int:
         from .qc_cli import main as qc_main
 
         return qc_main(args[1:])
+    if args and args[0] == "qc-survey":
+        from .qc_survey_cli import main as qc_survey_main
+
+        return qc_survey_main(args[1:])
     if args and args[0] == "recover":
         from .recover_cli import main as recover_main
 

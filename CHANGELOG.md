@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-17
+
+**Minor, not patch.** The groundedness gate's tolerance for a path claim widens, and a new
+`qc-survey` verb is added. No digest is rewritten and no exit code changes.
+
+### Fixed
+
+- **A true path claim that *composes* is no longer graded as a hallucination** (vikunja#876).
+  `check_groundedness` grounded a path either against the derived rollup set — with containment
+  tolerance — or against the event log corpus, where the test was **exact substring**. So a
+  claim that joined a directory the log names to a relative tail the log also names existed as
+  neither one literal and failed. On the live corpus that was the dominant cause of failure:
+  **39.6% of blocks carried at least one finding, and 880 of 995 findings were path claims.**
+
+  A path claim is now grounded when the log holds it — literally, or as a directory prefix plus
+  the whole remaining relative tail, a one-segment tail only when the two sit within
+  `ADJACENCY_WINDOW` characters of each other — and an absolute claim is tested again with its
+  leading directories replaced by `~`. That sentence is the entire tolerance; vikunja#848's real
+  defect was a classifier whose behaviour nobody could state.
+
+  Measured over the same corpus: block failure **39.6% → 21.5%**, path findings **880 → 158**.
+  Every one of the 26 claims absent from their own event log still fails, and five of them are
+  committed as a regression fixture — a gate that passes everything is not a gate.
+
+  **`~` is read as a literal in the corpus, never resolved against `$HOME`.** A rule that
+  consulted the environment would grade the same digest and the same log differently on a
+  different machine with nothing in the output to say so. The `log.cwd`-join that was the other
+  candidate is not implemented and is not needed: `cwd` is the agent's project directory rather
+  than a repo root, so joining a relative path to it manufactures paths that were never real.
+
+### Added
+
+- **`python -m scribe qc-survey`** — grades every block in a digest corpus against **its own**
+  event log and classifies each rejected path claim as `verbatim`, `home-expansion`, `composed`,
+  `suffix` or `absent`. Read-only; it writes only to stdout or an explicit `--out`.
+
+  It is committed rather than kept as a scratch script because it is the instrument that decides
+  whether the fix worked. vikunja#876 arrived with two independent measurements of one corpus
+  that agreed on the headline and disagreed **16-fold** on the bucket that picks the fix, and
+  neither was reproducible. `--rule literal` grades under the pre-#876 rule, so the "before"
+  number comes from the same commit as the "after" one and the comparison needs no checkout.
+  `--probe` re-derives the segment floors by measuring how often each candidate grounds a path
+  harvested from a *different* session — the method that set `CO_OCCURRENCE_WINDOW`.
+
+  `Survey.gate_disagreements` counts any block where the survey's own path verdicts differ from
+  the findings the gate produced. It is 0, and a non-zero value means the instrument and the
+  thing it measures have drifted.
+
 ## [0.4.1] — 2026-09-17
 
 ### Fixed

@@ -27,6 +27,8 @@ from scribe.qc import (
     check_groundedness,
     classify_span,
     grounding_terms,
+    path_grounded,
+    path_literal,
     strip_scribe_markers,
 )
 from scribe.qc_cli import main as qc_main
@@ -733,3 +735,156 @@ def test_stripping_the_note_does_not_eat_an_ordinary_italic_line() -> None:
     — the hole `strip_scribe_markers` explicitly declines to open for HTML comments."""
     text = "- Read _config.py_ and /repo/src/mod.py\n"
     assert strip_scribe_markers(text) == text
+
+
+# --- vikunja#876: a true claim that COMPOSES is not a hallucination ------------------------
+
+
+def _log_naming(*fragments: str) -> EventLog:
+    """An event log whose prose names each fragment, and nothing else.
+
+    Prose rather than `rollup.files_read` for the same reason as
+    `_log_with_a_path_only_in_the_prose`: a path in the rollup is already excused by
+    `_in_category`'s bidirectional containment, so a test built on one would pass with the
+    defect still present. The corpus route is where this defect lives.
+    """
+    return EventLog(
+        session_id="s",
+        transcript_path="/var/tmp/projects/one/sess.jsonl",
+        turns=[
+            Turn(turn_uuid=f"u{i}", index=i, user_text=text) for i, text in enumerate(fragments)
+        ],
+    )
+
+
+def _grounded(claim: str, log: EventLog) -> bool:
+    report = Report()
+    check_groundedness(f"**Done:**\n- touched {claim}\n", log, report)
+    return not any(f.check == "groundedness" for f in report.findings)
+
+
+def test_a_path_that_composes_two_things_the_log_named_is_grounded() -> None:
+    """The defect. The log names a directory and, separately, a relative path beneath it; the
+    digest writes the two joined. That is a true claim about what the model was shown, and it
+    was 770 of 875 path findings on the live corpus."""
+    log = _log_naming(
+        "cloned into /home/ted/repos/personal/webhook-doorman",
+        "the failing test is in tests/unit/test_router.py",
+    )
+    assert _grounded("/home/ted/repos/personal/webhook-doorman/tests/unit/test_router.py", log)
+
+
+def test_a_path_the_log_never_named_is_still_ungrounded() -> None:
+    """The matched pair. Neither half of this appears, so no amount of composition reaches it
+    -- and it must not, or the gate passes everything."""
+    log = _log_naming(
+        "cloned into /home/ted/repos/personal/webhook-doorman",
+        "the failing test is in tests/unit/test_router.py",
+    )
+    assert not _grounded("/etc/nginx/sites-enabled/doorman.conf", log)
+
+
+def test_the_root_is_not_a_directory_prefix() -> None:
+    """`MIN_PREFIX_SEGMENTS`. At a floor of one, `/home` plus everything after it composes,
+    which would ground every absolute path on the machine against any log that says `/home`."""
+    log = _log_naming("under /home somewhere", "ted/repos/personal/scribe/src/scribe/qc.py")
+    assert not _grounded("/home/ted/repos/personal/scribe/src/scribe/qc.py", log)
+
+
+def test_a_bare_filename_far_from_its_directory_does_not_compose() -> None:
+    """`MIN_TAIL_SEGMENTS` plus `ADJACENCY_WINDOW`. `changelog.md` appears in nearly every log,
+    so a directory pairing with any common filename anywhere in the corpus is the loosening
+    that triples the false-ground rate -- and this is the exact shape a fabricated claim takes:
+    two real things the session never put together."""
+    log = _log_naming(
+        "working in /home/ted/repos/personal/githost-mcp today",
+        "x " * 200,
+        "unrelated later work touched changelog.md in another repo",
+    )
+    assert not _grounded("/home/ted/repos/personal/githost-mcp/changelog.md", log)
+
+
+def test_a_bare_filename_beside_its_directory_does_compose() -> None:
+    """The matched pair, and the whole reason the window exists rather than a flat refusal:
+    said together, they are one claim about one file."""
+    log = _log_naming(
+        "in /home/ted/repos/personal/githost-mcp I updated changelog.md for the release"
+    )
+    assert _grounded("/home/ted/repos/personal/githost-mcp/changelog.md", log)
+
+
+def test_an_absolute_claim_grounds_against_a_home_relative_log() -> None:
+    """The log writes `~/repos/...` because that is how a session's commands are written; the
+    digest expands it. Neither composes on its own -- the claim's absolute prefix appears
+    nowhere -- and this was the largest bucket left after composition landed."""
+    log = _log_naming("filed it to ~/repos/gitea/host-forge-build-reports/thing-2026-09/audit.md")
+    assert _grounded("/home/ted/repos/gitea/host-forge-build-reports/thing-2026-09/audit.md", log)
+
+
+def test_re_anchoring_at_tilde_keeps_the_tail_floor() -> None:
+    """The matched pair. Re-anchoring may not shrink the claim to a bare filename: if
+    `~/audit.md` were a candidate, every absolute path ending in a file the log mentions
+    home-relative would ground."""
+    log = _log_naming("wrote ~/audit.md")
+    assert not _grounded("/home/ted/repos/gitea/host-forge-build-reports/x/audit.md", log)
+
+
+def test_tilde_is_read_from_the_corpus_and_never_from_the_environment(monkeypatch) -> None:
+    """The verdict must not depend on who ran the gate.
+
+    Resolving `~` against `$HOME` would grade the same digest and the same log differently on
+    a different machine, and nothing in the output would say so. This asserts the property
+    directly rather than trusting the implementation to keep it: same inputs, three very
+    different environments, one verdict.
+    """
+    log = _log_naming("filed it to ~/repos/gitea/reports/thing/audit.md")
+    claim = "/home/ted/repos/gitea/reports/thing/audit.md"
+    verdicts = set()
+    for home in ("/home/ted", "/home/someone-else", "/nonexistent"):
+        monkeypatch.setenv("HOME", home)
+        verdicts.add(_grounded(claim, log))
+    assert verdicts == {True}
+
+
+def test_the_pre_876_rule_is_still_available_and_still_strict() -> None:
+    """`path_literal` is what reproduces the "before" number from this commit. If it silently
+    acquired the new tolerance, the comparison this build reports would be against itself."""
+    log = _log_naming(
+        "cloned into /home/ted/repos/personal/webhook-doorman",
+        "the failing test is in tests/unit/test_router.py",
+    )
+    claim = "/home/ted/repos/personal/webhook-doorman/tests/unit/test_router.py"
+    corpus = log.grounding_text().lower()
+    allowed = grounding_terms(log)["paths"]
+    assert path_grounded(claim, allowed, corpus)
+    assert not path_literal(claim, allowed, corpus)
+
+
+#: Real claims from the live corpus's `absent` bucket -- the control set the phase 1 survey
+#: produced. Every one of these was measured to be absent from its own session's log, and each
+#: is the shape of a plausible invention: a real directory, a filename that was never there.
+CONTROL_SET = (
+    "/home/ted/.secrets/forge.env.bak-20260829-1934",
+    "/home/ted/repos/gitea/host-forge-configs/appdata/observability/grafana/"
+    "provisioning/dashboards/forge/disk-space.json",
+    "/etc/forge/manifests/research-agent.yml",
+    "~/repos/gitea/host-forge-scripts/manifests/sysadmin-agent.yml",
+    "/home/ted/.claude/comms/artifacts/config-proposals/2026-08-18-research-remove-plane-mcp.md",
+)
+
+
+@pytest.mark.parametrize("claim", CONTROL_SET)
+def test_the_control_set_still_fails(claim: str) -> None:
+    """A gate that passes everything is not a gate (vikunja#848, #868).
+
+    These fail against a log that names their *neighbourhood* — the parent directories and
+    sibling filenames a session really touched — because that is the only version of this test
+    worth running. Against an empty log they would fail with the tolerance removed entirely.
+    """
+    log = _log_naming(
+        "worked under /home/ted/.secrets and /etc/forge/manifests today",
+        "read /home/ted/repos/gitea/host-forge-configs and ~/repos/gitea/host-forge-scripts",
+        "also /home/ted/.claude/comms/artifacts/config-proposals",
+        "the files were forge.env, developer-agent.yml, host-overview.json and index.md",
+    )
+    assert not _grounded(claim, log)

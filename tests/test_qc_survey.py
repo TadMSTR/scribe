@@ -1,0 +1,265 @@
+"""Tests for the corpus survey — the instrument vikunja#876 was measured with.
+
+An instrument gets tested more carefully than a gate, not less. This build exists partly
+because two throwaway measurements of the same corpus disagreed 16-fold on the bucket that
+decides the fix, and neither could be re-run. The properties asserted here are the ones whose
+failure would produce a confident, reproducible, *wrong* number:
+
+  * it finds the blocks at all (a flat glob over an agent-partitioned corpus reports a clean
+    corpus, which is the most dangerous way for this to be wrong);
+  * it grades each block against its own log and not its file's first log (vikunja#852);
+  * it agrees with the gate it is measuring, and says so when it does not.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from scribe.eventlog import write_eventlog
+from scribe.extract.models import EventLog, Turn
+from scribe.qc import Report
+from scribe.qc_survey import (
+    ABSENT,
+    BUCKETS,
+    COMPOSED,
+    RULE_CURRENT,
+    RULE_LITERAL,
+    SUFFIX,
+    classify_path_claim,
+    cross_session_probe,
+    home_forms,
+    iter_blocks,
+    longest_present_suffix,
+    rejected_paths,
+    survey,
+)
+from scribe.qc_survey_cli import main as survey_main
+from scribe.writeback import anchor, terminator
+
+
+def _log(session_id: str, *fragments: str) -> EventLog:
+    return EventLog(
+        session_id=session_id,
+        transcript_path=f"/var/tmp/projects/x/{session_id}.jsonl",
+        turns=[
+            Turn(turn_uuid=f"u-{session_id}", index=i, user_text=t) for i, t in enumerate(fragments)
+        ],
+    )
+
+
+def _block(log: EventLog, body: str) -> str:
+    uuid = f"u-{log.session_id}"
+    return (
+        anchor(log.session_id, uuid, log.transcript_path) + f"\n{body}\n" + terminator(uuid) + "\n"
+    )
+
+
+@pytest.fixture
+def corpus(tmp_path):
+    """Two sessions, one digest file, one agent subdirectory. The live shape in miniature."""
+    digests = tmp_path / "digests" / "developer"
+    digests.mkdir(parents=True)
+    events = tmp_path / "eventlogs"
+    events.mkdir()
+
+    one = _log(
+        "aaaaaaaa",
+        "cloned into /home/ted/repos/personal/alpha",
+        "the test is tests/unit/test_one.py",
+    )
+    two = _log(
+        "bbbbbbbb",
+        "cloned into /home/ted/repos/personal/beta",
+        "the test is tests/unit/test_two.py",
+    )
+    for log in (one, two):
+        write_eventlog(events, log)
+
+    (digests.parent / "developer" / "2026-09-01.md").write_text(
+        _block(one, "- touched /home/ted/repos/personal/alpha/tests/unit/test_one.py")
+        + _block(two, "- touched /home/ted/repos/personal/beta/tests/unit/test_two.py"),
+        encoding="utf-8",
+    )
+    return tmp_path / "digests", events
+
+
+def test_blocks_are_found_below_an_agent_subdirectory(corpus) -> None:
+    """The live corpus is `digests/<agent>/<date>.md`. A flat `glob("*.md")` finds nothing and
+    reports a clean corpus — a zero that looks like a pass."""
+    assert len(list(iter_blocks(corpus[0]))) == 2
+
+
+def test_each_block_is_graded_against_its_own_log(corpus) -> None:
+    """vikunja#852. Both blocks make a true claim about their own session, and each claim is a
+    fabrication relative to the other. Grading the file against one log reports the second
+    block as ungrounded; grading per block reports nothing."""
+    result = survey(*corpus)
+    assert result.blocks == 2
+    assert result.findings_path == 0, [v.claim for v in result.verdicts]
+
+
+def test_a_block_whose_claim_belongs_to_the_other_session_is_caught(corpus) -> None:
+    """The matched pair — the per-block grading must still be a grading."""
+    digest = next((corpus[0] / "developer").glob("*.md"))
+    digest.write_text(
+        digest.read_text().replace("/beta/tests/unit/test_two.py", "/gamma/tests/unit/test_x.py"),
+        encoding="utf-8",
+    )
+    result = survey(*corpus)
+    assert result.findings_path == 1
+    assert result.buckets[ABSENT] == 1
+
+
+def test_the_instrument_agrees_with_the_gate(corpus) -> None:
+    """`gate_disagreements` is the drift alarm. Under the shipped rule the survey's own path
+    verdicts must match the findings `check_groundedness` produced, claim for claim."""
+    assert survey(*corpus, rule=RULE_CURRENT).gate_disagreements == 0
+
+
+def test_the_literal_rule_is_strictly_stricter(corpus) -> None:
+    """The "before" number has to be reproducible from the same commit as the "after" one, or
+    the comparison needs a checkout and nobody re-checks it."""
+    before = survey(*corpus, rule=RULE_LITERAL)
+    after = survey(*corpus, rule=RULE_CURRENT)
+    assert before.findings_path > after.findings_path
+    assert before.blocks == after.blocks
+
+
+def test_a_missing_event_log_is_counted_not_skipped_silently(corpus) -> None:
+    """A block with no log is not a passing block. Counting it as one would hide exactly the
+    loss scribe's recovery work exists to surface."""
+    for path in (corpus[1]).glob("*.json"):
+        path.unlink()
+    result = survey(*corpus)
+    assert result.blocks == 0 and result.blocks_no_log == 2
+
+
+def test_rejected_paths_recovers_a_claim_containing_a_quote() -> None:
+    """The claim is read back out of the finding's `repr`. A naive strip would corrupt any
+    claim carrying a quote, and silently misfile it into `absent`."""
+    report = Report()
+    weird = "/tmp/it's/a/path.md"
+    report.add("groundedness", f"path not in the event log: {weird!r}")
+    report.add("groundedness", "tool not in the event log: 'WebFetch'")
+    assert rejected_paths(report) == [weird]
+
+
+def test_buckets_are_disjoint_and_ordered() -> None:
+    """A claim that is both a composition and a suffix match is counted once, as the stronger
+    of the two. Without a fixed order the shares depend on evaluation order and two runs of the
+    same classifier disagree — which is how this build started."""
+    corpus_text = "/home/ted/repos/personal/alpha and tests/unit/test_one.py"
+    bucket, _, split = classify_path_claim(
+        "/home/ted/repos/personal/alpha/tests/unit/test_one.py",
+        set(),
+        corpus_text,
+        home="/home/ted",
+    )
+    assert bucket == COMPOSED and split[0] == "/home/ted/repos/personal/alpha"
+    assert (
+        classify_path_claim("/nowhere/at/all.md", set(), corpus_text, home="/home/ted")[0] == ABSENT
+    )
+    assert BUCKETS.index(COMPOSED) < BUCKETS.index(SUFFIX) < BUCKETS.index(ABSENT)
+
+
+def test_longest_present_suffix_counts_from_the_deep_end() -> None:
+    """The floor is chosen against this number, so it has to be the *most* of the claim the
+    corpus accounts for, not the first run that happens to match."""
+    corpus_text = "unit/test_one.py appears, and so does tests/unit/test_one.py"
+    assert longest_present_suffix("/home/ted/alpha/tests/unit/test_one.py", corpus_text) == 3
+    assert longest_present_suffix("/home/ted/alpha/nothing.py", corpus_text) == 0
+
+
+def test_the_probe_prices_every_floor_it_is_given(corpus) -> None:
+    """The floors are derived from this, so it must actually vary with them rather than
+    returning one number under different labels."""
+    probe = cross_session_probe(*corpus, floors=((2, 1), (2, 3)), per_block=5)
+    assert [f["min_tail"] for f in probe["floors"]] == [1, 3]
+    assert probe["shipped"]["window"] > 0
+
+
+def test_the_survey_cli_never_writes_to_the_corpus(corpus, tmp_path, capsys) -> None:
+    """This build grades; it does not summarize. A QC change that mutates the corpus is the one
+    way it could do damage, and 185 live digest files went in."""
+    digests, events = corpus
+    before = {p: p.read_bytes() for p in digests.rglob("*.md")}
+    out = tmp_path / "result.json"
+    assert survey_main(["--digests", str(digests), "--events", str(events), "--out", str(out)]) == 0
+    assert {p: p.read_bytes() for p in digests.rglob("*.md")} == before
+    assert json.loads(out.read_text())["blocks"] == 2
+
+
+def test_the_survey_cli_rejects_an_unknown_bucket(corpus) -> None:
+    digests, events = corpus
+    assert (
+        survey_main(["--digests", str(digests), "--events", str(events), "--bucket", "nonsense"])
+        == 2
+    )
+
+
+def test_the_probe_prints_the_shipped_configuration(corpus, capsys) -> None:
+    """The floors in `qc` cite this output. If the shipped row stopped printing, the docstring
+    would be quoting a table nobody could regenerate."""
+    digests, events = corpus
+    assert survey_main(["--digests", str(digests), "--events", str(events), "--probe"]) == 0
+    out = capsys.readouterr().out
+    assert "shipped (prefix 2, tail 2, window 120)" in out
+    assert "foreign claims tested:" in out
+
+
+def test_the_summary_reports_every_bucket(corpus, capsys) -> None:
+    """A bucket that silently stopped printing would look like a bucket that emptied."""
+    digests, events = corpus
+    assert survey_main(["--digests", str(digests), "--events", str(events)]) == 0
+    out = capsys.readouterr().out
+    for bucket in BUCKETS:
+        assert bucket in out
+    assert "gate disagreements: 0" in out
+
+
+def test_the_bucket_listing_prints_only_that_bucket(corpus, capsys) -> None:
+    digest = next((corpus[0] / "developer").glob("*.md"))
+    digest.write_text(
+        digest.read_text().replace("/beta/tests/unit/test_two.py", "/gamma/tests/unit/test_x.py"),
+        encoding="utf-8",
+    )
+    digests, events = corpus
+    assert (
+        survey_main(["--digests", str(digests), "--events", str(events), "--bucket", ABSENT]) == 0
+    )
+    out = capsys.readouterr().out
+    assert "/gamma/tests/unit/test_x.py" in out
+    assert out.count("\n") == 1
+
+
+def test_json_output_carries_the_rule_it_was_produced_under(corpus, capsys) -> None:
+    """A before/after pair of JSON files is useless if neither says which rule made it."""
+    digests, events = corpus
+    assert (
+        survey_main(
+            ["--digests", str(digests), "--events", str(events), "--json", "--rule", RULE_LITERAL]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["rule"] == RULE_LITERAL
+
+
+def test_home_forms_swaps_in_both_directions() -> None:
+    """The survey's home bucket is a diagnostic, not the shipped rule — but it has to report
+    both directions or it will attribute a tilde-written claim to the wrong bucket."""
+    assert home_forms("~/repos/x.md", "/home/ted") == ["/home/ted/repos/x.md"]
+    assert home_forms("/home/ted/repos/x.md", "/home/ted") == ["~/repos/x.md"]
+    assert home_forms("/etc/forge/x.yml", "/home/ted") == []
+    assert home_forms("~/repos/x.md", "") == []
+
+
+def test_qc_survey_is_reachable_through_the_dispatcher(corpus, capsys) -> None:
+    """A verb absent from `__main__` is a verb nobody can run — and this one is what anyone
+    re-checking the figures in `qc.MIN_TAIL_SEGMENTS` has to reach for."""
+    from scribe.__main__ import main as dispatch
+
+    digests, events = corpus
+    assert dispatch(["qc-survey", "--digests", str(digests), "--events", str(events)]) == 0
+    assert "blocks graded: 2" in capsys.readouterr().out
