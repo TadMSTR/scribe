@@ -21,11 +21,12 @@ from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
+from .eventlog import SAFE_STEM_RE
 from .paths import secure_dir, secure_sqlite
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 STATUS_ACTIVE = "active"
 STATUS_COMPLETE = "complete"
@@ -61,10 +62,11 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     transcript_path TEXT PRIMARY KEY,
     -- Written when a session is summarized, not when it is observed: `scan` upserts a row
-    -- from a filesystem stat, and the session id is inside the transcript. It was empty on
-    -- all 441 rows until vikunja#872, because nothing ever supplied it after extraction --
-    -- an always-empty column that reads like a usable key. `transcript_path` is the primary
-    -- key and the join key; this is for correlating a row with a digest anchor.
+    -- from a filesystem stat, and the session id is inside the transcript. Nothing supplied
+    -- it after extraction until vikunja#872, so it was empty on every legacy row; schema 2
+    -- backfilled those from the transcript basename. `transcript_path` remains the primary
+    -- key and the join key -- this is for correlating a row with a digest anchor and for
+    -- finding the session's event log.
     session_id      TEXT,
     agent           TEXT,
     size_bytes      INTEGER NOT NULL DEFAULT 0,
@@ -129,6 +131,41 @@ class SessionRow:
         return self.status == STATUS_PROVISIONAL and self.attempts < MAX_PROVISIONAL_ATTEMPTS
 
 
+def _backfill_session_ids(conn: sqlite3.Connection) -> int:
+    """Schema 2: fill `session_id` on the rows written before anything supplied it.
+
+    **A 6%-populated column is worse than an empty one.** An always-empty column is an
+    obvious trap and gets noticed. Measured 2026-09-17, 26 of 447 rows were set and all 26
+    were written the same day, so a query keyed on `session_id` returned rows and *looked*
+    like it worked while silently omitting 94% of the corpus. The 421 legacy rows are
+    terminal `summarized` and would never have been touched again, so the split was
+    permanent rather than transitional.
+
+    **The basename is the id**, and that is checked rather than assumed: on the 26 rows that
+    were already populated, `session_id` equalled the transcript's stem 26 times out of 26.
+    All 447 paths end in `.jsonl` and the 447 stems are distinct, so this neither invents a
+    value nor collides two sessions onto one.
+
+    Conservative on both sides. Only empty rows are touched, so a value that came from an
+    actual extraction always wins over one derived here. And a stem that is not plainly a
+    bare identifier is skipped rather than cleaned up -- `SAFE_STEM_RE` is reused for that
+    because it already encodes "is this a bare id", and a scrubbed name can collide with a
+    real session's, which is the one outcome worse than leaving the field empty.
+
+    Returns the number of rows filled. Runs inside the caller's transaction.
+    """
+    rows = conn.execute(
+        "SELECT transcript_path FROM sessions WHERE session_id IS NULL OR session_id = ''"
+    ).fetchall()
+    filled = [
+        (stem, r["transcript_path"])
+        for r in rows
+        if SAFE_STEM_RE.match(stem := PurePosixPath(r["transcript_path"]).stem)
+    ]
+    conn.executemany("UPDATE sessions SET session_id = ? WHERE transcript_path = ?", filled)
+    return len(filled)
+
+
 class Store:
     """SQLite-backed session state. Safe to open concurrently; writes are short."""
 
@@ -139,7 +176,10 @@ class Store:
         # the file 0644 from the process umask. See paths.py.
         secure_dir(self.path.parent)
         with self._connect() as conn:
+            was = int(conn.execute("PRAGMA user_version").fetchone()[0])
             conn.executescript(_SCHEMA)
+            if was < 2:
+                _backfill_session_ids(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         secure_sqlite(self.path)
 
