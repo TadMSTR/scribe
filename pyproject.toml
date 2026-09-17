@@ -1,6 +1,6 @@
 [project]
 name = "scribe"
-version = "0.4.0"
+version = "0.4.1"
 description = "Deterministic Claude Code transcript extractor and session summarizer"
 readme = "README.md"
 license = { text = "MIT" }
