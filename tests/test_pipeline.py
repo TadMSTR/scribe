@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from scribe.config import Config, ProviderConfig, StageConfig
+from scribe.eventlog import write_eventlog
 from scribe.extract.models import EventLog
 from scribe.pipeline import (
     _CAUSE_DETAIL,
@@ -835,3 +836,95 @@ def test_the_event_log_path_is_carried_into_the_per_session_report(env) -> None:
     cfg, store, _t = env
     (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
     assert r.to_dict()["eventlog_path"] == r.eventlog_path
+
+
+# --- vikunja#873: a session survives its transcript ----------------------------------------
+
+
+def _lose_the_session_then_the_transcript(cfg, store, target) -> None:
+    """Reproduce the state #873 is actually about, in the order it really happens.
+
+    A provider failure leaves a marked placeholder on disk and the row `provisional` -- the
+    event log is persisted BEFORE the model call precisely so it survives this. The transcript
+    then ages out at 30 days. What is left is a digest that is not an answer, and an event log
+    that is the only remaining evidence of the session.
+    """
+    err = ProviderError("bad request", retryable=False)
+    (first,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    assert first.placeholder is True, "precondition: the session was lost"
+    assert first.eventlog_path, "precondition: its event log was persisted"
+    assert store.get(str(target)).status == STATUS_PROVISIONAL
+    target.unlink()
+
+
+def test_a_session_whose_transcript_is_gone_still_produces_a_real_digest(env) -> None:
+    """The end-to-end this whole phase exists for.
+
+    Transcripts age out at 30 days (`cleanupPeriodDays` unset, vikunja#778) and `eventlogs/`
+    has no cleanup policy, so the log outlives its source. Before `load_eventlog`,
+    `process_session` reconstructed by calling `extract(transcript_path)` and a deleted
+    transcript was terminal.
+    """
+    cfg, store, target = env
+    _lose_the_session_then_the_transcript(cfg, store, target)
+
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+
+    assert len(results) == 1, "the reopened session was not offered"
+    result = results[0]
+    assert result.replayed is True
+    assert result.summarized is True
+    assert result.placeholder is False
+    assert result.written is True
+    assert result.events == 3, "a replay must carry the same events the extract did"
+    digest = next(output_root(cfg).rglob("*.md"))
+    assert "First real question" in digest.read_text(encoding="utf-8")
+
+
+def test_a_replay_is_reported_as_one_rather_than_passing_for_an_extraction(env) -> None:
+    """A replayed digest is as good as its log and no better. An operator reading a run report
+    should be able to see which sessions were reconstructed rather than read."""
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    (first,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    assert first.replayed is False
+    assert first.to_dict()["replayed"] is False
+
+    target.unlink()
+    (second,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert second.to_dict()["replayed"] is True
+
+
+def test_a_transcript_that_exists_is_always_preferred_over_the_log(env) -> None:
+    """The log is a fallback, not a cache. A session that resumed has grown since its log was
+    written, and re-extracting is what picks that up -- measured live, the one session of 429
+    that differed was exactly this case."""
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    (first,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    # A log that would be obviously wrong if it were read in preference to the transcript.
+    stale = EventLog(session_id=first.session_id, transcript_path=str(target), agent="research")
+    write_eventlog(cfg.eventlog_dir, stale)
+
+    (second,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert second.replayed is False
+    assert second.events == 3, "the transcript on disk was not what got read"
+
+
+def test_an_unreadable_transcript_is_a_failure_not_a_silent_replay(env) -> None:
+    """`OSError` is NOT "transcript absent". Replaying an older log on a permissions fault
+    would hide a real problem behind a stale-but-plausible digest, and the session would be
+    recorded as summarized."""
+    cfg, store, target = env
+    err = ProviderError("bad request", retryable=False)
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    target.chmod(0o000)
+    try:
+        row = store.get(str(target))
+        result = process_session(row, cfg, store, provider=Stub())
+    finally:
+        target.chmod(0o600)
+    assert result.replayed is False
+    assert result.summarized is False
+    assert any("extract:" in e for e in result.errors)
+    assert store.get(str(target)).status == STATUS_FAILED

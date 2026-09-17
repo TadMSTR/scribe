@@ -14,12 +14,13 @@ from pathlib import Path
 
 import pytest
 
+from scribe.eventlog import log_from_dict
 from scribe.extract import extract
 from scribe.extract.models import EventLog, Turn
 from scribe.qc import (
+    _PATH_RE,
     DEFAULT_COVERAGE_FLOOR,
     Report,
-    _PATH_RE,
     _tokens_co_occur,
     check_digest,
     check_freshness,
@@ -28,7 +29,6 @@ from scribe.qc import (
     grounding_terms,
     strip_scribe_markers,
 )
-from scribe.qc_cli import _log_from_dict
 from scribe.qc_cli import main as qc_main
 from scribe.writeback import anchor, terminator
 
@@ -152,9 +152,7 @@ def test_that_true_claim_really_was_failing_before(monkeypatch) -> None:
     import scribe.qc as qc
 
     path = "~/.claude/comms/artifacts/audit-requests/scribe/request.md"
-    monkeypatch.setattr(
-        qc, "_PATH_RE", re.compile(r"(?:(?<=\s)|^)(?:~|\.{0,2})/[\w./~-]{3,}")
-    )
+    monkeypatch.setattr(qc, "_PATH_RE", re.compile(r"(?:(?<=\s)|^)(?:~|\.{0,2})/[\w./~-]{3,}"))
     report = check_digest(
         f"**Asked:** x\n\n**Done:**\n- Filed the audit request to {path}.\n",
         _log_with_a_path_only_in_the_prose(path),
@@ -547,7 +545,7 @@ def test_spans_are_classified_by_shape_not_by_backticks(span, expected) -> None:
 
 
 def test_the_cli_and_the_pipeline_grade_a_digest_identically(qc_log, tmp_path) -> None:
-    """`_log_from_dict` used to drop `user_text` and `assistant_text`, so the same digest and
+    """`log_from_dict` used to drop `user_text` and `assistant_text`, so the same digest and
     the same log graded stricter through `python -m scribe.qc` than through the pipeline.
 
     Two paths disagreeing about whether a digest is grounded is its own false signal -- the
@@ -555,7 +553,7 @@ def test_the_cli_and_the_pipeline_grade_a_digest_identically(qc_log, tmp_path) -
     """
     events = tmp_path / "events.json"
     events.write_text(json.dumps(qc_log.to_dict()), encoding="utf-8")
-    rebuilt = _log_from_dict(json.loads(events.read_text()))
+    rebuilt = log_from_dict(json.loads(events.read_text()))
     assert rebuilt.grounding_text() == qc_log.grounding_text()
 
     digest = tmp_path / "d.md"

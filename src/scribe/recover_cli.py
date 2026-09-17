@@ -63,6 +63,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config, ConfigError, load
+from .eventlog import EventLogError, load_eventlog, session_eventlog
 from .state import Store
 from .summarize.contamination import SUPPRESSION_MARKER
 from .summarize.render import PLACEHOLDER_MARKER
@@ -73,7 +74,6 @@ from .writeback import (
     atomic_replace,
     paired_blocks,
 )
-
 
 #: See the module docstring -- these are consumed by a scheduled detector, not just by a human
 #: reading a terminal, so they are named rather than written as literals at the return sites.
@@ -173,6 +173,26 @@ def stamp(path: Path, blocks: list[Found]) -> int:
     return len(pending)
 
 
+def _has_eventlog(cfg: Config, store: Store, transcript_path: str) -> bool:
+    """Whether this session's persisted event log is on disk and actually loadable.
+
+    Loadable, not merely present. A truncated or half-written file passes `is_file()` and
+    then fails at replay time -- which would have `recover` report a session as recoverable
+    and the next `scribe run` quietly fail it, splitting the diagnosis across two runs and
+    two logs. The parse is cheap next to the model call it precedes.
+    """
+    row = store.get(transcript_path)
+    session_id = row.session_id if row else ""
+    path = session_eventlog(cfg.eventlog_dir, session_id, transcript_path)
+    if not path.is_file():
+        return False
+    try:
+        load_eventlog(path)
+    except EventLogError:
+        return False
+    return True
+
+
 def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
     """Find every stand-in block, stamp it, and reopen its session. Returns a report."""
     found = scan_corpus(Path(cfg.output_dir))
@@ -190,9 +210,11 @@ def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
             stamped += sum(1 for b in blocks if not b.stamped)
 
     for tpath in sorted({f.transcript_path for f in found}):
-        if not Path(tpath).exists():
-            # The transcript is the only input a re-run has. Without it there is nothing to
-            # summarize, so reopening the row would just burn a sweep rediscovering that.
+        if not Path(tpath).exists() and not _has_eventlog(cfg, store, tpath):
+            # Neither input exists. THIS is the terminal case -- and it used to be reached by
+            # a missing transcript alone, because the transcript was the only thing a re-run
+            # could read. `load_eventlog` gives the replay a second source (vikunja#873), so
+            # "the transcript aged out" is no longer the same condition as "nothing survives".
             missing.append(tpath)
             continue
         if apply:

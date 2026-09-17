@@ -17,8 +17,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import Config
-from .discovery import scan
-from .eventlog import contains_value, write_eventlog
+from .discovery import orphaned, scan
+from .eventlog import (
+    EventLogError,
+    contains_value,
+    load_eventlog,
+    session_eventlog,
+    write_eventlog,
+)
 from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
@@ -79,6 +85,11 @@ class SessionResult:
     #: says out loud whether the drill-down tier exists for each session rather than leaving
     #: it to be inferred from a directory listing.
     eventlog_path: str = ""
+    #: True when this session was rebuilt from its persisted event log because the transcript
+    #: was gone (vikunja#873). Reported rather than silent: a replayed digest is as good as
+    #: its log and no better, and an operator reading a run report should be able to see which
+    #: sessions were reconstructed rather than read.
+    replayed: bool = False
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -106,6 +117,7 @@ class SessionResult:
             "post_render_redactions": self.post_render_redactions,
             "post_render_cause": self.post_render_cause,
             "eventlog_path": self.eventlog_path,
+            "replayed": self.replayed,
             "errors": self.errors,
         }
 
@@ -198,6 +210,31 @@ def classify_post_render(eventlog_path: str, values: list[str]) -> str:
     return CAUSE_UNKNOWN
 
 
+def _load_session(row: SessionRow, cfg: Config) -> tuple[EventLog, bool]:
+    """The session's event log: extracted from the transcript, or replayed from the persisted
+    copy when the transcript is gone. Returns `(log, replayed)`.
+
+    The transcript is preferred whenever it exists, and not only out of caution. It is the
+    source the persisted log was derived FROM, so it can be newer -- a session that resumed
+    has grown since its log was written, and re-extracting is what picks that up. Measured
+    2026-09-17 across the 429 sessions holding both inputs: 428 round-tripped identically and
+    the one that did not was mid-session, its persisted turns an exact prefix of the fresh
+    extract. So the fallback costs nothing when the transcript is there, and is the only
+    option when it is not.
+
+    `OSError` from `extract` is NOT treated as "transcript absent". A permissions failure or
+    a bad read is a different condition from a file that has aged out, and quietly replaying
+    an older log in that case would hide a real fault behind a stale-but-plausible digest.
+    Only a genuinely missing file takes the second path.
+    """
+    transcript = Path(row.transcript_path).expanduser()
+    if transcript.exists():
+        return extract(row.transcript_path, max_session_chars=cfg.max_session_chars), False
+
+    log = load_eventlog(session_eventlog(cfg.eventlog_dir, row.session_id, row.transcript_path))
+    return log, True
+
+
 def process_session(
     row: SessionRow,
     cfg: Config,
@@ -223,8 +260,8 @@ def process_session(
     # extractor stays clean.
     with span(SPAN_EXTRACT, transcript_path=row.transcript_path, agent=row.agent) as sp:
         try:
-            log = extract(row.transcript_path, max_session_chars=cfg.max_session_chars)
-        except OSError as exc:
+            log, result.replayed = _load_session(row, cfg)
+        except (OSError, EventLogError) as exc:
             set_span_attributes(sp, ok=False, error=str(exc))
             result.errors.append(f"extract: {exc}")
             store.set_status(row.transcript_path, STATUS_FAILED, error=str(exc))
@@ -232,6 +269,7 @@ def process_session(
         set_span_attributes(
             sp,
             ok=True,
+            replayed=result.replayed,
             session_id=log.session_id,
             turns=log.stats.turns,
             events=log.stats.tool_events,
@@ -439,7 +477,10 @@ def run_once(
     The provider is constructed once per sweep and only when it is actually needed, so a
     dry run never touches provider config at all — including its credential.
     """
-    ready = scan(cfg, store, now=now)
+    # Two sources, because there are two ways a session can be waiting. `scan` walks the
+    # transcripts; `orphaned` picks up the ones a deliberate `scribe recover` reopened whose
+    # transcript has since aged out, which `scan` structurally cannot see (vikunja#873).
+    ready = scan(cfg, store, now=now) + orphaned(cfg, store)
     if limit:
         ready = ready[:limit]
     provider: Provider | None = None

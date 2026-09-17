@@ -11,6 +11,7 @@ Two properties carry the weight here, and neither is "a file appeared":
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import stat
 import tempfile
@@ -21,15 +22,19 @@ import pytest
 from scribe.config import DEFAULT_EVENTLOG_DIR, DEFAULT_OUTPUT_DIR
 from scribe.eventlog import (
     SUFFIX,
+    EventLogError,
     contains_value,
     eventlog_path,
+    load_eventlog,
+    log_from_dict,
     read_eventlog,
     safe_stem,
+    session_eventlog,
     write_eventlog,
 )
 from scribe.extract import extract
+from scribe.extract.models import EventLog
 from scribe.extract.redact import Redactor
-from scribe.qc_cli import _log_from_dict
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -104,7 +109,7 @@ def test_the_fallback_is_stable_across_runs(tmp_path) -> None:
 def test_what_is_written_is_a_valid_qc_events_input(tmp_path) -> None:
     """The contract, checked through the gate's own loader.
 
-    `scribe qc --events` parses the file with `_log_from_dict`, and everything
+    `scribe qc --events` parses the file with `log_from_dict`, and everything
     `grounding_text()` reads has to survive that round trip — otherwise the persisted log is
     a file that merely looks right and fails the moment anyone tries to re-check a digest
     with it.
@@ -112,7 +117,7 @@ def test_what_is_written_is_a_valid_qc_events_input(tmp_path) -> None:
     log = _log(tmp_path)
     path = write_eventlog(tmp_path / "eventlogs", log)
 
-    rebuilt = _log_from_dict(json.loads(path.read_text(encoding="utf-8")))
+    rebuilt = log_from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     assert rebuilt.session_id == log.session_id
     assert len(rebuilt.turns) == len(log.turns)
@@ -245,3 +250,105 @@ def test_contains_value_finds_a_value_field_level_and_answers_none_when_it_canno
 
     path.write_text("{not json", encoding="utf-8")
     assert contains_value(path, "barbaz") is None
+
+
+# --- vikunja#873: the reader the module docstring always promised -------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["transcript-structural.jsonl", "transcript-qc-regression.jsonl", "transcript-empty.jsonl"],
+)
+def test_a_written_log_loads_back_identical_field_by_field(tmp_path, name) -> None:
+    """`load_eventlog(write_eventlog(log)) == log`, on every field of the dataclass.
+
+    This is the committed form of the check that matters. The failure mode for a loader is a
+    silently dropped field, which produces a digest that looks entirely normal and is missing
+    content -- so equality on the whole object is the assertion, not a spot-check of the two
+    or three fields a reviewer happens to think of.
+
+    The same differential was run against the live corpus on 2026-09-17, where 429 sessions
+    held both an event log and its transcript: 428 were identical on every field, and the one
+    that was not had simply grown since its log was written (its persisted turns were an exact
+    prefix of the fresh extract). No field fails to round-trip.
+    """
+    original = extract(FIXTURES / name)
+    loaded = load_eventlog(write_eventlog(tmp_path, original))
+    for f in dataclasses.fields(original):
+        assert getattr(loaded, f.name) == getattr(original, f.name), f.name
+    assert loaded == original
+
+
+def test_the_round_trip_covers_every_field_the_schema_declares(tmp_path) -> None:
+    """The test above is only as good as the dataclass it iterates.
+
+    A field added to `EventLog` but never written by `to_dict` would round-trip as its
+    default and the equality check would pass, because both sides would hold the default.
+    Comparing the serialized key set to the declared field set is what catches that.
+    """
+    original = extract(FIXTURES / "transcript-structural.jsonl")
+    written = json.loads(write_eventlog(tmp_path, original).read_text(encoding="utf-8"))
+    declared = {f.name for f in dataclasses.fields(EventLog)}
+    assert declared - set(written) == set(), "declared but never serialized"
+
+
+def test_a_log_with_a_populated_field_really_does_lose_it_without_the_loader(tmp_path) -> None:
+    """The control for the round-trip pair.
+
+    `stats` used to be discarded on the way back in -- `qc` grades from `turns` and never
+    reads it, so for the gate it was dead weight. A REPLAY needs it: `raw_file_bytes` is what
+    the state DB records as the offset. Without this assertion the round-trip test would still
+    pass against a loader that dropped it, since the fixture's value would match the default
+    on both sides only if the fixture happened to be empty.
+    """
+    original = extract(FIXTURES / "transcript-structural.jsonl")
+    assert original.stats.raw_file_bytes > 0, "fixture cannot exercise the field"
+    loaded = load_eventlog(write_eventlog(tmp_path, original))
+    assert loaded.stats.raw_file_bytes == original.stats.raw_file_bytes
+    assert loaded.stats.tool_events == original.stats.tool_events
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ['{"session_id": "s", "turns": [', "[]", "null", "not json at all", ""],
+)
+def test_an_unreadable_log_raises_rather_than_returning_an_empty_one(tmp_path, payload) -> None:
+    """`load_eventlog` raises where `contains_value` returns None, and the asymmetry is
+    deliberate -- see its docstring. A caller handed an empty log would write a digest that
+    looks normal and says nothing, which is the failure this component exists to prevent."""
+    bad = tmp_path / "bad.json"
+    bad.write_text(payload, encoding="utf-8")
+    with pytest.raises(EventLogError):
+        load_eventlog(bad)
+
+
+def test_a_missing_log_raises_rather_than_reporting_an_empty_session(tmp_path) -> None:
+    with pytest.raises(EventLogError):
+        load_eventlog(tmp_path / "absent.json")
+
+
+def test_contains_value_still_answers_on_a_log_the_loader_rejects(tmp_path) -> None:
+    """The two readers do NOT share a parse, and this is why.
+
+    Both read the same file, so sharing looked tempting. But `contains_value` walks raw string
+    leaves to classify a post-render redaction fire (vikunja#856), where "there is no log" and
+    "the log says no" support very different claims -- it returns None as a real third answer.
+    Routing it through `load_eventlog` would give it a NEW failure mode: a log that decodes as
+    JSON but not as an `EventLog` would stop being answerable, and a security-relevant
+    detector would lose a case it can handle today.
+    """
+    odd = tmp_path / "odd.json"
+    odd.write_text('{"session_id": 12345, "turns": "not-a-list"}', encoding="utf-8")
+    with pytest.raises(EventLogError):
+        load_eventlog(odd)
+    assert contains_value(odd, "not-a-list") is True
+
+
+def test_the_row_loader_falls_back_to_the_transcript_stem(tmp_path) -> None:
+    """A legacy state row has no `session_id` -- `scan` upserts from a filesystem stat and the
+    id lives inside the transcript. The stem is that id by construction, which is what lets a
+    row written before the column existed still find its log."""
+    log = EventLog(session_id="abc-123", transcript_path="/p/abc-123.jsonl")
+    written = write_eventlog(tmp_path, log)
+    assert session_eventlog(tmp_path, "", "/p/abc-123.jsonl") == written
+    assert session_eventlog(tmp_path, "abc-123", "/p/abc-123.jsonl") == written
