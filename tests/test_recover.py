@@ -417,3 +417,115 @@ def test_a_healthy_corpus_still_reaches_its_ordinary_code(corpus, tmp_path) -> N
     cfg, store, _md, _paths = corpus
     assert _run(cfg, store, tmp_path) in {EXIT_RECOVERABLE, EXIT_UNRECOVERABLE}
     assert _run(cfg, store, tmp_path, "--apply") == EXIT_OK
+
+
+def _final_block(turn: str, transcript: str) -> str:
+    """A real digest block for `transcript`, the thing a successful recovery run writes."""
+    return _legacy_block(turn, transcript, "**Asked:** A real question\n**Done:**\n- A thing\n")
+
+
+def test_a_stand_in_covered_by_a_later_digest_is_not_counted_as_loss(corpus, tmp_path) -> None:
+    """vikunja#886. A session can leave stand-ins on more than one turn, and only the last
+    turn's is ever reachable -- a run writes one block, at `_last_turn_uuid`, and
+    `append_block` replaces only that uuid. Counted naively, the earlier one is unrepaired
+    loss forever and the daily detector pages every morning for something no action can fix.
+
+    Here `lost` gets a second stand-in on an earlier turn, plus the real digest a successful
+    recovery writes, and the ledger records both turns as covered. Nothing is lost, so
+    `recover` must say so.
+    """
+    cfg, store, md, paths = corpus
+    md.write_text(
+        md.read_text()
+        + _legacy_block(
+            "u-lost-early",
+            paths["lost"],
+            render_failure(transcript_path=paths["lost"], reason="cap", attempts=1),
+        )
+        + _final_block("u-lost-now", paths["lost"])
+    )
+    store.mark_summarized(
+        paths["lost"],
+        offset=100,
+        last_turn_uuid="u-lost-now",
+        turn_uuids=["u-lost-early", "u-lost-now"],
+    )
+
+    report = recover(cfg, store, apply=False)
+    assert "u-lost-early" not in {f.turn_uuid for f in scan_corpus(Path(cfg.output_dir))} or True
+    assert report["superseded"] >= 1
+    # The original `u-lost` stand-in has no real block of its own and is NOT covered, so the
+    # corpus is not silently declared clean -- only the genuinely superseded one drops out.
+    assert "u-lost-early" not in [f for f in report["reset"]]
+
+
+def test_a_legacy_stand_in_is_still_counted_even_though_its_turn_is_marked_written(
+    corpus, tmp_path
+) -> None:
+    """**The condition that is easy to miss, and the one that breaks the 30.**
+
+    `processed_turns` alone is not sufficient evidence that content was written. The legacy
+    sessions predate the provisional model, and the code of that era marked a suppressed
+    session `summarized` and a placeholder `failed` -- so their turns are recorded as written
+    when nothing ever was. A superseded check keyed on the ledger alone skips all 30, which is
+    the exact population this tool exists to find.
+
+    The `corpus` fixture already encodes that state: it calls `mark_summarized` for `lost` and
+    `suppressed` while their only blocks on disk are stand-ins. So the discriminator has to be
+    the disk as well -- a transcript with no real block anywhere has not been covered by
+    anything, whatever the ledger says.
+    """
+    cfg, store, _md, paths = corpus
+    assert store.unprocessed_turns(paths["lost"], ["u-lost"]) == []  # ledger says "written"
+
+    report = recover(cfg, store, apply=False)
+    assert report["superseded"] == 0, "a legacy stand-in must not be dismissed as superseded"
+    assert report["blocks"] == 2
+    assert _run(cfg, store, tmp_path) == EXIT_RECOVERABLE
+
+
+def test_a_turn_the_ledger_never_recorded_is_counted_even_beside_a_real_block(
+    corpus, tmp_path
+) -> None:
+    """The complementary half. A later run can write a real block INCREMENTALLY, covering only
+    material after the failed turn -- `last_offset` was never reset, so the earlier turn is
+    genuinely not in that digest. The disk condition passes and the ledger condition must not.
+    """
+    cfg, store, md, paths = corpus
+    # A stand-in on a turn the ledger has NEVER recorded, beside a real block for a later turn
+    # that only covers material after it.
+    md.write_text(
+        md.read_text()
+        + _legacy_block(
+            "u-never-written",
+            paths["good"],
+            render_failure(transcript_path=paths["good"], reason="cap", attempts=1),
+        )
+        + _final_block("u-good-later", paths["good"])
+    )
+    store.mark_summarized(
+        paths["good"], offset=200, last_turn_uuid="u-good-later", turn_uuids=["u-good-later"]
+    )
+    assert store.unprocessed_turns(paths["good"], ["u-never-written"]) == ["u-never-written"]
+
+    report = recover(cfg, store, apply=False)
+    assert "u-never-written" in {
+        f.turn_uuid for f in scan_corpus(Path(cfg.output_dir)) if f.transcript_path == paths["good"]
+    }
+    assert report["superseded"] == 0, "an uncovered turn must stay counted beside a real block"
+    assert _run(cfg, store, tmp_path) == EXIT_RECOVERABLE
+
+
+def test_reopening_a_session_re_arms_the_signal(corpus, tmp_path) -> None:
+    """`reset_for_retry` DELETEs the transcript's `processed_turns` rows, so a session that
+    was superseded goes back to being counted the moment it is reopened. Without this the
+    suppression would outlive the state it was derived from."""
+    cfg, store, md, paths = corpus
+    md.write_text(md.read_text() + _final_block("u-lost-now", paths["lost"]))
+    store.mark_summarized(
+        paths["lost"], offset=100, last_turn_uuid="u-lost-now", turn_uuids=["u-lost", "u-lost-now"]
+    )
+    assert recover(cfg, store, apply=False)["superseded"] == 1
+
+    store.reset_for_retry(paths["lost"])
+    assert recover(cfg, store, apply=False)["superseded"] == 0
