@@ -19,12 +19,24 @@ them will fail identically forever. Malformed JSON or a missing field is samplin
 fresh attempt often fixes it, so those stay retryable. A list over its cap is determined by the
 input — the log holds what it holds — so retrying it spends two more ~50k-token calls to
 receive the same rejection. `SchemaError.retryable` is what separates the two.
+
+**But "does not fit the contract" is two different things, and only one of them is a reason to
+throw the summary away.** A response can be wrong — inventing tickets the log never mentions —
+or it can merely be long. Treating both as violations cost three sessions' worth of builds and
+an unknown number of digests: #849, #872 and #884 are the same bug found three times, each
+time diagnosed as "the cap is too low" and fixed by raising a number. It was never the number.
+
+A field whose ceiling is knowable from the event log VALIDATES, because exceeding it is
+evidence of invention. A field with no knowable ceiling TRUNCATES, because no threshold makes
+free prose wrong and a rejection would trade a whole session for one surplus bullet. That is
+`_Field.bounded`, and it is the rule the three separate cap constants were groping towards.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from typing import NamedTuple
 
 SCHEMA_VERSION = 1
 
@@ -35,8 +47,9 @@ class SchemaError(ValueError):
     `retryable` mirrors `ProviderError.retryable` and defaults to **True**: most violations are
     a bad sample and the next one is usually clean. It is set False only where the violation is
     a property of the input rather than of the sample, which today means exactly one case — a
-    list longer than its cap, where every attempt sees the same log and produces the same
-    over-long field.
+    BOUNDED list longer than its cap, where every attempt sees the same log and produces the
+    same over-long field. An unbounded list over its cap is no longer an error at all; it is
+    truncated and the digest is written. See `_Field.bounded`.
 
     **Keep these messages content-free.** A field name, a count, a type name, a JSON location —
     never a snippet of the response. The message becomes `Outcome.reason` and fans out to three
@@ -58,10 +71,25 @@ class SchemaError(ValueError):
 
 #: Cap for `found`, `decisions` and `open_items` -- model prose with nothing behind it to
 #: bound it, so this is a genuine runaway guard: the event log does not say how many entries
-#: are correct. These three have never violated it once across 442 sessions, and that
-#: observation is **not** censored the way `done`'s was: a violation is written to the log
-#: whether or not the digest survives, so an absence of failures is real evidence of headroom.
-#: See `MAX_DONE_ITEMS` for the field where it was not.
+#: are correct.
+#:
+#: **This number is not a rejection threshold.** These three are UNBOUNDED fields, so passing
+#: the cap truncates rather than discards -- see `_LIST_FIELDS` for the rule and why the
+#: distinction rather than the number is what matters. The cap still does real work: it is
+#: declared in `json_schema`, so the model sheds to fit it, and truncation is the backstop for
+#: when shedding is not enough.
+#:
+#: **What this comment used to say, and why it was wrong.** It claimed these three "have never
+#: violated it once across 442 sessions", and argued that unlike `done`'s the observation was
+#: uncensored, "so an absence of failures is real evidence of headroom". Both halves failed.
+#: On 2026-09-17 `found` arrived with **44** items and took a whole session with it
+#: (vikunja#884). And the reasoning was never sound: a violation is indeed logged whether or
+#: not the digest survives, but that only makes the FAILURES visible -- it says nothing about
+#: the written distribution, which is right-censored here exactly as it was for `done`. The
+#: censoring merely hides better. Because the cap is declared, the model sheds and the
+#: survivors land *below* 40 rather than piling up at it: measured across 458 written blocks
+#: `found` tops out at 33, which reads as comfortable headroom and is an artefact of the cap.
+#: The only uncensored view is the rejection, and it was 44.
 MAX_ITEMS = 40
 
 #: Cap for `done`, and the reason it is not `MAX_ITEMS`.
@@ -111,23 +139,49 @@ MAX_ROLLUP_ITEMS = 100
 
 MAX_ITEM_CHARS = 2000
 
-#: `(field, required, cap)`. Only `asked` is required: a session with no findings and no
-#: decisions is a real session, and forcing content into those fields is an invitation to
-#: invent it. The cap is per-field because a single constant cannot guard a field with a
-#: rollup ceiling, one with an input ceiling and one with neither — see `MAX_ITEMS`,
-#: `MAX_DONE_ITEMS` and `MAX_ROLLUP_ITEMS`.
+
+class _Field(NamedTuple):
+    """One list field's contract: what it is called, whether it is required, and how it is
+    guarded when it overflows."""
+
+    name: str
+    required: bool
+    cap: int
+    #: **The rule this whole module has been approximating for three builds.**
+    #:
+    #: True when the field's ceiling is knowable from the event log, so an over-long value
+    #: means the MODEL WENT WRONG: `tickets` and `artifacts` cannot exceed what the rollup
+    #: contains, and `done` cannot enumerate more distinct actions than the session performed.
+    #: A count above the cap is then evidence of invention, and rejecting the response is the
+    #: correct, safe answer.
+    #:
+    #: False when nothing on the input side bounds it -- `found`, `decisions` and `open_items`
+    #: are free prose, and a long one means the model went LONG, not wrong. For these, ANY cap
+    #: is an arbitrary cliff, so rejection is never the right answer: it trades a complete
+    #: session for nothing. They truncate instead.
+    #:
+    #: The three-constant split (`MAX_ITEMS` / `MAX_DONE_ITEMS` / `MAX_ROLLUP_ITEMS`) was this
+    #: distinction expressed as numbers, which is why raising a number kept looking like the
+    #: fix and kept not being one. #849 raised `tickets` and `artifacts`; #872 raised `done`;
+    #: #884 was `found`, and raising it would only have relocated the cliff. The failure MODE,
+    #: not the threshold, is what differs between the two classes.
+    bounded: bool
+
+
+#: Only `asked` is required: a session with no findings and no decisions is a real session,
+#: and forcing content into those fields is an invitation to invent it.
 #:
 #: **This tuple is the single source of the caps.** `json_schema` emits them as `maxItems`,
 #: `parse` enforces them, and `prompt.SYSTEM` states them in prose — all three read from here.
 #: The prose used to be hand-written, which is how `done` could be moved off `MAX_ITEMS`
 #: while the prompt still told the model 40 (vikunja#872).
-_LIST_FIELDS: tuple[tuple[str, bool, int], ...] = (
-    ("done", True, MAX_DONE_ITEMS),
-    ("found", False, MAX_ITEMS),
-    ("decisions", False, MAX_ITEMS),
-    ("open_items", False, MAX_ITEMS),
-    ("artifacts", False, MAX_ROLLUP_ITEMS),
-    ("tickets", False, MAX_ROLLUP_ITEMS),
+_LIST_FIELDS: tuple[_Field, ...] = (
+    _Field("done", True, MAX_DONE_ITEMS, bounded=True),
+    _Field("found", False, MAX_ITEMS, bounded=False),
+    _Field("decisions", False, MAX_ITEMS, bounded=False),
+    _Field("open_items", False, MAX_ITEMS, bounded=False),
+    _Field("artifacts", False, MAX_ROLLUP_ITEMS, bounded=True),
+    _Field("tickets", False, MAX_ROLLUP_ITEMS, bounded=True),
 )
 
 
@@ -140,12 +194,22 @@ def field_caps() -> dict[str, int]:
     model then complies with, and is rejected for complying with, is exactly the failure
     #849 fixed and #872 re-ran.
     """
-    return {name: cap for name, _required, cap in _LIST_FIELDS}
+    return {f.name: f.cap for f in _LIST_FIELDS}
 
 
 @dataclass
 class Digest:
     """One session's summary, in the shape the renderer and the QC gate both expect."""
+
+    #: Unbounded fields that overflowed, mapped to how many items were dropped. Empty for
+    #: the overwhelming majority of digests.
+    #:
+    #: Carried on the digest rather than raised, because a truncated digest is a SUCCESS —
+    #: it is summarized, and it is written. The renderer states it in the block so the loss is
+    #: visible to whoever reads the memory file, and `pipeline` counts it so a run report can
+    #: show it. Silent truncation would be the worst of the three options: #849 and #872 were
+    #: both found because the failure was loud, and a quiet one would not have been.
+    truncated: dict[str, int] = field(default_factory=dict)
 
     asked: str = ""
     done: list[str] = field(default_factory=list)
@@ -173,8 +237,8 @@ def json_schema() -> dict:
     the same one.
     """
     props: dict = {"asked": {"type": "string"}}
-    for name, _required, cap in _LIST_FIELDS:
-        props[name] = {"type": "array", "items": {"type": "string"}, "maxItems": cap}
+    for f in _LIST_FIELDS:
+        props[f.name] = {"type": "array", "items": {"type": "string"}, "maxItems": f.cap}
     return {
         "type": "object",
         "properties": props,
@@ -183,39 +247,51 @@ def json_schema() -> dict:
     }
 
 
-def _as_list(value: object, name: str, cap: int) -> list[str]:
-    """Coerce a field to a list of non-empty strings, or raise.
+def _as_list(value: object, f: _Field) -> tuple[list[str], int]:
+    """Coerce a field to a list of non-empty strings, or raise. Returns `(values, dropped)`.
 
     A string where a list belongs is accepted as a one-element list. That is a real and
     common model output, it is unambiguous, and rejecting it would burn a retry on something
     that carries the intended meaning perfectly well. Anything else is a violation.
 
-    `cap` is the field's own limit, and since `json_schema` now declares it the check here is a
-    backstop rather than the primary enforcement — it fires when a provider ignores `maxItems`,
-    not when the model was simply never told.
+    The cap is a backstop rather than the primary enforcement, since `json_schema` declares it
+    — it fires when a provider ignores `maxItems`, not when the model was simply never told.
+    What happens on overflow depends on `_Field.bounded`:
+
+      * **bounded** — raise, not retryable. The count cannot legitimately exceed the log, so
+        this is the model inventing entries, and the response should not be rendered.
+      * **unbounded** — drop the excess and report how many. There is no threshold at which
+        free prose becomes wrong, so there is nothing a rejection could be protecting; it
+        would only convert a complete session into no session at all (vikunja#884).
+
+    Items are dropped from the END, which is the one genuinely unattractive part of this. The
+    model, having been shown the cap, is the better judge of what to shed — that is why
+    declaring `maxItems` stays the primary mechanism and this is only the backstop.
     """
     if value is None:
-        return []
+        return [], 0
     if isinstance(value, str):
         value = [value] if value.strip() else []
     if not isinstance(value, list):
-        raise SchemaError(f"field {name!r} must be a list of strings, got {type(value).__name__}")
+        raise SchemaError(f"field {f.name!r} must be a list of strings, got {type(value).__name__}")
     out: list[str] = []
     for item in value:
         if isinstance(item, (int, float, bool)):
             item = str(item)
         if not isinstance(item, str):
-            raise SchemaError(f"field {name!r} contains a {type(item).__name__}, expected string")
+            raise SchemaError(f"field {f.name!r} contains a {type(item).__name__}, expected string")
         item = item.strip()
         if item:
             out.append(item[:MAX_ITEM_CHARS])
-    if len(out) > cap:
+    if len(out) <= f.cap:
+        return out, 0
+    if f.bounded:
         # Not retryable: the count follows from the log, so attempts two and three see the
         # same input and produce the same rejection. See the module docstring.
         raise SchemaError(
-            f"field {name!r} has {len(out)} items, more than the {cap} cap", retryable=False
+            f"field {f.name!r} has {len(out)} items, more than the {f.cap} cap", retryable=False
         )
-    return out
+    return out[: f.cap], len(out) - f.cap
 
 
 def parse(raw: str | dict) -> Digest:
@@ -248,9 +324,11 @@ def parse(raw: str | dict) -> Digest:
         raise SchemaError("field 'asked' is required and must be a non-empty string")
 
     digest = Digest(asked=asked.strip()[:MAX_ITEM_CHARS])
-    for name, required, cap in _LIST_FIELDS:
-        values = _as_list(data.get(name), name, cap)
-        if required and not values:
-            raise SchemaError(f"field {name!r} is required and must have at least one entry")
-        setattr(digest, name, values)
+    for f in _LIST_FIELDS:
+        values, dropped = _as_list(data.get(f.name), f)
+        if f.required and not values:
+            raise SchemaError(f"field {f.name!r} is required and must have at least one entry")
+        setattr(digest, f.name, values)
+        if dropped:
+            digest.truncated[f.name] = dropped
     return digest

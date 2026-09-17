@@ -995,3 +995,58 @@ def test_that_crafted_cwd_really_did_reach_the_agent_field(env) -> None:
     assert log.cwd.endswith("/projects/..")
     assert _agent_from_cwd(log.cwd) == "..", "the unsafe value no longer reaches attribution"
     assert log.agent == ".."
+
+
+OVERLONG_FOUND = json.dumps(
+    {
+        "asked": "First real question about vikunja#843",
+        "done": ["Created a branch with `git -C /repo checkout -b feat/thing 9f8e7d6`"],
+        # 44, the length that actually cost session 6017c8ce its summary on 2026-09-17.
+        "found": [f"A finding numbered {i}" for i in range(44)],
+        "tickets": ["#843"],
+    }
+)
+
+
+def test_an_overlong_unbounded_field_is_written_not_placeheld(env) -> None:
+    """End to end, the behaviour vikunja#884 is about.
+
+    Before this, a 44-item `found` raised a non-retryable `SchemaError`, the session went
+    straight to a placeholder and the summary was gone permanently. The session must now come
+    out `summarized` and `written`, with a real digest on disk — the surplus dropped, and
+    nothing else about the run changed.
+    """
+    cfg, store, _t = env
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(OVERLONG_FOUND))
+    r = results[0]
+
+    assert r.summarized and r.written
+    assert not r.placeholder, "a long prose field must not cost the whole session"
+    assert r.truncated_items == 4
+
+    written = "".join(p.read_text() for p in Path(cfg.output_dir).rglob("*.md"))
+    assert "A finding numbered 0" in written
+    assert "A finding numbered 43" not in written
+    assert "4 further items dropped at the 40-item cap." in written
+
+
+def test_truncation_does_not_break_the_written_identity(env) -> None:
+    """`written == summarized + suppressed + placeholder` is the identity that made this whole
+    family of bugs visible. Truncation is an annotation on a success, not a fourth outcome, so
+    it must leave that arithmetic exactly where it was."""
+    cfg, store, _t = env
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(OVERLONG_FOUND))
+    t = summarize_run(results)
+
+    assert t["written"] == t["summarized"] + t["suppressed"] + t["placeholders"]
+    assert t["truncated"] == 1
+    assert t["truncated_items"] == 4
+
+
+def test_an_ordinary_sweep_reports_no_truncation(env) -> None:
+    """A non-zero truncation count on a clean run would make the signal useless for deciding
+    whether `MAX_ITEMS` is set anywhere near right."""
+    cfg, store, _t = env
+    t = summarize_run(run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub()))
+    assert t["truncated"] == 0
+    assert t["truncated_items"] == 0
