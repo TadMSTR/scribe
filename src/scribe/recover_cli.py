@@ -220,9 +220,84 @@ def _has_eventlog(cfg: Config, store: Store, transcript_path: str) -> bool:
     return True
 
 
+def transcripts_with_a_final_block(output_dir: Path) -> set[str]:
+    """Transcripts that have at least one REAL digest block somewhere in the corpus.
+
+    Keyed on `transcript_path` rather than the session id, for the reason the module docstring
+    gives: that is this tool's join key everywhere else.
+    """
+    out: set[str] = set()
+    for md in sorted(Path(output_dir).expanduser().rglob("*.md")):
+        try:
+            text = md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m, close in paired_blocks(text):
+            body = text[m.end() : close.start()]
+            if PLACEHOLDER_MARKER in body or SUPPRESSION_MARKER in body:
+                continue
+            out.add(m.group(3))
+    return out
+
+
+def superseded_turns(cfg: Config, store: Store, found: list[Found]) -> set[str]:
+    """Of `found`, the stand-ins whose material has ALREADY reached a written digest.
+
+    A session can leave stand-ins on **more than one turn**, and only one of them is ever
+    reachable. A run writes exactly one block, at `_last_turn_uuid`, and `append_block`
+    replaces only the block whose uuid matches -- so a placeholder on an earlier turn cannot
+    be rewritten by any later run, nor by `--apply`, which only resets state. Counted naively
+    it is unrepaired loss forever, and the daily detector pages every morning for something no
+    action can fix: the vikunja#398/#848 shape the detector exists to avoid. (vikunja#886.)
+
+    It does not need to be rewritten. `reset_for_retry` clears `last_offset`, so the recovery
+    re-reads the whole transcript, and `mark_summarized` records **every pending turn the
+    digest covered**, not just the one it was filed under. The earlier turn's content is in
+    that digest.
+
+    **Two conditions, and the second is the one that is easy to miss.**
+
+    `processed_turns` alone is NOT sufficient, and trusting it alone breaks precisely the
+    population this tool was written for. The 30 legacy sessions predate the provisional
+    model, and the code of that era marked a suppressed session `summarized` and a placeholder
+    `failed` -- so their turns are recorded as written when nothing was ever written. Keyed on
+    the ledger alone, `recover` would skip all 30. `tests/test_recover.py`'s corpus fixture
+    encodes exactly that state, and it is what caught this.
+
+    So a stand-in counts as superseded only when **both** hold:
+
+      * its turn is in `processed_turns` -- the ledger says the content was written, and
+      * its transcript has a **real** block somewhere in the corpus -- the disk agrees.
+
+    A legacy row satisfies the first and fails the second: its only block IS the stand-in.
+    The complementary case is covered too -- a session whose later run wrote a real block
+    incrementally (`last_offset` not reset) never records the earlier turn, so it fails the
+    first and stays counted.
+
+    **This cannot hide a real loss.** A session that never summarized never reaches
+    `mark_summarized`; and `reset_for_retry` DELETEs this transcript's rows, so reopening a
+    session re-arms the signal rather than leaving it suppressed by an earlier success.
+    """
+    covered = transcripts_with_a_final_block(Path(cfg.output_dir))
+    by_path: dict[str, list[str]] = {}
+    for f in found:
+        if f.transcript_path in covered:
+            by_path.setdefault(f.transcript_path, []).append(f.turn_uuid)
+    out: set[str] = set()
+    for tpath, turns in by_path.items():
+        still_pending = set(store.unprocessed_turns(tpath, turns))
+        out |= {t for t in turns if t not in still_pending}
+    return out
+
+
 def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
     """Find every stand-in block, stamp it, and reopen its session. Returns a report."""
-    found = scan_corpus(Path(cfg.output_dir))
+    every = scan_corpus(Path(cfg.output_dir))
+    resolved = superseded_turns(cfg, store, every)
+    # Everything below operates on the UNRESOLVED blocks only. A superseded block is left
+    # exactly as it is on disk: rewriting it would mutate the digest corpus to correct a
+    # bookkeeping error, which is the riskiest thing this tool can do and buys nothing.
+    found = [f for f in every if f.turn_uuid not in resolved]
     by_file: dict[Path, list[Found]] = {}
     for f in found:
         by_file.setdefault(f.path, []).append(f)
@@ -258,6 +333,11 @@ def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
         "blocks": len(found),
         "placeholders": sum(1 for f in found if f.kind == PROVISIONAL_PLACEHOLDER),
         "suppressed": sum(1 for f in found if f.kind == PROVISIONAL_SUPPRESSED),
+        #: Stand-ins on disk whose turn is already in a written digest. Reported rather than
+        #: silently dropped -- the count is how you tell "nothing was ever lost" from
+        #: "something was lost and later covered", and the second is worth seeing.
+        "superseded": len(resolved),
+        "scanned": len(every),
         "stamped": stamped,
         "reset": sorted(reset),
         "missing": sorted(missing),
@@ -328,6 +408,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"  {report['stamped']} anchor(s) {'stamped' if args.apply else 'to stamp'}")
     print(f"  {len(report['reset'])} session(s) {'reopened' if args.apply else 'to reopen'}")
+    if report["superseded"]:
+        print(
+            f"  {report['superseded']} superseded block(s) ignored "
+            f"-- their turns are already in a written digest"
+        )
     for tpath in report["missing"]:
         print(f"  !! no transcript or state row: {tpath}")
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`recover` no longer reports a superseded stand-in as unrepaired loss** (vikunja#886). A
+  session can leave stand-in blocks on more than one turn, and only the last turn's is ever
+  reachable — a run writes one block, at `_last_turn_uuid`, and `append_block` replaces only
+  that uuid. The earlier one was counted as recoverable loss forever, which neither the hourly
+  cron nor `--apply` could clear, so the daily detector paged every morning for something no
+  action could fix. It does not need rewriting: `reset_for_retry` clears `last_offset`, so the
+  recovery re-reads the whole transcript and `mark_summarized` records every turn the digest
+  covered. A stand-in is now ignored when **both** its turn is in `processed_turns` **and** its
+  transcript has a real block on disk. The second condition is not redundant — the 30 legacy
+  sessions have turns marked written by pre-provisional code that never wrote anything, and the
+  ledger alone would skip all of them. Exit codes are unchanged; only the input to the decision
+  is. No corpus is rewritten.
+
 ## [0.4.0] — 2026-09-17
 
 **Minor, not patch.** Two contract changes: an over-long unbounded field now truncates where
