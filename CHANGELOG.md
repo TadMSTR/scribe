@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-17
+
+**Minor, not patch.** Two contract changes: an over-long unbounded field now truncates where
+it used to discard the whole digest, and `scribe recover` gains two exit codes.
+
+### Fixed
+
+- **An over-long prose field no longer costs the whole session** (vikunja#884). `found`
+  arriving with 44 items discarded a real digest on 2026-09-17. The three earlier fixes in
+  this family (#849, #872, #884) each read it as "the cap is too low" and raised a number;
+  it was never the number. A field whose ceiling is knowable from the event log — `done`,
+  `tickets`, `artifacts` — still **validates**, because exceeding it is evidence of
+  invention. A field with no knowable ceiling — `found`, `decisions`, `open_items` — now
+  **truncates**: the surplus is dropped, the block says so, and the digest is written. The
+  cap stays declared in `json_schema`, since the model shedding to fit is the mechanism
+  working and truncation is only the backstop.
+- **`recover` no longer reports its own crash as recoverable data loss** (vikunja#880). Only
+  `ConfigError` was caught, so any other exception exited `1` — the code a scheduled detector
+  reads as "repairable digest loss". Added `4` (the tool failed) and `5` (state DB newer than
+  this build). **`0`–`3` are unchanged**, deliberately: a consumer documents them verbatim.
+- **`PRAGMA user_version` only ever advances** (vikunja#877). It was stamped unconditionally,
+  so an older binary opening a newer DB silently relabelled it downwards — recording the
+  binary that last opened the DB rather than the schema the DB is at, which is the opposite
+  of what a migration gate needs. Opening a DB newer than the running build is now refused
+  outright. Harmless until now only because the one migration is idempotent.
+
+### Added
+
+- Run totals report `truncated` and `truncated_items`. With overflow no longer raising,
+  nothing else would measure the tail — and the written corpus is censored by the cap.
+
 ## [0.3.0] — 2026-09-17
 
 **Minor, not patch.** Three contract changes: `scribe recover` now returns meaningful exit

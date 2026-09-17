@@ -17,8 +17,10 @@ from scribe.eventlog import write_eventlog
 from scribe.extract.models import EventLog, Turn
 from scribe.recover_cli import (
     EXIT_CONFIG,
+    EXIT_INTERNAL,
     EXIT_OK,
     EXIT_RECOVERABLE,
+    EXIT_STATE_INCOMPATIBLE,
     EXIT_UNRECOVERABLE,
     recover,
     scan_corpus,
@@ -359,7 +361,59 @@ def test_a_config_error_still_exits_two(corpus, tmp_path) -> None:
     assert recover_main(["--config", str(bad), "--state", str(store.path)]) == EXIT_CONFIG
 
 
-def test_the_four_exit_codes_are_distinct() -> None:
+def test_the_exit_codes_are_distinct() -> None:
     """They are branched on by a cron that does different things for each. Two collapsing to
     the same integer would silently merge two responses."""
-    assert len({EXIT_OK, EXIT_RECOVERABLE, EXIT_CONFIG, EXIT_UNRECOVERABLE}) == 4
+    codes = {
+        EXIT_OK,
+        EXIT_RECOVERABLE,
+        EXIT_CONFIG,
+        EXIT_UNRECOVERABLE,
+        EXIT_INTERNAL,
+        EXIT_STATE_INCOMPATIBLE,
+    }
+    assert len(codes) == 6
+
+
+def test_the_published_codes_did_not_move() -> None:
+    """The four original values, as literals.
+
+    `scribe-recover-check.sh` (host-forge-scripts -- not this repo, and not ours to edit)
+    pages on these and documents the table verbatim. Adding `4` and `5` is safe; renumbering
+    any of these four would silently re-point a pager at the wrong condition. Written as bare
+    integers on purpose: comparing the constants to themselves would pass through a rename.
+    """
+    assert (EXIT_OK, EXIT_RECOVERABLE, EXIT_CONFIG, EXIT_UNRECOVERABLE) == (0, 1, 2, 3)
+
+
+def test_an_unexpected_exception_does_not_report_as_recoverable_loss(corpus, tmp_path) -> None:
+    """The defect, reproduced the way part 4's audit found it: a corrupt state database.
+
+    `main` caught `ConfigError` and nothing else, so `Store(...)` failing to open this file
+    escaped, and Python's default exit status for an uncaught exception is **1** -- the code
+    that means "repairable digest loss, go run the repair". A crashed tool was indistinguishable
+    from a real finding. The only thing preventing an unattended page was the consumer's own
+    guard requiring a report line, which is not a load that belongs on the consumer.
+    """
+    cfg, store, _md, _paths = corpus
+    store.path.write_bytes(b"this is not a sqlite database, not even close")
+
+    code = _run(cfg, store, tmp_path)
+    assert code == EXIT_INTERNAL
+    assert code != EXIT_RECOVERABLE
+
+
+def test_a_state_db_from_a_newer_scribe_gets_its_own_code(corpus, tmp_path, monkeypatch) -> None:
+    """Distinct from `4` because the operator action is different and specific: upgrade the
+    binary. Reported as a generic internal error it would look like a bug to chase."""
+    cfg, store, _md, _paths = corpus
+    monkeypatch.setattr("scribe.state.SCHEMA_VERSION", 0)
+    assert _run(cfg, store, tmp_path) == EXIT_STATE_INCOMPATIBLE
+
+
+def test_a_healthy_corpus_still_reaches_its_ordinary_code(corpus, tmp_path) -> None:
+    """The true positive beside the new guard. A blanket `except` that swallowed everything
+    into `4` would make the tool permanently useless while looking well-defended."""
+    cfg, store, _md, _paths = corpus
+    assert _run(cfg, store, tmp_path) in {EXIT_RECOVERABLE, EXIT_UNRECOVERABLE}
+    assert _run(cfg, store, tmp_path, "--apply") == EXIT_OK

@@ -28,6 +28,20 @@ from .paths import secure_dir, secure_sqlite
 
 SCHEMA_VERSION = 2
 
+
+class SchemaTooNewError(RuntimeError):
+    """The database was written by a newer scribe than this one.
+
+    A refusal, not a failure. `user_version` above `SCHEMA_VERSION` means a build that knows
+    columns and invariants this one does not; carrying on would have the older code write
+    rows the newer schema considers malformed, and it is silent while it happens.
+
+    This is the direction that loses data, and it is the one that actually occurs here: code
+    lands in the repo before sysadmin deploys it, so `/opt/venvs/scribe` routinely runs a
+    build behind the working tree while both point at the same state DB. During part 4 the
+    still-deployed v0.2.0 cron reset the marker on its next hourly run (vikunja#877).
+    """
+
 STATUS_ACTIVE = "active"
 STATUS_COMPLETE = "complete"
 STATUS_SUMMARIZED = "summarized"
@@ -177,10 +191,33 @@ class Store:
         secure_dir(self.path.parent)
         with self._connect() as conn:
             was = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if was > SCHEMA_VERSION:
+                raise SchemaTooNewError(
+                    f"state database at {self.path} is schema {was}, but this scribe "
+                    f"understands {SCHEMA_VERSION}. Upgrade scribe; do not edit the database."
+                )
             conn.executescript(_SCHEMA)
             if was < 2:
                 _backfill_session_ids(conn)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            # **Only ever forward.** This used to stamp unconditionally, which made the marker
+            # record "the binary that last opened this DB" rather than "the schema this DB is
+            # at" -- the opposite of what a migration gate reads it for. An older binary
+            # opening a newer DB silently relabelled it downwards, and the next run of the
+            # newer code would then re-apply migrations already applied.
+            #
+            # Harmless so far only because `_backfill_session_ids` fills empty columns and is
+            # therefore idempotent. The first migration that TRANSFORMS a value instead of
+            # filling a blank one would corrupt on the second application, and by then the
+            # relabelling is months of hourly cron runs in the past.
+            #
+            # **This condition cannot currently fire in the direction it guards**, because the
+            # refusal above already rejects `was > SCHEMA_VERSION`, and `was == SCHEMA_VERSION`
+            # makes the write a no-op. It is kept as the narrower of the two guards rather than
+            # deleted: if the refusal is ever relaxed -- and it is the more contentious half,
+            # since it turns a silent mislabel into a hard stop -- this is what still prevents
+            # the downgrade. Do not read a passing test of it as evidence it is load-bearing.
+            if was < SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         secure_sqlite(self.path)
 
     @contextmanager

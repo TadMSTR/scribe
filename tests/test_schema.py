@@ -361,3 +361,21 @@ def test_a_clean_digest_records_no_truncation() -> None:
     """The overwhelmingly common case. A non-empty `truncated` on an ordinary digest would
     put a note on every block in the corpus."""
     assert parse(VALID).truncated == {}
+
+
+def test_which_fields_are_unbounded_is_pinned_not_merely_derived() -> None:
+    """The classification itself, stated once as a literal.
+
+    Every other test here reads `BOUNDED`/`UNBOUNDED` off `_LIST_FIELDS`, which keeps them
+    consistent but means none of them can notice a field CHANGING class — they would simply
+    re-derive and pass. Worse, `test_every_unbounded_field_truncates...` is parametrized over
+    `UNBOUNDED`, so emptying it collapses that test to zero cases and reports a skip rather
+    than a failure. Measured, by flipping every field to bounded: 5 tests fail and that one
+    silently skips.
+
+    So the split is written out here. Moving a field between the classes is a real decision
+    about whether its ceiling is knowable from the event log, and it should have to be made
+    twice.
+    """
+    assert UNBOUNDED == ["decisions", "found", "open_items"]
+    assert BOUNDED == ["artifacts", "done", "tickets"]
