@@ -246,9 +246,30 @@ python -m scribe recover --apply      # change it
 python -m scribe run --live           # then re-summarize
 ```
 
-It joins on `transcript_path`. A session whose transcript has been deleted is reported rather
-than reopened — its event log survives, but there is no path from one to a digest yet
-(vikunja#873).
+It joins on `transcript_path`. A session whose transcript has been deleted is reopened from
+its **event log** instead: `load_eventlog` reads the persisted log back into the same
+`EventLog` the extractor would have produced, so a digest survives its source (vikunja#873).
+Transcripts age out at 30 days while `eventlogs/` has no cleanup policy, so the log is the
+durable copy. Only a session `recover` reopens is ever replayed — an orphaned log whose digest
+is already real is left alone. A session with neither input is still reported rather than
+reopened; there is genuinely nothing to summarize.
+
+### Exit codes
+
+`recover`'s exit code is an interface — a scheduled detector is wired to it, so it is a
+contract rather than a convenience:
+
+| code | meaning |
+|---:|---|
+| `0` | nothing is lost, **or** an `--apply` run completed |
+| `1` | unrepaired loss, and it is recoverable |
+| `2` | config error |
+| `3` | unrepaired loss that re-running will not fix — no transcript *and* no usable event log |
+
+**Poll with the dry run; `--apply` is the repair.** `--apply` returns `0` whenever it
+completes, because a repair that reports failure every time it works pages an operator into
+ignoring it. And `1` clears when the *loss* is repaired, not when `--apply` runs: a stamped
+block is still a stand-in until `scribe run --live` has replaced it.
 
 ### The QC gate
 
