@@ -33,6 +33,11 @@ def bearer():
     return extract(FIXTURES / "transcript-with-bearer.jsonl")
 
 
+@pytest.fixture
+def compact():
+    return extract(FIXTURES / "transcript-compact-boundary.jsonl")
+
+
 def test_tool_traffic_survives_extraction(bearer) -> None:
     """The defect this component exists to fix.
 
@@ -237,3 +242,49 @@ def test_a_cwd_outside_the_projects_tree_does_not_override_attribution(tmp_path)
         tmp_path=tmp_path,
     )
     assert extract(p).agent == "research"
+
+
+def test_compact_summary_is_not_extracted_as_user_text(compact) -> None:
+    """vikunja#893. Claude Code writes the post-compaction recap as `type: user` with
+    `isCompactSummary: true`, so it is structurally a person speaking and the parser
+    believed it.
+
+    Measured on session 6017c8ce before the guard: 18,859 characters of machine recap in
+    the event log as user text, in the worst-degraded session in the corpus. The ladder
+    may not drop events (invariant 6), so the recap displaced real evidence rather than
+    being displaced by it.
+    """
+    assert compact.stats.skipped_compact == 1
+    blob = json.dumps(compact.to_dict(), ensure_ascii=False)
+    assert "This session is being continued" not in blob
+    assert "MACHINE RECAP FILLER" not in blob
+
+
+def test_compact_guard_keeps_the_turns_on_either_side(compact) -> None:
+    """The positive half, and the reason the absence assertion above means anything.
+
+    A transcript that extracted to nothing at all would satisfy every `not in` check in
+    this file. So assert what SURVIVED, and assert its order: the guard must remove one
+    record from the middle of a session without disturbing what surrounds it.
+    """
+    texts = [t.user_text for t in compact.turns if t.user_text]
+    assert texts == [
+        "REAL TURN BEFORE THE BOUNDARY about vikunja#893",
+        "REAL TURN AFTER THE BOUNDARY about vikunja#896",
+    ]
+    # The tool event attached to the pre-boundary turn survives too — the guard is scoped
+    # to user text and must not take tool traffic with it.
+    assert compact.stats.tool_events == 1
+    assert compact.stats.tool_results == 1
+    assert [e.tool for t in compact.turns for e in t.events] == ["Bash"]
+
+
+def test_compact_summary_does_not_open_a_turn(compact) -> None:
+    """Answers the handoff's question 2 as an assertion rather than a note.
+
+    The record was opening its own Turn, so excluding it lowers `turns` by exactly one on
+    any transcript carrying a boundary (52 -> 51 on session 6017c8ce). Pinning the count
+    here means a future change that reinstates the turn fails loudly instead of quietly
+    restoring the defect.
+    """
+    assert compact.stats.turns == 2

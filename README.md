@@ -117,6 +117,50 @@ Measured across 429 real transcripts at the default 200,000-character budget: 74
 
 Exit codes: `0` success (including an empty session, which is a real outcome), `2` the transcript could not be read.
 
+## Architecture
+
+Seven components: extract, summarize, writeback, qc, journal, recover, state.
+
+The ordering that matters most is the one in the middle — **the event log is written to disk
+before the model is called, not after.** Everything scribe knows about a session is already
+persisted by the time anything can fail, so a crashed or rate-limited run still leaves complete
+evidence behind. A pipeline that summarized first and persisted second would lose the session
+and the record of it together.
+
+```mermaid
+flowchart TD
+    T["Claude Code transcript<br/>~/.claude/projects/**/*.jsonl"]
+    E["extract<br/>deterministic, no model"]
+    L[("event log<br/>eventlogs/session-id.json")]
+    S["summarize<br/>the only model call"]
+    Q["qc<br/>grounding gate"]
+    D[("digest<br/>digests/agent/date.md")]
+    ST[("state<br/>scribe.sqlite3")]
+    J["journal"]
+    R["recover"]
+
+    T -->|read-only, never written| E
+    E --> L
+    L -->|persisted BEFORE any model call| S
+    S --> Q
+    Q -->|grounded| D
+    Q -->|rejected| ST
+    E --> ST
+    L -.->|replays a past session| J
+    ST -.->|finds lost or provisional digests| R
+    R -.->|rewrites from the event log| D
+
+    classDef store fill:#e8eef7,stroke:#48607f,color:#17212f
+    class L,D,ST store
+```
+
+Two consequences of that shape are worth naming, because they are what the design buys:
+
+- `recover` can rebuild a digest without the transcript, because the event log is the input to
+  summarization rather than a by-product of it.
+- `extract` is the only component that reads a transcript, and it never writes to one. That is
+  asserted in the test suite against both content and mtime, not just documented here.
+
 ## The rest of the pipeline
 
 ```bash
@@ -341,15 +385,28 @@ demonstrably was not shown. A floor chosen against the corpus it judges measures
 
 ## Status
 
-All six phases are built, and the shadow run **has been run**: 429 sessions swept in dry mode,
-plus live runs behind vikunja#847, #848, #849 and #852. `memsearch-summarize` is untouched and
-remains in production — the shadow run writes to scribe's own output root and changes nothing
-in the live path.
+**In production on forge, and the only summarizer running there.** The `memsearch-summarize`
+retirement (vikunja#863) completed 2026-09-17; a `grep -c memsearch` over the crontab returns
+`0`. There is no longer a shadow path, an incumbent, or a cutover pending.
 
-What remains is not scribe's to do. Registration of the `SessionStart` feed above, and the
-cutover itself, belong to the retirement build (vikunja#863) and are sequenced behind a
-backfill: only one agent has a digest today, so registering the hook first would leave the
-others with an empty injection and no error.
+Deployed shape, measured 2026-09-18:
+
+| | |
+|---|---|
+| Version | v0.5.0, from `/opt/venvs/scribe` |
+| Batch run | cron `40 * * * *`, wrapped in `flock -n` — scribe has no internal process lock, so two overlapping runs would both work the same queue |
+| Session feed | `SessionStart` hook `/usr/local/sbin/forge/scribe-session-start.sh` (root-owned), registered in `~/.claude/settings.json` |
+| Config | `~/scripts/scribe-config.toml`, passed explicitly with `--config` |
+| Digests | `~/.local/share/scribe/digests/<agent>/<date>.md` — 9 agent directories, 189 files, 2.9 MB |
+| Event logs | `~/.local/share/scribe/eventlogs/<session-id>.json` — 467 files, 43 MB |
+| State | `~/.local/state/scribe/scribe.sqlite3`, `PRAGMA user_version = 2` |
+| Watchdog | `scribe-recover-check.sh` daily at `06:20`, reporting digests lost or left provisional |
+
+The event-log directory is a **sibling** of the digest directory, never a child. Digests are
+indexed by qmd via a `<output_dir>/**/*.md` glob, and nesting the logs underneath would quietly
+pull 43 MB of JSON into that collection.
+
+The counts above are a snapshot and will drift; the paths and the cadence are the durable part.
 
 See `CHANGELOG.md`.
 
@@ -373,8 +430,10 @@ packages missing, `scribe run` prints a warning to stderr naming the install com
 warning and not a fatal error on purpose — this is a batch job over a corpus, and dying over
 an observability extra would trade a complete run for a complete outage.
 
-Three spans are emitted, and the names are deliberately the *incumbent's* so existing SigNoz
-dashboards keep working across the cutover:
+Three spans are emitted under the **incumbent's** names. That began as a compatibility
+measure so existing SigNoz dashboards would keep working across the cutover; the cutover
+is done, so it is now simply a retained legacy name. The dashboards still key on it, which
+is why renaming it is a migration rather than a rename:
 
 | span | when |
 |---|---|

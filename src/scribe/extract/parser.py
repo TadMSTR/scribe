@@ -390,10 +390,45 @@ def extract(
 
             rtype = obj.get("type")
             if rtype not in ("user", "assistant"):
+                # Claude Code writes TWO records at a compact boundary, and this filter is
+                # where the first one goes: `type: system, subtype: compact_boundary`. Its
+                # payload is a fixed string ("Conversation compacted") plus a
+                # `compactMetadata` dict — a marker, not conversation — so dropping it loses
+                # no session content and the drop is deliberate, not incidental.
+                #
+                # It is the only record that marks WHERE the boundary fell. If the compact
+                # summary is ever captured as a first-class event-log field (deferred in
+                # vikunja#893), this is the record that supplies the position, and this
+                # branch is what has to change. The second record is handled below.
+                #
+                # Deliberately NOT covered by a test. One was written and removed 2026-09-18:
+                # it could not be made to fail. Widening this filter to admit `type: system`
+                # still leaks nothing, because the marker carries its payload at top-level
+                # `content` while the reader below takes `message.content`, so it falls out
+                # at the empty-text check either way. A test that cannot go red is not a
+                # guard, and keeping one here would have implied cover that does not exist.
                 continue
 
             if obj.get("isMeta"):
                 st.skipped_meta += 1
+                continue
+
+            # Third member of the _INJECTED_PREFIXES / isMeta family, and here for the same
+            # reason: Claude Code writes machine-generated text as a record that is
+            # structurally indistinguishable from a person speaking. At a compact boundary it
+            # emits `type: user, isCompactSummary: true` whose content is the model's own
+            # recap of the conversation so far.
+            #
+            # Measured 2026-09-18 (vikunja#893) on session 6017c8ce: 18,859 characters of
+            # recap entering the event log as user text, in the worst-degraded session in the
+            # corpus (degradation_level 4, budget_exceeded). It competed for the byte budget
+            # against 672 real tool events, and invariant 6 forbids the ladder from dropping
+            # events — so the recap won and real evidence was thinned to make room for it.
+            #
+            # This opens its own Turn if left alone; excluding it lowers `turns` by one on
+            # any transcript carrying a boundary. That is the guard working, not a regression.
+            if obj.get("isCompactSummary"):
+                st.skipped_compact += 1
                 continue
 
             content = (obj.get("message") or {}).get("content")

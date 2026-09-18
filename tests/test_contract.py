@@ -259,7 +259,10 @@ def test_schema_version_is_declared(tmp_path) -> None:
     assert log.to_dict()["schema_version"] == SCHEMA_VERSION
 
 
-@pytest.mark.parametrize("name", ["transcript-with-bearer", "transcript-structural"])
+@pytest.mark.parametrize(
+    "name",
+    ["transcript-with-bearer", "transcript-structural", "transcript-compact-boundary"],
+)
 def test_output_round_trips_through_json(name: str) -> None:
     log = extract(FIXTURES / f"{name}.jsonl")
     assert json.loads(json.dumps(log.to_dict(), ensure_ascii=False)) == log.to_dict()

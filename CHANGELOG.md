@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A compact summary is no longer extracted as something the user said** (vikunja#893).
+  At a compaction boundary Claude Code writes two records, and the second is
+  `type: user` with `isCompactSummary: true` whose content is the model's own recap of
+  the conversation. The parser handled neither, so the recap entered the event log as
+  user text. Measured on session `6017c8ce`: **18,859 characters** of machine recap, in
+  the worst-degraded session in the corpus — and because the byte-budget ladder may not
+  drop events (invariant 6), the recap displaced real evidence rather than the reverse.
+
+  The guard sits alongside `isMeta` and `_INJECTED_PREFIXES`, which it belongs with: all
+  three are machine-generated text that arrives structurally indistinguishable from a
+  person speaking. New `stats.skipped_compact` counter reports when it fires, so a zero
+  is distinguishable from "no boundary present".
+
+  **Behaviour change:** `turns` drops by one on any transcript carrying a compact
+  boundary — the record was opening its own turn. On `6017c8ce`, 52 → 51, with
+  `tool_events` and `secrets_redacted` unchanged. Prevalence is 2 of 451 transcripts
+  (0.4%) on forge, and materially higher for interactive use.
+
+  The other boundary record, `type: system, subtype: compact_boundary`, is still dropped;
+  the drop is now deliberate and commented, because a later feature that captures the
+  compact summary as a first-class field will want the boundary position from it.
+
+### Changed
+
+- **README `## Status` rewritten** (vikunja#892). It claimed `memsearch-summarize` was
+  still in production and that hook registration and the cutover were outstanding. All
+  three were false as of the #863 cutover on 2026-09-17. Replaced with the deployed
+  shape — cadence, config path, output roots, state version and the recovery detector.
+- **Architecture diagram added**, satisfying the Baseline `Diagrams` requirement. It
+  makes the load-bearing ordering explicit: the event log is persisted *before* the
+  model is called, which is what leaves a failed run with complete evidence.
+- Telemetry section no longer describes the `memsearch.*` span names as a
+  forward-looking compatibility measure. The cutover is done; they are a retained
+  legacy name that SigNoz dashboards still key on.
+
 ## [0.5.0] — 2026-09-17
 
 **Minor, not patch.** The groundedness gate's tolerance for a path claim widens, and a new

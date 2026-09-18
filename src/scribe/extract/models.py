@@ -144,6 +144,11 @@ class Stats:
     thinking_blocks: int = 0
     skipped_meta: int = 0
     skipped_injected: int = 0
+    #: Compact-boundary records excluded from user text (vikunja#893). Counted rather
+    #: than dropped silently for the same reason as `secrets_redacted`: a zero here on
+    #: a transcript that HAS a compact boundary means the guard did not fire, which is
+    #: not distinguishable from "no boundary present" unless the count is reported.
+    skipped_compact: int = 0
     orphan_results: int = 0
     failures: int = 0
     #: Sum of characters across the four content categories the old hook triaged, so the
