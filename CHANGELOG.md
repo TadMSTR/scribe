@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-18
+
+**Minor, not patch.** Extraction behaviour changes: a transcript carrying a compaction
+boundary now yields one fewer turn, and `stats` gains a field. No event log is rewritten,
+no exit code changes, and `SCHEMA_VERSION` stays at 1 — the new `stats` field is additive
+with a default, so a reader that does not know it is unaffected.
+
 ### Fixed
 
 - **A compact summary is no longer extracted as something the user said** (vikunja#893).
@@ -43,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry section no longer describes the `memsearch.*` span names as a
   forward-looking compatibility measure. The cutover is done; they are a retained
   legacy name that SigNoz dashboards still key on.
+- **`Stats.raw_content_chars` now documents what it actually counts** — content that
+  reached the accumulator, not raw input. Every guard that returns early lowers it.
+  Raised INFO by the 2026-09-18 security audit after the build plan asserted it would
+  hold flat across the new guard and it fell by 18,859. Do not use it to detect a filter
+  over-dropping: it falls whenever a guard legitimately fires — `tool_events` and
+  `secrets_redacted` are the right controls.
+
 
 ## [0.5.0] — 2026-09-17
 
