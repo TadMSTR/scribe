@@ -26,10 +26,10 @@ from dataclasses import dataclass, field
 from ..extract.models import EventLog
 from ..telemetry import SPAN_REJECTED, span
 from .contamination import RETRY_REMINDER, build_fallback_note, detect_contamination
-from .prompt import SYSTEM, build_user_prompt, grounding_corpus
+from .prompt import build_system_prompt, build_user_prompt, grounding_corpus
 from .providers import Completion, Provider, ProviderError
 from .render import render_digest, render_failure, render_suppressed
-from .schema import Digest, SchemaError, parse
+from .schema import Digest, SchemaError, caps_for, parse
 
 #: A 429 backs off by 3x the base interval, matching the semantics of the daemon this
 #: replaces so operational behaviour does not change under the cutover.
@@ -68,7 +68,14 @@ def summarize_log(
     `sleep` is injected so backoff is exercised in tests without spending the wall-clock —
     a test that genuinely sleeps gets deleted the first time someone is in a hurry.
     """
-    user = build_user_prompt(log)
+    # Computed ONCE, here, and handed to all four consumers below. The contract the model is
+    # shown (`build_system_prompt`, `build_user_prompt`), the contract it is judged against
+    # (`parse`) and the cap the truncation note quotes (`render_digest`) have to be the same
+    # object. Recomputing `caps_for(log)` at each call site would work today and would be one
+    # refactor away from #849 — a response rejected against a limit it was never given.
+    caps = caps_for(log)
+    system = build_system_prompt(caps)
+    user = build_user_prompt(log, caps)
     corpus = grounding_corpus(log)
     outcome = Outcome(markdown="")
     reminder = ""
@@ -76,7 +83,7 @@ def summarize_log(
     for attempt in range(1, max_attempts + 1):
         outcome.attempts = attempt
         try:
-            completion: Completion = provider.complete(SYSTEM + reminder, user, timeout=timeout)
+            completion: Completion = provider.complete(system + reminder, user, timeout=timeout)
         except ProviderError as exc:
             outcome.errors.append(str(exc))
             if not exc.retryable or attempt == max_attempts:
@@ -94,7 +101,7 @@ def summarize_log(
         outcome.provider = completion.provider
 
         try:
-            digest = parse(completion.text)
+            digest = parse(completion.text, caps)
         except SchemaError as exc:
             # Treated exactly like an API error, per the plan — including the retryable/not
             # split. A response that does not fit the contract is not a summary; a response
@@ -109,7 +116,7 @@ def summarize_log(
             sleep(base_backoff * attempt)
             continue
 
-        rendered = render_digest(digest, heading=heading)
+        rendered = render_digest(digest, heading=heading, caps=caps)
         contaminated = detect_contamination(rendered, corpus)
         if contaminated:
             # `memsearch.summarize_rejected` — emitted once per rejected attempt, matching the

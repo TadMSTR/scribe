@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-18
+
+**Minor.** The JSON schema sent to the provider now varies per session, `run` prints a line it
+did not print before, and `cap-survey` is a new subcommand. No event log is rewritten, no exit
+code changes, `SCHEMA_VERSION` stays at 1, and no state-DB migration is needed.
+
+### Fixed
+
+- **A faithful digest is no longer discarded for having more entries than last month's corpus
+  did** (vikunja#901). `MAX_ROLLUP_ITEMS` was set above an observed ceiling of 76 tickets,
+  exactly as invariant 11 prescribes. 38 event logs later the ceiling was 104, and session
+  `6017c8ce`'s 103-item `tickets` response was rejected as invention — the model was right and
+  the digest was thrown away for it. That is vikunja#849's failure recurring on the field the
+  `bounded` class exists to protect. `done` had not fired yet and was one busy session away.
+
+  The method was never wrong; the **artifact** was. A global derived from a corpus snapshot
+  decays silently, with no signal until a digest is lost. `schema.caps_for` now reads the bound
+  off the session's own event log, which is known before the model is called and cannot go
+  stale. The globals survive as FLOORS under the derived value and as the no-log fallback, so
+  the cap only ever moves up: **no session can be rejected that is not rejected today**, and
+  99% of sessions are unaffected.
+
+- **`done`'s ceiling was measured against the wrong denominator for three builds.** `schema.py`
+  asserted `rollup.commands` bounded it. Measured across 479 written blocks paired with their
+  own event logs, `done` exceeded the session's command count in **45%** of them, reaching 51x:
+  the worst cases are sessions with ONE bash command beside 19–27 MCP calls and up to 21 file
+  writes. `done` describes work, and on this fleet the work is not bash. `stats.tool_events` is
+  the denominator that holds — 0 of 472 blocks exceeded it. Had a cap shipped against
+  `commands`, roughly half of all digests would have been rejected or silently shortened.
+
+  `_as_list`'s docstring justified its non-retryable raise with "the count cannot legitimately
+  exceed the log". Against a global that was false for two of three fields; it is true now, and
+  is stated in those terms rather than left to re-justify the derivation it described.
+
+- **Truncation was counted correctly and printed nowhere** (vikunja#887). `summarize_run` has
+  aggregated `truncated` and `truncated_items` since 0.5.0; `run_cli`'s human branch printed
+  neither, and the cron does not pass `--json`. `grep -c truncated ~/.pm2/logs/scribe-out.log`
+  returned 0 for the whole period. #887 asked for the counter to accumulate and then be looked
+  at, and it had been accumulating into nothing. AGENTS.md invariant 13, one level out.
+
+### Added
+
+- **`python -m scribe cap-survey`** — re-measures the input distribution the caps derive from,
+  reading persisted event logs directly rather than re-extracting transcripts. Works for
+  sessions whose transcripts have aged out at 30 days. Every number in `schema.py`'s cap
+  comments is reproducible by running it; a comment asserting a measurement the committed tool
+  cannot reproduce is worse than no comment.
+
+- **Per-field truncation identity.** `SessionResult.truncated_fields` and the
+  `truncated_fields` total keep the breakdown `pipeline.py` used to collapse to a scalar at the
+  point of recording. "148 items dropped" and "91 from `found`, 42 from `decisions`, 15 from
+  `open_items`" are different facts, and only the second names a cap to go and look at.
+
+- **Run-type reporting.** `SessionResult.full_read` records whether a sweep read the transcript
+  from byte 0 — a recovery re-read, or a first sight of an already-finished session. Both hand
+  the model a whole session where an incremental sweep hands it a growing one, so they are
+  different populations; pooling them is how "truncation is up" stays unexplained. Derived from
+  `last_offset`, so no state-DB column was added. `truncated_items` and `full_read` are now
+  span attributes on `SPAN_SUMMARIZE`.
+
+### Changed
+
+- `json_schema`, `parse`, `render_digest` and the system prompt all take the caps for the call,
+  computed **once** in `summarize_log`. The contract the model is shown, the contract it is
+  judged against and the cap the truncation note quotes have to be one object — a response
+  rejected against a limit it was never given is #849 exactly. All four default to the globals,
+  so every existing call site is unchanged.
+- The bounded-overflow message now reads "more than this session's N cap".
+
 ## [0.6.0] — 2026-09-18
 
 **Minor, not patch.** Extraction behaviour changes: a transcript carrying a compaction

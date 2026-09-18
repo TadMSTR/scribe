@@ -116,7 +116,7 @@ def test_item_cap_is_enforced_on_a_bounded_field_and_truncates_an_unbounded_one(
     halves in one test is deliberate: a change that made everything truncate would silently
     delete the guard, and this is where that shows up.
     """
-    with pytest.raises(SchemaError, match="more than the"):
+    with pytest.raises(SchemaError, match="more than this session's"):
         parse({"asked": "a", "done": [f"item {i}" for i in range(MAX_DONE_ITEMS + 1)]})
 
     d = parse({"asked": "a", "done": ["d"], "found": [f"f{i}" for i in range(MAX_ITEMS + 1)]})
@@ -186,7 +186,7 @@ def test_declared_maxitems_is_the_cap_parse_enforces(name: str) -> None:
     # passing it differs, so a drifted `maxItems` still fails here whichever class it is in.
     over = dict(at_cap, **{name: [f"i{i}" for i in range(cap + 1)]})
     if name in BOUNDED:
-        with pytest.raises(SchemaError, match="more than the"):
+        with pytest.raises(SchemaError, match="more than this session's"):
             parse(over)
     else:
         assert len(getattr(parse(over), name)) == cap
@@ -315,8 +315,9 @@ def test_the_44_item_found_that_cost_a_session_now_parses() -> None:
     """The real rejection, at its real length.
 
     Session `6017c8ce` was discarded on 2026-09-17 with
-    `field 'found' has 44 items, more than the 40 cap` — one over-long prose field taking a
-    whole session's summary with it (vikunja#884). 44 rather than a synthetic `cap + 1`
+    `field 'found' has 44 items, more than this session's 40 cap` — one over-long prose
+    field taking a whole session's summary with it (vikunja#884). 44 rather than a
+    synthetic `cap + 1`
     because the point of the number is that it was observed: nothing in the written corpus
     reaches 40, so a test tuned to the corpus would have been satisfied at 33 and proved
     nothing.
