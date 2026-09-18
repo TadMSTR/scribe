@@ -72,9 +72,26 @@ cap was rejected and is absent from the sample, so the survivors top out at the 
 it is the cap. The failure log is the uncensored view, and it is still a floor rather than a
 ceiling — `json_schema` declares `maxItems`, and a declared cap makes the model shed items
 rather than exceed them, so the output distribution is a function of the number you are trying
-to choose. Measure the **input**: `MAX_DONE_ITEMS` is set above `rollup.commands`' observed
-maximum. This cost 30 sessions their digest once already (vikunja#872), and the reassuring
-version of the data is what is easy to find.
+to choose. Measure the **input**. This cost 30 sessions their digest once already
+(vikunja#872), and the reassuring version of the data is what is easy to find.
+
+**Measuring the input is necessary and not sufficient — the denominator has to be right too.**
+This invariant used to end "`MAX_DONE_ITEMS` is set above `rollup.commands`' observed maximum",
+and `rollup.commands` was the wrong denominator. Measured 2026-09-18 across 479 written blocks
+paired with their own event logs, `done` exceeded the session's command count in **45%** of
+them, reaching 51x; the worst cases are sessions with ONE bash command beside 19–27 MCP calls
+and up to 21 file writes. `done` describes work, and on this fleet the work is not bash. The
+denominator that holds is `stats.tool_events` — 0 of 472 blocks exceeded it. So an input
+measurement against a quantity that does not actually bound the field reads exactly like a
+sound one, and it survived three builds here.
+
+**And a global derived from any snapshot decays.** `MAX_ROLLUP_ITEMS` was set above an
+observed ceiling of 76 tickets; 38 event logs later the ceiling was 104 and a faithful digest
+had been discarded (vikunja#901). The durable form is `schema.caps_for`, which reads the bound
+off the session's own log — the rollup is known before the model is called. The constants
+survive as FLOORS under the derived value and as the no-log fallback, which is why they are
+still here and why lowering one is still forbidden. Re-measure with `scribe cap-survey` rather
+than by hand.
 
 **12. A block that is not a digest must say so in its anchor, and must stay replaceable.**
 `render_failure`'s placeholder and the contamination guard's suppression note both occupy a
@@ -90,6 +107,14 @@ the absence of its turns from `processed_turns`, not the offset.
 as a clean backfill. The same mistake recurred one term along: a digest produced and *not*
 written showed up as `summarized` with `written: False`, and nothing subtracted those either.
 It has its own counter now (`discarded`). If you add an outcome, give it a name in the totals.
+
+**A name in the totals is not enough if nothing prints it.** `truncated` and `truncated_items`
+were aggregated correctly by `summarize_run` from the day they were added, and `run_cli`'s
+human branch printed neither — only `--json` did, and the cron does not pass it. `grep -c
+truncated ~/.pm2/logs/scribe-out.log` returned 0 for the whole period, so vikunja#887 asked for
+a number to be allowed to accumulate and looked at, and it had been accumulating into nothing.
+Give the counter a name, print it on the surface the operator actually reads, and keep the
+per-field breakdown: a scalar says a cap fired, and only the breakdown says which one.
 
 ## Porting notes
 

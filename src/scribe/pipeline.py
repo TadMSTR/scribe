@@ -81,6 +81,25 @@ class SessionResult:
     #: rejection log will not record it either. If this is routinely large, `MAX_ITEMS` is
     #: wrong; if it stays at zero, the declared cap is doing the work on its own.
     truncated_items: int = 0
+    #: The same overflow, per field: field name -> items dropped. `truncated_items` is this
+    #: dict summed, and the sum does not replace it. "148 items dropped" and "91 from
+    #: `found`, 42 from `decisions`, 15 from `open_items`" are different facts, and only the
+    #: second names a cap to go and look at. `Digest.truncated` has carried the breakdown
+    #: since #884; collapsing it to a scalar here, at the point of recording, is what made
+    #: the first live firing (2026-09-17, 148 items) impossible to localise afterwards.
+    truncated_fields: dict[str, int] = field(default_factory=dict)
+    #: True when this sweep summarized the transcript from byte 0 rather than continuing one
+    #: already part-read -- `reset_for_retry` cleared the offset, or the session was first
+    #: seen after it had already finished.
+    #:
+    #: **Deliberately wider than "was this a recovery run".** A recovery re-read and a
+    #: first-time read of an already-complete transcript are the same thing from the
+    #: summarizer's side: both hand the model a whole session at once, where an incremental
+    #: sweep hands it one that is still growing. Those are different populations and pooling
+    #: them is how "truncation is up this week" stays unexplained. `last_offset == 0` names
+    #: the distinction that matters and costs no state-DB column to carry, so it is the one
+    #: recorded (build handoff question 3).
+    full_read: bool = False
     dry_run: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
@@ -122,6 +141,8 @@ class SessionResult:
             "placeholder": self.placeholder,
             "discarded": self.discarded,
             "truncated_items": self.truncated_items,
+            "truncated_fields": self.truncated_fields,
+            "full_read": self.full_read,
             "dry_run": self.dry_run,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -265,7 +286,13 @@ def process_session(
     An unexpected exception is caught and recorded against the session rather than allowed
     to abort the sweep: one malformed transcript must not stop the other fourteen.
     """
-    result = SessionResult(transcript_path=row.transcript_path, agent=row.agent, dry_run=dry_run)
+    result = SessionResult(
+        transcript_path=row.transcript_path,
+        agent=row.agent,
+        dry_run=dry_run,
+        # Read off the row BEFORE any store write in this function moves it.
+        full_read=row.last_offset == 0,
+    )
     # Wrapped at the CALL SITE rather than inside `scribe.extract`, deliberately. That package
     # is asserted stdlib-only by `tests/test_stdlib_only.py` -- it is the component that reads
     # raw transcripts, and its "no network" claim is structural rather than conventional.
@@ -348,12 +375,19 @@ def process_session(
         SPAN_SUMMARIZE, session_id=log.session_id, agent=result.agent, events=st.tool_events
     ) as sp:
         outcome: Outcome = summarize_log(log, provider, heading=f"{when:%H:%M}")
+        if outcome.digest is not None:
+            result.truncated_fields = dict(outcome.digest.truncated)
+            result.truncated_items = sum(result.truncated_fields.values())
         set_span_attributes(
             sp,
             input_tokens=outcome.input_tokens,
             output_tokens=outcome.output_tokens,
             ok=outcome.ok,
             suppressed=outcome.suppressed,
+            # On the span so SigNoz holds the time series without anyone parsing a log.
+            # `full_read` rides along because the rate is only interpretable per population.
+            truncated_items=result.truncated_items,
+            full_read=result.full_read,
         )
 
     result.input_tokens, result.output_tokens = outcome.input_tokens, outcome.output_tokens
@@ -364,8 +398,6 @@ def process_session(
     # gone. Recorded here so the run totals can say so out loud -- inferring it from
     # `written - summarized` is how 13 lost sessions would have read as a clean backfill.
     result.placeholder = not outcome.ok and not outcome.suppressed
-    if outcome.digest is not None:
-        result.truncated_items = sum(outcome.digest.truncated.values())
     result.errors.extend(outcome.errors)
     if outcome.input_tokens or outcome.output_tokens:
         record_spend(
@@ -511,6 +543,19 @@ def run_once(
     ]
 
 
+def _merge_truncated(results: list[SessionResult]) -> dict[str, int]:
+    """Total items dropped per field across a sweep, largest first.
+
+    Sorted by size rather than by field name because the reason to read this at all is to
+    find the cap that is costing the most, and an alphabetical list buries it.
+    """
+    totals: dict[str, int] = {}
+    for r in results:
+        for name, dropped in r.truncated_fields.items():
+            totals[name] = totals.get(name, 0) + dropped
+    return dict(sorted(totals.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def summarize_run(results: list[SessionResult]) -> dict:
     """Aggregate a sweep into the figures the shadow comparison reports."""
     graded = [r for r in results if r.qc_ok is not None]
@@ -527,6 +572,14 @@ def summarize_run(results: list[SessionResult]) -> dict:
         #: declared cap fails to hold, the second is by how much.
         "truncated": sum(1 for r in results if r.truncated_items),
         "truncated_items": sum(r.truncated_items for r in results),
+        #: Which fields, and by how much. The scalar above says a cap fired somewhere; this
+        #: says which one, and it is the only form of the number that suggests a fix.
+        "truncated_fields": _merge_truncated(results),
+        #: Truncation split by run type, with the denominators to read it against. A full
+        #: read hands the model a whole session and an incremental sweep hands it a growing
+        #: one, so a rate pooled across the two describes neither.
+        "truncated_full_read": sum(1 for r in results if r.truncated_items and r.full_read),
+        "full_read": sum(1 for r in results if r.full_read),
         "events_total": sum(r.events for r in results),
         "secrets_redacted": sum(r.secrets_redacted for r in results),
         "post_render_redactions": sum(r.post_render_redactions for r in results),

@@ -19,14 +19,20 @@ from ..extract.models import EventLog
 from .schema import field_caps, json_schema
 
 
-def _caps_clause() -> str:
-    """The declared-limit sentence, built from `schema.field_caps()`.
+def _caps_clause(caps: dict[str, int] | None = None) -> str:
+    """The declared-limit sentence, built from this call's caps.
 
     Fields are grouped by the cap they share, so the sentence stays readable as the caps
     diverge, and it cannot disagree with what `json_schema` emits or what `parse` enforces.
+
+    Takes `caps` rather than reading the globals for the same reason `json_schema` does: since
+    `caps_for` derives per session, a prose clause built from the constants would state 100
+    while the schema declared 156. That is #872's failure — the model is told a limit, complies
+    with it, and writes a shorter digest than the log supports, every run, invisibly, with
+    nothing rejecting it to make the drift visible.
     """
     groups: dict[int, list[str]] = {}
-    for name, cap in field_caps().items():
+    for name, cap in (caps or field_caps()).items():
         groups.setdefault(cap, []).append(name)
     parts = []
     for cap, names in sorted(groups.items()):
@@ -35,7 +41,7 @@ def _caps_clause() -> str:
     return "; ".join(parts)
 
 
-SYSTEM = (
+_SYSTEM_TEMPLATE = (
     "You summarize one software engineering session from a structured event log.\n"
     "\n"
     "Respond with a single JSON object and nothing else. Use ONLY facts present in the "
@@ -60,7 +66,7 @@ SYSTEM = (
     # State the limit. The schema declares it as `maxItems`, but a field description that says
     # "the ticket references that appear in the log" and a cap the model is never told is a
     # contract the model cannot satisfy — it complies, and is rejected for complying.
-    f"Each list field has a limit, declared as maxItems in the schema below: {_caps_clause()}. "
+    "Each list field has a limit, declared as maxItems in the schema below: {caps_clause}. "
     "Do not exceed them. If the log holds more entries than a field allows, list "
     "the most significant ones up to the limit and stop: a response over the limit is rejected "
     "outright and the whole summary is lost, so a field you have had to shorten is always "
@@ -71,14 +77,29 @@ SYSTEM = (
 )
 
 
-def build_user_prompt(log: EventLog) -> str:
-    """Render the event log into the user half of the prompt."""
+def build_system_prompt(caps: dict[str, int] | None = None) -> str:
+    """The system half, with `caps` stated in its prose. `None` means the globals."""
+    return _SYSTEM_TEMPLATE.format(caps_clause=_caps_clause(caps))
+
+
+#: The default-caps rendering. Still a module constant because it is what a caller with no
+#: log gets, but the live path goes through `build_system_prompt(caps_for(log))`.
+SYSTEM = build_system_prompt()
+
+
+def build_user_prompt(log: EventLog, caps: dict[str, int] | None = None) -> str:
+    """Render the event log into the user half of the prompt.
+
+    `caps` is threaded into the embedded schema rather than recomputed here, so the JSON the
+    model is shown, the prose limit in `SYSTEM`, and what `parse` enforces are one decision
+    made once in `summarize_log`.
+    """
     doc = log.content_dict()
     return (
         "Event log for one session.\n\n"
         f"```json\n{json.dumps(doc, ensure_ascii=False, indent=None)}\n```\n\n"
         "Return one JSON object matching this schema:\n\n"
-        f"```json\n{json.dumps(json_schema(), ensure_ascii=False)}\n```\n"
+        f"```json\n{json.dumps(json_schema(caps), ensure_ascii=False)}\n```\n"
     )
 
 

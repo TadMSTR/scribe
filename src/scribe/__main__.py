@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import sys
 
-USAGE = "usage: python -m scribe {extract|events|journal|qc|qc-survey|recover|run} ..."
+USAGE = "usage: python -m scribe {cap-survey|extract|events|journal|qc|qc-survey|recover|run} ..."
 
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "cap-survey":
+        from .cap_survey_cli import main as cap_survey_main
+
+        return cap_survey_main(args[1:])
     if args and args[0] == "extract":
         from .extract.__main__ import main as extract_main
 

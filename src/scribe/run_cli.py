@@ -90,6 +90,27 @@ def main(argv: list[str] | None = None) -> int:
             )
         if totals["suppressed"]:
             print(f"  {totals['suppressed']} suppressed (contamination fallback)")
+        # Quiet, and deliberately so: a truncated digest is written, so this is degradation
+        # and not loss, and it must not read like the `!!` lines below it. But it has to be
+        # HERE. `summarize_run` has aggregated `truncated`/`truncated_items` correctly since
+        # #884 and this branch never printed either, so the only way to see the counter was
+        # `--json`, which the cron does not pass -- `grep -c truncated ~/.pm2/logs/
+        # scribe-out.log` returned 0 for the whole period. vikunja#887 asked for the number
+        # to be allowed to accumulate and then looked at; it was accumulating into nothing.
+        # AGENTS.md invariant 13, one level out: a counter nobody can see is not a counter.
+        if totals["truncated"]:
+            breakdown = ", ".join(
+                f"{dropped} from {name}" for name, dropped in totals["truncated_fields"].items()
+            )
+            run_types = (
+                f"{totals['truncated_full_read']} on a full read"
+                if totals["truncated_full_read"]
+                else "none on a full read"
+            )
+            print(
+                f"  {totals['truncated']} digest(s) truncated, "
+                f"{totals['truncated_items']} item(s) dropped ({breakdown}); {run_types}"
+            )
         # Louder than a placeholder, because a placeholder is a session waiting and this is a
         # session whose digest was generated, paid for and thrown away. It happened 30 times
         # and reported as a clean `summarized` every time. It should now be unreachable --

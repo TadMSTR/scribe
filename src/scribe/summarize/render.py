@@ -60,9 +60,16 @@ def _truncation_note(dropped: int, cap: int) -> str:
     return f"{TRUNCATION_MARKER} {dropped} further {items} dropped at the {cap}-item cap._"
 
 
-def render_digest(digest: Digest, *, heading: str = "") -> str:
-    """Render one session digest. Always terminated with a newline."""
-    caps = field_caps()
+def render_digest(digest: Digest, *, heading: str = "", caps: dict[str, int] | None = None) -> str:
+    """Render one session digest. Always terminated with a newline.
+
+    `caps` is threaded in rather than read from the constants because the truncation note
+    quotes the cap that fired, and since `caps_for` derives per session the constant is no
+    longer that number. A note reading "dropped at the 40-item cap" under a session whose cap
+    was 156 is a statement about the code that is false about the run — and the note exists
+    precisely so a reader can see how much was lost and against what.
+    """
+    caps = caps or field_caps()
     lines: list[str] = []
     if heading:
         lines.append(f"### {heading}")

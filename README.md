@@ -288,6 +288,43 @@ is too low" (#849, #872, #884) and fixed three times by raising a number, which 
 cliff rather than removing it. Do not read the written corpus as evidence a cap is safe: it is
 right-censored by that very cap, so the survivors top out below it no matter where it is set.
 
+#### Where a bounded cap comes from
+
+A fourth raise would have decayed on the same schedule: `tickets` was set above an observed
+ceiling of 76 and 38 event logs later the ceiling was 104, which cost a faithful digest
+(vikunja#901). So the bounded caps are no longer chosen from a corpus snapshot at all — each
+is derived from **that session's own event log**, which is known before the model is called:
+
+| field | denominator | headroom | floor |
+|---|---|---|---|
+| `done` | `stats.tool_events` | 0.5x | 200 |
+| `tickets` | `rollup.tickets` | 1.5x | 100 |
+| `artifacts` | `files_written` ∪ `prs` ∪ `git_refs` | 2.0x | 100 |
+
+`min(max(ceil(denominator x headroom), floor), floor x 10)`, so the old global becomes a floor
+and the cap only ever moves up: no session is rejected that would not be rejected today, and 99% of sessions are
+unaffected. The headroom is per field and the gap above the denominator is deliberate — since
+the cap is *declared*, one set near the ceiling does not reject, it makes the model shed by a
+different amount each run.
+
+The outer clamp is **not** a measured number, unlike everything else here. The denominators
+come from a file on disk, so without a ceiling a doctored event log removes the `bounded`
+invention guard outright rather than merely widening it. At 10x it can be widened and no more.
+It is inert today: the largest derived cap in the corpus is `done` 336 against a ceiling of
+2000, so no log comes within 6x of it. Do not tune it towards the corpus.
+
+`done` takes the smallest multiplier because its ratio falls as sessions grow: the largest log
+in the corpus has 672 tool events and wrote 37 `done` items. `artifacts` takes the largest
+because its denominator undercounts by construction — the prompt asks for *services* and there
+is no rollup for them.
+
+Re-measure with `python -m scribe cap-survey`, never by reading the digests:
+
+```bash
+python -m scribe cap-survey          # input ceilings, floors, and where the derived cap lands
+python -m scribe cap-survey --json   # the same, for a script
+```
+
 This is what the run totals mean:
 
 ```

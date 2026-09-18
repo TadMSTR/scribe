@@ -35,8 +35,12 @@ free prose wrong and a rejection would trade a whole session for one surplus bul
 from __future__ import annotations
 
 import json
+import math
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import NamedTuple
+
+from ..extract.models import EventLog
 
 SCHEMA_VERSION = 1
 
@@ -112,14 +116,29 @@ MAX_ITEMS = 40
 #: time). So the observed output tail is itself a function of the cap being set, and cannot
 #: be used to choose the cap without circularity.
 #:
-#: The only bound here that is independent of the cap is the **input**. `done` describes the
-#: work a session did, and the richest material it has to cover is `rollup.commands`, measured
-#: over 442 persisted event logs (#852): **max 187**, p99 164, 112 sessions over 40, 38 over
-#: 100. A faithful `done` cannot enumerate more distinct actions than the session contained.
+#: The only bound here that is independent of the cap is the **input**.
 #:
-#: 200 is above that measured input ceiling. 100 -- the obvious candidate, matching
-#: `MAX_ROLLUP_ITEMS` -- is 1.5x a censored number and sits *below* the command counts of 38
-#: sessions in the corpus, which is how this bug would recur with a bigger number.
+#: **This comment used to name `rollup.commands` as that input, and it was the wrong
+#: denominator.** Measured 2026-09-18 by pairing all 479 written digest blocks with their own
+#: event logs, `done` exceeded `rollup.commands` in **171 of 382** blocks -- 45% -- reaching
+#: 51x. The outliers are not noise: the worst are sessions with ONE bash command alongside
+#: 19-27 MCP calls and up to 21 file writes. `done` describes work, and on this fleet the work
+#: is overwhelmingly not bash. Had a cap been derived from `commands`, roughly half of all
+#: digests would have been rejected or silently shortened.
+#:
+#: `stats.tool_events` is the denominator that holds: **0 of 472** blocks exceeded it, max
+#: ratio exactly 1.00, and the ratio falls as the session grows (p95 0.50, and 0.06 at the
+#: largest log in the corpus). That is what `_Field.derive` uses. See `caps_for`.
+#:
+#: **What 200 is now.** It is no longer the cap in the ordinary case -- it is the FLOOR under
+#: the derived one, and the fallback when there is no log to derive from. Its job changed from
+#: "sit above the corpus's input ceiling" to "leave every small session behaving exactly as it
+#: does today", which is what confines this build's behaviour change to the large sessions
+#: that are the actual problem. 200 is kept at its existing value for precisely that reason.
+#:
+#: **Do not lower it towards the observed output.** In the floor-governed regime `done` reads
+#: max 58 across 479 blocks, which looks like 3.5x of slack and is right-censoring -- see
+#: AGENTS.md invariant 11. The number above is an input measurement; that one is not.
 MAX_DONE_ITEMS = 200
 
 #: Cap for `tickets` and `artifacts`. Both are drawn from the extractor's own rollup, so they
@@ -135,9 +154,73 @@ MAX_DONE_ITEMS = 200
 #: of 40 produced 27, 35 and 28 tickets across three identical runs, while 100 produced 53 every
 #: time. A cap near the ceiling does not reject the digest any more — it quietly shortens it, by
 #: a different amount each run.
+#:
+#: **Re-measured 2026-09-18, and by then it had already fired.** Across the current 470 event
+#: logs the input ceilings are `tickets` max 104 (was 76) and `artifacts` max 68 (was 58). 100
+#: sat below the first of those, and
+#: `~/.local/share/scribe/digests/research/2026-09-15.md` holds the placeholder it produced:
+#: session `6017c8ce`, a faithful 103-item `tickets` response discarded against a 104-ticket
+#: rollup. That is vikunja#849's failure recurring on the field the `bounded` class exists to
+#: protect (vikunja#901).
+#:
+#: Raising it again was the move #849, #872 and #884 each made and each regretted; it decayed
+#: within 38 event logs. So 100 is **kept** and demoted to a FLOOR, with the working cap
+#: derived per session by `caps_for`. A global chosen from a corpus snapshot decays silently;
+#: a bound read off the log in hand cannot.
 MAX_ROLLUP_ITEMS = 100
 
+#: Hard ceiling on a derived cap, as a multiple of that field's floor. `caps_for` clamps to
+#: `floor * MAX_DERIVED_MULTIPLE`.
+#:
+#: **This number is not measured, and unlike every other constant in this module it is not
+#: trying to be.** The others are chosen against an observed distribution; this one is a
+#: containment bound on an input scribe does not control. `caps_for`'s denominators come from
+#: the session's persisted event log, so anyone able to write under the event-log directory
+#: could inflate `stats.tool_events` and hand themselves an unbounded `done` cap, removing the
+#: `bounded` class's invention guard for that session entirely. With the clamp they can widen
+#: it 10x and no further.
+#:
+#: Filed as the one Low finding of the 2026-09-18 audit of scribe-schema-cap-derivation-2026-09,
+#: and it is defence in depth rather than a fix: an actor who can write an event log already
+#: has a strictly worse primitive — editing the log's own turn content, which the summarizer
+#: treats as ground truth. It is also **not** a memory bound; `_as_list` builds its list from
+#: the model's response before consulting the cap, so allocation never depended on this.
+#:
+#: 10 is deliberately far above anything real. Measured across all 470 persisted event logs on
+#: 2026-09-18, the largest derived cap was `done` 336 against a ceiling of 2000 — **no log in
+#: the corpus comes within 6x of the clamp**, so it changes no present behaviour and exists
+#: only to bound the pathological case. Do not tune it towards the corpus: that would give a
+#: measured number the job of a safety limit, which is the confusion this comment exists to
+#: prevent.
+MAX_DERIVED_MULTIPLE = 10
+
 MAX_ITEM_CHARS = 2000
+
+
+def _den_done(log: EventLog) -> int:
+    """`done`'s ceiling: every tool call the session made.
+
+    Not `rollup.commands`, which this module named for three builds and which 45% of written
+    blocks exceed — see `MAX_DONE_ITEMS`. `tool_events` counts bash, MCP, file reads, file
+    writes, searches and agent calls alike, which is what "the work a session did" actually
+    means on this fleet.
+    """
+    return log.stats.tool_events
+
+
+def _den_tickets(log: EventLog) -> int:
+    return len(log.rollup.tickets)
+
+
+def _den_artifacts(log: EventLog) -> int:
+    """`artifacts`' ceiling, and the weakest of the three.
+
+    `prompt.SYSTEM` asks for "files, branches, PRs and **services** created or changed", and
+    **services has no rollup source at all** — there is no list to union in. So this
+    undercounts by construction, which is why `artifacts` carries the largest headroom of the
+    three rather than the smallest its measured band would allow.
+    """
+    return len(set(log.rollup.files_written) | set(log.rollup.prs) | set(log.rollup.git_refs))
 
 
 class _Field(NamedTuple):
@@ -166,6 +249,13 @@ class _Field(NamedTuple):
     #: #884 was `found`, and raising it would only have relocated the cliff. The failure MODE,
     #: not the threshold, is what differs between the two classes.
     bounded: bool
+    #: How to read this field's ceiling off the session's own event log, or None to use `cap`
+    #: unchanged. Set only for `bounded` fields: an unbounded field has no countable input,
+    #: which is the whole reason it is unbounded.
+    derive: Callable[[EventLog], int] | None = None
+    #: Multiplier on `derive`'s result. **Per field, deliberately not shared** — see
+    #: `caps_for` for the measurement behind each one.
+    headroom: float = 0.0
 
 
 #: Only `asked` is required: a session with no findings and no decisions is a real session,
@@ -176,12 +266,12 @@ class _Field(NamedTuple):
 #: The prose used to be hand-written, which is how `done` could be moved off `MAX_ITEMS`
 #: while the prompt still told the model 40 (vikunja#872).
 _LIST_FIELDS: tuple[_Field, ...] = (
-    _Field("done", True, MAX_DONE_ITEMS, bounded=True),
+    _Field("done", True, MAX_DONE_ITEMS, bounded=True, derive=_den_done, headroom=0.5),
     _Field("found", False, MAX_ITEMS, bounded=False),
     _Field("decisions", False, MAX_ITEMS, bounded=False),
     _Field("open_items", False, MAX_ITEMS, bounded=False),
-    _Field("artifacts", False, MAX_ROLLUP_ITEMS, bounded=True),
-    _Field("tickets", False, MAX_ROLLUP_ITEMS, bounded=True),
+    _Field("artifacts", False, MAX_ROLLUP_ITEMS, bounded=True, derive=_den_artifacts, headroom=2.0),
+    _Field("tickets", False, MAX_ROLLUP_ITEMS, bounded=True, derive=_den_tickets, headroom=1.5),
 )
 
 
@@ -195,6 +285,77 @@ def field_caps() -> dict[str, int]:
     #849 fixed and #872 re-ran.
     """
     return {f.name: f.cap for f in _LIST_FIELDS}
+
+
+def caps_for(log: EventLog | None) -> dict[str, int]:
+    """This session's caps: derived from its own event log where that is possible.
+
+    A global chosen from a corpus snapshot decays as the corpus grows, silently, with no
+    signal until a digest is lost — which is what happened. `MAX_ROLLUP_ITEMS` was set above
+    an observed ceiling of 76 tickets and 38 event logs later the ceiling was 104, so session
+    `6017c8ce`'s faithful 103-item response was discarded as invention (vikunja#901). The
+    rollup is known *before* the model is called, so a bound read off the log in hand cannot
+    go stale in that way.
+
+    Only `bounded` fields are derived. `found`, `decisions` and `open_items` are free prose
+    with no countable input, so there is nothing to derive from and they keep `MAX_ITEMS`.
+
+    **`max(derived, cap)`, so the global becomes a FLOOR rather than being replaced.** Two
+    things follow, and both are the point:
+
+      * No session can be rejected that is not rejected today. The cap only ever moves up, so
+        this build cannot introduce a loss. That is a property of the construction, not a
+        measurement — see the note in `caps_for`'s test about why the corpus replay the build
+        plan asked for cannot demonstrate it.
+      * Small sessions behave exactly as they do now, which confines the change to the large
+        ones that are the actual problem. Most of the extreme output/input ratios in the
+        corpus occur at tiny denominators (`artifacts` reaches 42x against a rollup of ONE),
+        and a ratio like that is meaningless to extrapolate from. Under the floor it is also
+        harmless: 42 items sit far below the 100 floor either way.
+
+    **The headroom is per field and must stay that way.** Measured 2026-09-18 over 479 written
+    blocks paired with their own event logs, restricted to the band where the derived value
+    actually governs — the pooled ratio over all denominators mixes two regimes and reads much
+    worse than either:
+
+    | field | denominator | max ratio, pooled | max ratio where derived > floor | headroom |
+    |---|---|---|---|---|
+    | `done` | `tool_events` | 1.00 (at 7) | 0.18 (den 200-500), 0.06 (den 500+) | 0.5 |
+    | `tickets` | `rollup.tickets` | 5.00 (at 1) | 0.84 (den 100-200) | 1.5 |
+    | `artifacts` | files+prs+git_refs | 42.00 (at 1) | 0.85 (den 50-100) | 2.0 |
+
+    Each multiplier sits well above its band's measured ceiling, and the gap is deliberate:
+    `json_schema` DECLARES the cap, so a cap merely *near* the ceiling does not reject — it
+    makes the model shed, by a different amount each run. Measured on `aa6634a7` (58 tickets
+    in the rollup): a declared 40 produced 27, 35 and 28 across three identical runs, while
+    100 — 1.7x the rollup — produced 53 every time. 1.5x for `tickets` is chosen against that
+    1.7x, not against the 0.84 ratio.
+
+    `done` takes the *smallest* multiplier because its ratio collapses as sessions grow: the
+    largest log in the corpus has 672 tool events and wrote 37 `done` items. At 0.5 that log's
+    cap is 336 — 2.8x the worst ratio in its band, and still low enough that the `bounded`
+    check has something to catch. A shared multiplier is the shape of this that fails: 1.5
+    would have given that session a cap of 1008, at which point the check catches nothing.
+
+    `artifacts` takes the largest because `_den_artifacts` undercounts by construction —
+    `services` is asked for and has no rollup source.
+
+    Finally the result is clamped to `f.cap * MAX_DERIVED_MULTIPLE`. The denominators come
+    from a file on disk rather than from anything scribe computes, so without a ceiling a
+    doctored event log removes the `bounded` guard outright instead of merely widening it.
+    No log in the corpus comes within 6x of that clamp — see `MAX_DERIVED_MULTIPLE`.
+    """
+    caps = field_caps()
+    if log is None:
+        return caps
+    for f in _LIST_FIELDS:
+        if f.derive is None:
+            continue
+        derived = max(math.ceil(f.derive(log) * f.headroom), f.cap)
+        # Clamped, never below the floor: `derived >= f.cap` above and the ceiling is a
+        # multiple >= 1 of the same value, so the floor still governs a small session.
+        caps[f.name] = min(derived, f.cap * MAX_DERIVED_MULTIPLE)
+    return caps
 
 
 @dataclass
@@ -223,7 +384,7 @@ class Digest:
         return {"schema_version": SCHEMA_VERSION, **asdict(self)}
 
 
-def json_schema() -> dict:
+def json_schema(caps: dict[str, int] | None = None) -> dict:
     """The JSON Schema sent to providers that support structured output.
 
     `maxItems` is **declared**, not merely enforced. A model cannot respect a limit it is never
@@ -234,11 +395,20 @@ def json_schema() -> dict:
 
     The `maxItems` emitted here is the same number `parse` enforces, per field. That is the
     whole point: the contract the model is shown and the contract it is judged against must be
-    the same one.
+    the same one — which is why `caps` is a parameter rather than something each side computes
+    for itself. `summarize_log` calls `caps_for` ONCE and hands the same dict to both.
+
+    `caps=None` means the globals, which keeps every call site that has no log — and every
+    bare test call — working unchanged.
     """
+    caps = caps or field_caps()
     props: dict = {"asked": {"type": "string"}}
     for f in _LIST_FIELDS:
-        props[f.name] = {"type": "array", "items": {"type": "string"}, "maxItems": f.cap}
+        props[f.name] = {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": caps.get(f.name, f.cap),
+        }
     return {
         "type": "object",
         "properties": props,
@@ -247,7 +417,7 @@ def json_schema() -> dict:
     }
 
 
-def _as_list(value: object, f: _Field) -> tuple[list[str], int]:
+def _as_list(value: object, f: _Field, cap: int) -> tuple[list[str], int]:
     """Coerce a field to a list of non-empty strings, or raise. Returns `(values, dropped)`.
 
     A string where a list belongs is accepted as a one-element list. That is a real and
@@ -258,8 +428,9 @@ def _as_list(value: object, f: _Field) -> tuple[list[str], int]:
     — it fires when a provider ignores `maxItems`, not when the model was simply never told.
     What happens on overflow depends on `_Field.bounded`:
 
-      * **bounded** — raise, not retryable. The count cannot legitimately exceed the log, so
-        this is the model inventing entries, and the response should not be rendered.
+      * **bounded** — raise, not retryable. Over `caps_for(log)` the count really is more than
+        this log can support, plus headroom, so this is the model inventing entries and the
+        response should not be rendered.
       * **unbounded** — drop the excess and report how many. There is no threshold at which
         free prose becomes wrong, so there is nothing a rejection could be protecting; it
         would only convert a complete session into no session at all (vikunja#884).
@@ -267,6 +438,16 @@ def _as_list(value: object, f: _Field) -> tuple[list[str], int]:
     Items are dropped from the END, which is the one genuinely unattractive part of this. The
     model, having been shown the cap, is the better judge of what to shed — that is why
     declaring `maxItems` stays the primary mechanism and this is only the backstop.
+
+    **This docstring used to justify the bounded raise with "the count cannot legitimately
+    exceed the log", and against a GLOBAL cap that was false for two of the three fields.**
+    Measured 2026-09-18 across 479 written blocks: `done` exceeded `rollup.commands` 45% of
+    the time and `artifacts` exceeded its rollup union 45% of the time; only `tickets` held,
+    and only within ~5x. The sentence described an intention the code did not implement — the
+    global was never "the log", it was a number chosen from last month's corpus. It is true
+    now because `cap` comes from `caps_for(log)`, and it is stated above in those terms
+    deliberately: left as it was, it would re-justify exactly the naive derivation this build
+    exists to remove.
     """
     if value is None:
         return [], 0
@@ -283,24 +464,29 @@ def _as_list(value: object, f: _Field) -> tuple[list[str], int]:
         item = item.strip()
         if item:
             out.append(item[:MAX_ITEM_CHARS])
-    if len(out) <= f.cap:
+    if len(out) <= cap:
         return out, 0
     if f.bounded:
         # Not retryable: the count follows from the log, so attempts two and three see the
         # same input and produce the same rejection. See the module docstring.
         raise SchemaError(
-            f"field {f.name!r} has {len(out)} items, more than the {f.cap} cap", retryable=False
+            f"field {f.name!r} has {len(out)} items, more than this session's {cap} cap",
+            retryable=False,
         )
-    return out[: f.cap], len(out) - f.cap
+    return out[:cap], len(out) - cap
 
 
-def parse(raw: str | dict) -> Digest:
+def parse(raw: str | dict, caps: dict[str, int] | None = None) -> Digest:
     """Validate a model response into a `Digest`, or raise `SchemaError`.
 
     Accepts a dict or a JSON string, including one wrapped in a ```json fence — models emit
     that often enough that failing on it would spend retries on presentation rather than
     content.
+
+    `caps` must be the SAME dict `json_schema` was given for this call. Judging a response
+    against a contract it was never shown is vikunja#849 exactly. `None` means the globals.
     """
+    caps = caps or field_caps()
     if isinstance(raw, dict):
         data = raw
     else:
@@ -325,7 +511,7 @@ def parse(raw: str | dict) -> Digest:
 
     digest = Digest(asked=asked.strip()[:MAX_ITEM_CHARS])
     for f in _LIST_FIELDS:
-        values, dropped = _as_list(data.get(f.name), f)
+        values, dropped = _as_list(data.get(f.name), f, caps.get(f.name, f.cap))
         if f.required and not values:
             raise SchemaError(f"field {f.name!r} is required and must have at least one entry")
         setattr(digest, f.name, values)

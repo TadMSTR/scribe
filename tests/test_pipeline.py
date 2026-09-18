@@ -1023,6 +1023,13 @@ def test_an_overlong_unbounded_field_is_written_not_placeheld(env) -> None:
     assert r.summarized and r.written
     assert not r.placeholder, "a long prose field must not cost the whole session"
     assert r.truncated_items == 4
+    # The breakdown, end to end. The scalar says a cap fired; only this says which one, and
+    # it was collapsed here at the point of recording until vikunja#887.
+    assert r.truncated_fields == {"found": 4}
+    # A first sweep reads from byte 0, so this session is a full read. Asserted on the real
+    # pipeline rather than on a hand-built SessionResult, because the value is read off the
+    # store row and a flag that is never populated would still pass a unit test of the field.
+    assert r.full_read is True
 
     written = "".join(p.read_text() for p in Path(cfg.output_dir).rglob("*.md"))
     assert "A finding numbered 0" in written
@@ -1041,6 +1048,7 @@ def test_truncation_does_not_break_the_written_identity(env) -> None:
     assert t["written"] == t["summarized"] + t["suppressed"] + t["placeholders"]
     assert t["truncated"] == 1
     assert t["truncated_items"] == 4
+    assert t["truncated_fields"] == {"found": 4}
 
 
 def test_an_ordinary_sweep_reports_no_truncation(env) -> None:
