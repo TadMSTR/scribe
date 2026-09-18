@@ -301,11 +301,17 @@ is derived from **that session's own event log**, which is known before the mode
 | `tickets` | `rollup.tickets` | 1.5x | 100 |
 | `artifacts` | `files_written` ∪ `prs` ∪ `git_refs` | 2.0x | 100 |
 
-`max(ceil(denominator x headroom), floor)`, so the old global becomes a floor and the cap only
-ever moves up: no session is rejected that would not be rejected today, and 99% of sessions are
+`min(max(ceil(denominator x headroom), floor), floor x 10)`, so the old global becomes a floor
+and the cap only ever moves up: no session is rejected that would not be rejected today, and 99% of sessions are
 unaffected. The headroom is per field and the gap above the denominator is deliberate — since
 the cap is *declared*, one set near the ceiling does not reject, it makes the model shed by a
 different amount each run.
+
+The outer clamp is **not** a measured number, unlike everything else here. The denominators
+come from a file on disk, so without a ceiling a doctored event log removes the `bounded`
+invention guard outright rather than merely widening it. At 10x it can be widened and no more.
+It is inert today: the largest derived cap in the corpus is `done` 336 against a ceiling of
+2000, so no log comes within 6x of it. Do not tune it towards the corpus.
 
 `done` takes the smallest multiplier because its ratio falls as sessions grow: the largest log
 in the corpus has 672 tool events and wrote 37 `done` items. `artifacts` takes the largest

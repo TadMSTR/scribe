@@ -29,6 +29,7 @@ from scribe.summarize.prompt import build_system_prompt
 from scribe.summarize.render import render_digest
 from scribe.summarize.schema import (
     _LIST_FIELDS,
+    MAX_DERIVED_MULTIPLE,
     MAX_ITEMS,
     SchemaError,
     caps_for,
@@ -178,3 +179,43 @@ def test_the_truncation_note_quotes_the_cap_that_actually_fired() -> None:
     )
     assert digest.truncated == {"found": 2}
     assert "7-item cap" in render_digest(digest, caps=caps)
+
+
+@pytest.mark.parametrize("name", DERIVED)
+def test_a_derived_cap_is_clamped_to_a_multiple_of_its_floor(name: str) -> None:
+    """The 2026-09-18 audit's one Low finding: the denominators come from a file on disk.
+
+    Anyone able to write under the event-log directory could inflate `stats.tool_events` and
+    hand themselves an unbounded `done` cap — removing the `bounded` invention guard for that
+    session rather than merely widening it. The clamp bounds the damage at 10x.
+
+    The denominators here are deliberately absurd (far past anything the corpus contains), so
+    this test exercises the clamp rather than the floor. `test_the_clamp_does_not_fire_on_a
+    _realistic_session` is the other half.
+    """
+    floor = field_caps()[name]
+    huge = _log(tool_events=1_000_000, tickets=1_000_000, files=1_000_000)
+    assert caps_for(huge)[name] == floor * MAX_DERIVED_MULTIPLE
+
+
+def test_the_clamp_never_drops_a_cap_below_its_floor() -> None:
+    """A ceiling that could undercut the floor would reintroduce the bug being fixed — a
+    session rejected for a count the log plainly supports. `min` is applied to a value already
+    `max`ed against the floor, and the multiple is >= 1, so this holds; asserted because the
+    two bounds are written on different lines and could drift apart."""
+    for log in (_log(), _log(tool_events=1, tickets=1, files=1), LIVE_REJECTION):
+        for name, cap in caps_for(log).items():
+            assert cap >= field_caps()[name]
+
+
+def test_the_clamp_does_not_fire_on_a_realistic_session() -> None:
+    """Non-vacuity, and the reason 10 was chosen rather than something tighter.
+
+    `6017c8ce` is the largest session in the corpus — 672 tool events, 104 tickets, 68
+    artifacts. If the clamp bound *it*, the constant would be doing measurement's job, and a
+    future busy session would be silently shortened by a number nobody derived.
+    """
+    caps = caps_for(LIVE_REJECTION)
+    for name in DERIVED:
+        ceiling = field_caps()[name] * MAX_DERIVED_MULTIPLE
+        assert caps[name] < ceiling, f"{name} is at the clamp; the constant is too tight"

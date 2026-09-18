@@ -47,6 +47,18 @@ code changes, `SCHEMA_VERSION` stays at 1, and no state-DB migration is needed.
   returned 0 for the whole period. #887 asked for the counter to accumulate and then be looked
   at, and it had been accumulating into nothing. AGENTS.md invariant 13, one level out.
 
+### Security
+
+- **A derived cap is clamped to 10x its floor** (`MAX_DERIVED_MULTIPLE`). `caps_for`'s
+  denominators are read from the session's persisted event log, so without a ceiling anyone
+  able to write under the event-log directory could inflate `stats.tool_events` and remove the
+  `bounded` class's invention guard for that session outright, rather than merely widening it.
+  Defence in depth rather than a fix — the same actor already has a strictly worse primitive
+  in editing the log's turn content, which the summarizer treats as ground truth — and not a
+  memory bound, since `_as_list` builds its list from the model's response before consulting
+  the cap. Filed as the one Low finding of the 2026-09-18 audit. Inert on the current corpus:
+  the largest derived cap is `done` 336 against a ceiling of 2000, no log within 6x.
+
 ### Added
 
 - **`python -m scribe cap-survey`** — re-measures the input distribution the caps derive from,

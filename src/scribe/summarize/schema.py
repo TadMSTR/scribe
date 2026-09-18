@@ -169,6 +169,31 @@ MAX_DONE_ITEMS = 200
 #: a bound read off the log in hand cannot.
 MAX_ROLLUP_ITEMS = 100
 
+#: Hard ceiling on a derived cap, as a multiple of that field's floor. `caps_for` clamps to
+#: `floor * MAX_DERIVED_MULTIPLE`.
+#:
+#: **This number is not measured, and unlike every other constant in this module it is not
+#: trying to be.** The others are chosen against an observed distribution; this one is a
+#: containment bound on an input scribe does not control. `caps_for`'s denominators come from
+#: the session's persisted event log, so anyone able to write under the event-log directory
+#: could inflate `stats.tool_events` and hand themselves an unbounded `done` cap, removing the
+#: `bounded` class's invention guard for that session entirely. With the clamp they can widen
+#: it 10x and no further.
+#:
+#: Filed as the one Low finding of the 2026-09-18 audit of scribe-schema-cap-derivation-2026-09,
+#: and it is defence in depth rather than a fix: an actor who can write an event log already
+#: has a strictly worse primitive — editing the log's own turn content, which the summarizer
+#: treats as ground truth. It is also **not** a memory bound; `_as_list` builds its list from
+#: the model's response before consulting the cap, so allocation never depended on this.
+#:
+#: 10 is deliberately far above anything real. Measured across all 470 persisted event logs on
+#: 2026-09-18, the largest derived cap was `done` 336 against a ceiling of 2000 — **no log in
+#: the corpus comes within 6x of the clamp**, so it changes no present behaviour and exists
+#: only to bound the pathological case. Do not tune it towards the corpus: that would give a
+#: measured number the job of a safety limit, which is the confusion this comment exists to
+#: prevent.
+MAX_DERIVED_MULTIPLE = 10
+
 MAX_ITEM_CHARS = 2000
 
 
@@ -314,6 +339,11 @@ def caps_for(log: EventLog | None) -> dict[str, int]:
 
     `artifacts` takes the largest because `_den_artifacts` undercounts by construction —
     `services` is asked for and has no rollup source.
+
+    Finally the result is clamped to `f.cap * MAX_DERIVED_MULTIPLE`. The denominators come
+    from a file on disk rather than from anything scribe computes, so without a ceiling a
+    doctored event log removes the `bounded` guard outright instead of merely widening it.
+    No log in the corpus comes within 6x of that clamp — see `MAX_DERIVED_MULTIPLE`.
     """
     caps = field_caps()
     if log is None:
@@ -321,7 +351,10 @@ def caps_for(log: EventLog | None) -> dict[str, int]:
     for f in _LIST_FIELDS:
         if f.derive is None:
             continue
-        caps[f.name] = max(math.ceil(f.derive(log) * f.headroom), f.cap)
+        derived = max(math.ceil(f.derive(log) * f.headroom), f.cap)
+        # Clamped, never below the floor: `derived >= f.cap` above and the ceiling is a
+        # multiple >= 1 of the same value, so the floor still governs a small session.
+        caps[f.name] = min(derived, f.cap * MAX_DERIVED_MULTIPLE)
     return caps
 
 
