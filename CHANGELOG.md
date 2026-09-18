@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-18
+
+**Minor, not patch.** Extraction behaviour changes: a transcript carrying a compaction
+boundary now yields one fewer turn, and `stats` gains a field. No event log is rewritten,
+no exit code changes, and `SCHEMA_VERSION` stays at 1 — the new `stats` field is additive
+with a default, so a reader that does not know it is unaffected.
+
+### Fixed
+
+- **A compact summary is no longer extracted as something the user said** (vikunja#893).
+  At a compaction boundary Claude Code writes two records, and the second is
+  `type: user` with `isCompactSummary: true` whose content is the model's own recap of
+  the conversation. The parser handled neither, so the recap entered the event log as
+  user text. Measured on session `6017c8ce`: **18,859 characters** of machine recap, in
+  the worst-degraded session in the corpus — and because the byte-budget ladder may not
+  drop events (invariant 6), the recap displaced real evidence rather than the reverse.
+
+  The guard sits alongside `isMeta` and `_INJECTED_PREFIXES`, which it belongs with: all
+  three are machine-generated text that arrives structurally indistinguishable from a
+  person speaking. New `stats.skipped_compact` counter reports when it fires, so a zero
+  is distinguishable from "no boundary present".
+
+  **Behaviour change:** `turns` drops by one on any transcript carrying a compact
+  boundary — the record was opening its own turn. On `6017c8ce`, 52 → 51, with
+  `tool_events` and `secrets_redacted` unchanged. Prevalence is 2 of 451 transcripts
+  (0.4%) on forge, and materially higher for interactive use.
+
+  The other boundary record, `type: system, subtype: compact_boundary`, is still dropped;
+  the drop is now deliberate and commented, because a later feature that captures the
+  compact summary as a first-class field will want the boundary position from it.
+
+### Changed
+
+- **README `## Status` rewritten** (vikunja#892). It claimed `memsearch-summarize` was
+  still in production and that hook registration and the cutover were outstanding. All
+  three were false as of the #863 cutover on 2026-09-17. Replaced with the deployed
+  shape — cadence, config path, output roots, state version and the recovery detector.
+- **Architecture diagram added**, satisfying the Baseline `Diagrams` requirement. It
+  makes the load-bearing ordering explicit: the event log is persisted *before* the
+  model is called, which is what leaves a failed run with complete evidence.
+- Telemetry section no longer describes the `memsearch.*` span names as a
+  forward-looking compatibility measure. The cutover is done; they are a retained
+  legacy name that SigNoz dashboards still key on.
+- **`Stats.raw_content_chars` now documents what it actually counts** — content that
+  reached the accumulator, not raw input. Every guard that returns early lowers it.
+  Raised INFO by the 2026-09-18 security audit after the build plan asserted it would
+  hold flat across the new guard and it fell by 18,859. Do not use it to detect a filter
+  over-dropping: it falls whenever a guard legitimately fires — `tool_events` and
+  `secrets_redacted` are the right controls.
+
+
 ## [0.5.0] — 2026-09-17
 
 **Minor, not patch.** The groundedness gate's tolerance for a path claim widens, and a new

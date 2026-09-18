@@ -144,11 +144,28 @@ class Stats:
     thinking_blocks: int = 0
     skipped_meta: int = 0
     skipped_injected: int = 0
+    #: Compact-boundary records excluded from user text (vikunja#893). Counted rather
+    #: than dropped silently for the same reason as `secrets_redacted`: a zero here on
+    #: a transcript that HAS a compact boundary means the guard did not fire, which is
+    #: not distinguishable from "no boundary present" unless the count is reported.
+    skipped_compact: int = 0
     orphan_results: int = 0
     failures: int = 0
     #: Sum of characters across the four content categories the old hook triaged, so the
     #: 6.5%-reaching-the-LLM measurement in vikunja#843 can be reproduced from the output
     #: rather than taken on faith.
+    #:
+    #: **NOT an input-only invariant, despite the name.** It counts content that reached
+    #: this accumulator, so every guard that `continue`s before it — `isMeta`,
+    #: `_INJECTED_PREFIXES`, `isCompactSummary` — lowers it. Excluding one compact recap
+    #: moved it by 18,859 on session 6017c8ce. Flagged INFO by the 2026-09-18 audit of
+    #: scribe-truth-pass-2026-09, because the build plan had asserted it "counts input,
+    #: not output" and would therefore hold flat across the new guard.
+    #:
+    #: Do not use it to detect a filter dropping more than it should: it falls whenever a
+    #: guard legitimately fires, so that test reads as a violation exactly when the code
+    #: is working. Compare `tool_events` and `secrets_redacted` instead — both held at 672
+    #: and 80 across that change, which is what showed the guard was correctly scoped.
     raw_content_chars: int = 0
     raw_file_bytes: int = 0
     extracted_chars: int = 0
