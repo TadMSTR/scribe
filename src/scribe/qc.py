@@ -304,6 +304,192 @@ def _in_category(claim: str, allowed: set[str]) -> bool:
     return any(claim in term or term in claim for term in allowed)
 
 
+#: Prefix of a path-claim groundedness finding. A constant rather than an inline f-string so
+#: `qc_survey` can recover the claim from the finding it produced, instead of re-deriving
+#: which claims the gate rejected. A second implementation of that one rule is precisely what
+#: made the two pre-build measurements of vikunja#876 disagree 16-fold.
+PATH_UNGROUNDED = "path not in the event log: "
+
+
+#: A composition's directory half must name a real directory, not the filesystem root. Two
+#: segments is the shortest thing that does. At one, every absolute path on the machine
+#: composes out of `/home` plus a tail, which is not evidence of anything.
+MIN_PREFIX_SEGMENTS = 2
+#: And its relative half must be more than a bare filename -- see `composition_split`. Both
+#: floors are derived from `qc_survey.cross_session_probe`, which measures how often each
+#: candidate grounds a path harvested from a *different* session's digest — a claim the model
+#: here demonstrably was not shown. Measured 2026-09-17 over the live corpus (470 blocks), with
+#: 18,564 such controls against the corpus's own 880 failing claims:
+#:
+#:     prefix  tail   falsely grounded   truly grounded
+#:          2     1     239   (1.3%)       774  (87.9%)
+#:          2     2      70   (0.4%)       550  (62.5%)
+#:          2     3      47   (0.2%)       315  (35.8%)
+#:          1     2      90   (0.5%)       551  (62.6%)
+#:          3     2      53   (0.3%)       517  (58.8%)
+#:
+#: `min_tail=2` is where the false-ground rate collapses — 3.4x lower than at 1 — and the step
+#: after it buys almost nothing for another 27 points of true claims. A tail of one segment is
+#: a bare filename, and `changelog.md` or `agents.md` appears in nearly every log, so at 1 any
+#: directory the log names pairs with any common filename it names. `min_prefix=2` strictly
+#: dominates 1 (lower false-ground at the same true-ground), and 3 buys 0.1% for 3.7 points.
+#: Neither floor was chosen against the corpus it judges. Re-derive with
+#: `python -m scribe.qc_survey --probe`; the corpus is live, so the figures drift slightly.
+MIN_TAIL_SEGMENTS = 2
+
+
+def path_segments(claim: str) -> list[str]:
+    """A path claim's non-empty segments. `~` is one of them, and that is deliberate."""
+    return [s for s in claim.split("/") if s]
+
+
+#: How close a directory and a **single-segment** tail must sit in the corpus to count as one
+#: composition, in characters. Same mechanism and same measured value as
+#: `CO_OCCURRENCE_WINDOW`, for the same reason: presence alone is too weak once the tail is a
+#: bare filename, but presence *together* is not.
+#:
+#: The bare filename case is the corpus's largest remaining shape by far -- a repository
+#: directory the log names plus `changelog.md`, `agents.md`, `pyproject.toml`. Admitting it on
+#: presence alone means any directory pairs with any common filename, which the probe prices at
+#: 1.3% false-ground for 224 true claims recovered. Requiring adjacency instead recovers 104
+#: for 21, measured over the same 2026-09-17 snapshot — 330 own claims and 18,494 controls that
+#: composition alone still fails:
+#:
+#:     window   falsely grounded   truly grounded
+#:         40       8   (0.04%)      47  (14.2%)
+#:         80      14   (0.08%)      95  (28.8%)
+#:        120      21   (0.11%)     104  (31.5%)
+#:        200      35   (0.19%)     111  (33.6%)
+#:
+#: 120 is 5.0 true claims per false one against the blanket rule's 1.3, and widening to 200
+#: buys 7 more true claims for 14 more false. It is not coincidence that this lands on the same
+#: number as `CO_OCCURRENCE_WINDOW` -- it is the same corpus and the same question.
+ADJACENCY_WINDOW = 120
+
+
+def _adjacent(prefix: str, tail: str, corpus: str, window: int) -> bool:
+    """Whether `tail` follows some occurrence of `prefix` within `window` characters.
+
+    Every occurrence is tried, not just the first: a directory named a hundred times in a log
+    is named once next to the file in question, and stopping at the first would turn a true
+    composition into a coin flip on ordering.
+    """
+    if window <= 0:
+        return False
+    i = corpus.find(prefix)
+    while i != -1:
+        end = i + len(prefix)
+        if tail in corpus[end : end + window]:
+            return True
+        i = corpus.find(prefix, i + 1)
+    return False
+
+
+def composition_split(
+    claim: str,
+    corpus: str,
+    *,
+    min_prefix: int = MIN_PREFIX_SEGMENTS,
+    min_tail: int = MIN_TAIL_SEGMENTS,
+    window: int = ADJACENCY_WINDOW,
+) -> tuple[str, str] | None:
+    """Split `claim` into a directory the corpus names and a relative tail it also names.
+
+    Returns the split with the **longest tail** among those that work, because that is the one
+    that concedes least: a claim explained by `/home` plus everything else is far weaker
+    evidence than a deep project directory plus a short tail, and returning the most flattering
+    split available would make the bucket look better than it is. A tail shorter than `min_tail`
+    is admitted only when the two halves are `_adjacent`; `window=0` disables that route, which
+    is what lets the probe re-derive `min_tail` without it.
+    """
+    segs = path_segments(claim)
+    lead = "/" if claim.startswith("/") else ""
+    for cut in range(min_prefix, len(segs)):
+        prefix = lead + "/".join(segs[:cut])
+        tail = "/".join(segs[cut:])
+        if prefix not in corpus or tail not in corpus:
+            continue
+        if len(segs) - cut >= min_tail or _adjacent(prefix, tail, corpus, window):
+            return prefix, tail
+    return None
+
+
+def path_claims(digest_text: str) -> set[str]:
+    """Every path a digest asserts. Public so the survey reads the same claims the gate does."""
+    return _claims(digest_text)["paths"]
+
+
+def _tilde_anchored(claim: str, allowed_paths: set[str], corpus: str) -> bool:
+    """Whether an absolute claim grounds once re-anchored at `~`.
+
+    The log writes home-relative paths as `~/repos/gitea/...` because that is how the commands
+    and file references in a session are written; a digest routinely expands the same path to
+    `/home/ted/repos/gitea/...`. Neither composes, because the claim's own directory prefix is
+    absolute and appears nowhere.
+
+    **`~` is read as a literal in the corpus, never as `$HOME`.** That is the whole reason this
+    is safe to ship: a rule that resolved `~` against the process environment would grade the
+    same digest and the same log differently on a different machine, and a gate whose verdict
+    depends on who ran it is not one. It also removes any need for the `log.cwd`-join that was
+    on the table — `cwd` is the agent's project directory, not a repo root, so joining a
+    relative path to it manufactures paths that were never real.
+
+    The `MIN_TAIL_SEGMENTS` floor is what keeps it honest: the re-anchored remainder must still
+    be at least that long, so `~/audit.md` is never a candidate. Measured over the same controls
+    as the segment floors, this grounds 68 of the 226 claims left after composition (30.1%) and
+    15 of 18,473 foreign claims (0.08%).
+    """
+    if claim.startswith("~"):
+        return False
+    segs = path_segments(claim)
+    for cut in range(1, len(segs) - MIN_TAIL_SEGMENTS + 1):
+        alt = "~/" + "/".join(segs[cut:])
+        if path_literal(alt, allowed_paths, corpus) or composition_split(alt, corpus) is not None:
+            return True
+    return False
+
+
+def path_literal(claim: str, allowed_paths: set[str], corpus: str) -> bool:
+    """The pre-vikunja#876 rule: the derived set with containment, or the corpus **exactly**.
+
+    Kept as a named function rather than folded inline so the survey can still grade the corpus
+    the old way from this same commit. A "before" number that requires checking out an older
+    commit to reproduce is one nobody re-checks.
+    """
+    return _in_category(claim, allowed_paths) or claim in corpus
+
+
+def path_grounded(claim: str, allowed_paths: set[str], corpus: str) -> bool:
+    """Whether a path claim is grounded. The gate's rule for a path, as one callable.
+
+    **A path claim is grounded when the log holds it — literally, or as a directory prefix
+    plus the whole remaining relative tail, a one-segment tail only when the two sit within
+    `ADJACENCY_WINDOW` characters — and an absolute claim is tested again with its leading
+    directories replaced by `~`.** That sentence is the entire tolerance, and being
+    able to state it in one is a requirement rather than a nicety -- vikunja#848's real defect
+    was a classifier whose behaviour nobody could articulate.
+
+    The third route is why this exists. `_in_category` already tolerates containment, but it
+    consults only the derived rollup set; the corpus route was **exact substring**. So a true
+    claim that *composes* -- a directory the log names joined to a relative path the log also
+    names -- was neither literal and graded as a hallucination. Between them the three routes
+    clear 722 of the 880 path findings on the live corpus (vikunja#876), and none is a loosening
+    in kind: both halves
+    are things the model really was shown, and the floors keep a short common tail (`/src/`,
+    `readme.md`) from excusing a claim on its own. Across the live corpus it takes block failure
+    from 39.6% to 21.5% and path findings from 880 to 158, while every one of the 26 claims
+    absent from their own log still fails.
+
+    Extracted from `check_groundedness` so that the survey which measures this gate and the
+    gate itself cannot drift: every tolerance lives here, and there is exactly one of it.
+    """
+    if path_literal(claim, allowed_paths, corpus):
+        return True
+    if composition_split(claim, corpus) is not None:
+        return True
+    return _tilde_anchored(claim, allowed_paths, corpus)
+
+
 #: How close together a claim's tokens must appear to count as co-occurring, in characters of
 #: serialized corpus. Chosen by measurement, not taste: across the five real sessions,
 #: unbounded overlap grounded 9 of 35 fabricated commands built from words the session really
@@ -433,8 +619,8 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     claimed = _claims(digest_text)
 
     for claim in sorted(claimed["paths"]):
-        if not _in_category(claim, allowed["paths"]) and claim not in corpus:
-            report.add("groundedness", f"path not in the event log: {claim!r}")
+        if not path_grounded(claim, allowed["paths"], corpus):
+            report.add("groundedness", f"{PATH_UNGROUNDED}{claim!r}")
 
     for claim in sorted(claimed["tools"]):
         if not _in_category(claim, allowed["tools"]) and claim not in corpus:
