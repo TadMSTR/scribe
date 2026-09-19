@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-19
+
+**Patch.** Two correctness fixes to what scribe says about itself, and the test that
+closes their class. No schema change (`SCHEMA_VERSION` stays at 2), no exit code moves,
+no digest or event log is rewritten.
+
 ### Fixed
 
 - **A dry run no longer processes the sessions it has nothing to say about** (vikunja#902).
