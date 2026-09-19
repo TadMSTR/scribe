@@ -17,6 +17,14 @@ jobs:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # Full history, for ONE test: tests/test_schema_migration.py re-derives the
+          # schema-1 fixture from `git show v0.2.0:src/scribe/state.py` and asserts the
+          # committed fixture still matches it. The default depth-1 checkout has no tags, so
+          # that check would skip in CI — silently, and forever. See
+          # SCRIBE_REQUIRE_SCHEMA_PROVENANCE below, which turns that skip into a failure here.
+          fetch-depth: 0
+
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
@@ -45,4 +53,131 @@ jobs:
       # Coverage is MEASURED here, not merely configured. --cov-fail-under is not passed
       # as a literal; the floor comes from [tool.coverage.report] so the number lives in
       # exactly one place.
+      #
+      # SCRIBE_REQUIRE_SCHEMA_PROVENANCE makes the schema-1 fixture's provenance check a
+      # FAILURE rather than a skip when the v0.2.0 tag is unreachable. Without it, a change to
+      # `fetch-depth` above — or a future runner that fetches differently — would turn that
+      # check off and report green. A check that can silently stop running is not a check.
       - run: pytest -v --cov --cov-report=term
+        env:
+          SCRIBE_REQUIRE_SCHEMA_PROVENANCE: "1"
+
+  # WHY THIS JOB EXISTS.
+  #
+  # Until it did, this repo had NO dependency audit of any kind, while declaring
+  # `deployed: true, stateful: true` — which derives `ships: true` and makes the Dependencies
+  # block of repo-standards apply. The conformance checker only machine-verifies one of those
+  # requirements (F5, a committed lockfile); the rest, including this job, are judgement calls
+  # that a clean sweep says nothing about.
+  #
+  # vikunja#670 is the fleet-wide shape: `pip-audit --strict .` reads the RANGE specs in
+  # pyproject.toml and RE-RESOLVES them, so it reports on "what a fresh install would get
+  # today" rather than on the set this project pins. A gate that is green because it looked
+  # somewhere else is worse than no gate, because it is reported as coverage.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+
+      # THE GATE THAT MATTERS MOST.
+      #
+      # A committed lockfile with nothing checking its currency is not a pinned dependency
+      # set, it is a stale file that looks like one. F5 tests for the file's PRESENCE; this
+      # step is what makes that presence mean something.
+      #
+      # Not hypothetical. When scoped-mcp added this same gate, its uv.lock was two and a half
+      # months behind pyproject.toml, recorded the project itself at v1.3.4 against a real
+      # 1.14.0, and was MISSING asyncpg entirely — a dependency declared in two extras. Every
+      # check below it would have audited a set with a dependency missing from it, and passed.
+      - name: Lockfile is in sync with pyproject.toml
+        run: uv lock --check
+
+      # Split into two gates rather than one. They fail for different reasons and want
+      # different responses: a runtime advisory affects the deployed service on forge, a
+      # dev-tooling advisory affects only this repository's CI. Collapsing them into a single
+      # red makes the urgent case indistinguishable from the routine one.
+      #
+      # No container gate — this repo has no Dockerfile.
+      - name: Export runtime dependency set
+        # --all-extras --no-extra dev: every optional dependency a consumer can install, and
+        # none of the tooling. `telemetry` belongs on THIS side and that was checked rather
+        # than assumed: /opt/venvs/scribe has opentelemetry-* 1.44.0 installed, so it is a
+        # production dependency in fact, not just in intent.
+        #
+        # --no-emit-project because `--strict` trips on the project's own entry, which uv
+        # emits as a `directory = {...}` with no version.
+        run: |
+          uv export --frozen --no-emit-project \
+            --all-extras --no-extra dev \
+            --format pylock.toml -o pylock.runtime.toml
+
+      - name: Export dev dependency set
+        run: |
+          uv export --frozen --no-emit-project \
+            --extra dev \
+            --format pylock.toml -o pylock.dev.toml
+
+      # EACH GATE RUNS IN ITS OWN DIRECTORY, AND THE REASON IS NOT THE ONE USUALLY GIVEN.
+      #
+      # The reason recorded elsewhere in the fleet is that `pip-audit --locked` falls back to
+      # resolving pyproject.toml and exits zero. MEASURED 2026-09-18 against pip-audit 2.10.1,
+      # that is NOT what happens: with no lockfile present it errors `no lockfile found in .`
+      # and exits 1. `--locked` was introduced in 2.9.0 and behaves the same way there, so the
+      # silent-fallback mechanism was never true for any version that has the flag.
+      #
+      # What IS true, and is the actual reason for the isolation:
+      #
+      #   PEP 751 permits `pylock.<name>.toml`, so BOTH exports above are valid lockfile names
+      #   and `pip-audit --locked .` from the repo root picks up BOTH. Measured on this repo:
+      #   16 packages runtime, 17 dev, 33 when run from a directory holding the two.
+      #
+      # So the failure is not a silent green — it is a silent MERGE. The two gates collapse
+      # into one 33-package gate that is still red when something is wrong, but can no longer
+      # say whether the vulnerable package is one forge runs or one CI merely builds with.
+      # That is the entire distinction the split exists to draw, lost without any signal.
+      #
+      # Copying each pylock into its own directory as `pylock.toml` is what prevents it.
+      # vikunja#905 tracks correcting the comment in the repos that state the old mechanism.
+      - name: Audit runtime dependencies
+        run: |
+          mkdir -p .audit-runtime && cp pylock.runtime.toml .audit-runtime/pylock.toml
+          uv tool run pip-audit --strict --locked .audit-runtime
+
+      - name: Audit dev dependencies
+        run: |
+          mkdir -p .audit-dev && cp pylock.dev.toml .audit-dev/pylock.toml
+          uv tool run pip-audit --strict --locked .audit-dev
+
+  # Build the artefact on every PR, not only on a tag. A pyproject.toml that RESOLVES but does
+  # not INSTALL is invisible until release day otherwise — and release day is the one occasion
+  # where discovering it is most expensive. Cheap to run, and it is the same script the
+  # release path uses, so the two cannot drift.
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - run: pip install build
+      - run: python -m build
+
+      # One definition, two call sites — see .github/ci/verify-dist.sh. The PR path and the
+      # release path must not be able to drift apart, because the one that matters is the one
+      # nobody watches.
+      - name: Verify distribution
+        run: .github/ci/verify-dist.sh dist

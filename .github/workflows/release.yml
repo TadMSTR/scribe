@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Least privilege at the workflow level, escalated PER JOB below. Only `create-github-release`
+# writes anything back to the repository; `build` runs `python -m build` on the checked-out
+# tree and `verify` installs a wheel into a throwaway venv. Neither has any business holding
+# `contents: write`. This is OSSF Scorecard's Token-Permissions check, and the per-job shape is
+# what part 4 of this programme will be reading when scribe goes public.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - run: pip install build
+      - run: python -m build
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: dist
+          path: dist/
+
+  # BETWEEN BUILD AND ATTACH, DELIBERATELY.
+  #
+  # All eight releases before this workflow existed (v0.1.0 -> v0.7.0) were cut by hand, and
+  # nothing ever asserted anything about the artefact attached to them. ci.yml verifies the
+  # distribution on every PR; the release path — the one nobody reviews, because by then the
+  # tag is already pushed — verified nothing.
+  #
+  # The tag is passed with its leading `v` stripped, which is the assertion the PR path cannot
+  # make: the job that attaches is not the job that built, and it trusts a downloaded artifact.
+  # Without it, a tag and an artefact that disagree would be attached silently.
+  verify:
+    name: Verify distribution
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      # Checked out because the verification script lives here. The attach job below does not
+      # need it and therefore does not check out.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Verify distribution against the tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: .github/ci/verify-dist.sh dist "${TAG_NAME#v}"
+
+  # ATTACH TO AN AUTHORED RELEASE. DO NOT WRITE THE NOTES.
+  #
+  # This is the one place this workflow deliberately diverges from the fleet's exemplar, which
+  # calls `gh release create --generate-notes`. scribe's eight release titles are hand-written
+  # and each names the finding the release fixes:
+  #
+  #     v0.7.0 — a cap chosen from last month's corpus decays silently
+  #     v0.6.0 — the compaction recap is not user text
+  #
+  # A commit-log generator produces nothing like that, and a workflow that overwrote them would
+  # quietly replace the most useful thing about this project's release history with a changelog
+  # nobody reads.
+  #
+  # So the contract is: the human writes the release and its notes, then pushes the tag; this
+  # job attaches the verified artefacts to it. `--notes-from-tag`-style generation is not used,
+  # and the create path below is a FALLBACK that writes a deliberately bare placeholder telling
+  # the operator to fill it in — it does not invent prose.
+  create-github-release:
+    name: Attach artifacts to the release
+    runs-on: ubuntu-latest
+    needs: [build, verify]
+    permissions:
+      contents: write  # the only job that needs it — required for `gh release`
+
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attach artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            # The intended path: the release already exists with authored notes.
+            echo "Release ${TAG_NAME} exists — attaching artifacts to it."
+            gh release upload "${TAG_NAME}" dist/*.whl dist/*.tar.gz --clobber
+          else
+            # Fallback. Reaching here means a tag was pushed before the release was written,
+            # which is a process slip rather than an error — the artefacts are verified either
+            # way and losing them would be worse. The notes say exactly what happened so the
+            # gap is visible in the release list rather than looking finished.
+            echo "::warning::Release ${TAG_NAME} does not exist. Creating it with placeholder" \
+                 "notes and attaching artifacts. Edit the notes by hand — this workflow does" \
+                 "not generate them."
+            gh release create "${TAG_NAME}" \
+              dist/*.whl dist/*.tar.gz \
+              --title "${TAG_NAME}" \
+              --notes "_Release notes not yet written._
+
+          Artifacts were built and verified by \`.github/workflows/release.yml\` and attached
+          automatically. The notes for this release are authored by hand — see the previous
+          releases for the form. Replace this text." \
+              --verify-tag
+          fi

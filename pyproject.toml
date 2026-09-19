@@ -1,6 +1,6 @@
 [project]
 name = "scribe"
-version = "0.7.0"
+version = "0.8.0"
 description = "Deterministic Claude Code transcript extractor and session summarizer"
 readme = "README.md"
 license = { text = "MIT" }
@@ -9,8 +9,19 @@ requires-python = ">=3.11"
 # provably offline, and it is the one that reads raw transcripts. That invariant is enforced
 # by `tests/test_stdlib_only.py`, which walks the module's imports, rather than by keeping
 # httpx out of this list: a packaging convention is not a guarantee, and an AST check is.
+# Bounded, not a bare floor. `httpx>=0.27` was the exact shape of vikunja#627 — an
+# unbounded floor that let `fastmcp>=2.0` resolve to 4.0.1, two majors past anything tested,
+# unobserved for ten days. The ceiling is chosen the same way the `telemetry` extra below
+# chooses its `<2`: the boundary past which the API contract this code relies on may change.
+#
+# For a 0.x package that boundary is the MINOR, by convention, so `<0.29` rather than `<1`.
+# Measured 2026-09-18: exactly one httpx API is used anywhere in this repo —
+# `httpx.post(url, json=, headers=, timeout=)` at summarize/providers.py:99, plus
+# `.status_code` and `.json()` on the response. Deployed on forge is 0.28.1, which is also
+# the newest real release; 1.0 exists only as dev builds. So this bound excludes nothing
+# that exists today, and a 0.29 is a deliberate reading task rather than a silent bump.
 dependencies = [
-    "httpx>=0.27",
+    "httpx>=0.27,<0.29",
 ]
 
 [project.optional-dependencies]

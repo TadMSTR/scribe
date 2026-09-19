@@ -7,6 +7,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-18
+
+**Minor.** Adds a `deps-drift` subcommand, a committed lockfile, dependency-audit and release
+workflows. No behaviour change to extraction, summarization or QC; no event log is rewritten,
+no exit code moves, and `SCHEMA_VERSION` stays at 2.
+
+### Added
+
+- **A committed `uv.lock`, and a CI gate that keeps it honest** (vikunja#904, #633, #670).
+  The repo declares `deployed: true, stateful: true`, which activates the Dependencies block of
+  `repo-standards.md` — but it had **no dependency audit of any kind**. `ci.yml` now runs
+  `uv lock --check` for currency, then two `pip-audit --strict --locked` gates against
+  `pylock.runtime.toml` and `pylock.dev.toml`.
+
+  The gates are **split** because they warrant different responses: a runtime advisory affects
+  the service running on forge, a dev-tooling advisory affects only this repository's CI.
+  Collapsing them makes the urgent case indistinguishable from the routine one.
+
+  Proven two-sided before shipping: a scratch lock pinning `h11 0.14.0` trips the runtime gate
+  with `PYSEC-2026-348` and exits 1, while the real export exits 0.
+
+- **`python -m scribe deps-drift`** — compares a deployed venv against the set `uv.lock` pins.
+
+  It exists because **the tree CI audits is not the tree forge runs.** `venv-deploy.sh` builds
+  a wheel and pip-installs it, re-resolving from the bounded ranges at deploy time; nothing on
+  forge reads the lock. A green audit in CI is therefore a statement about a resolution the
+  host may never have installed. First run against `/opt/venvs/scribe` found real drift:
+  `idna` locked 3.20 / deployed 3.19, `protobuf` locked 7.36.2 / deployed 7.36.1.
+
+  **It reports and never fails.** The divergence is expected by construction today, and a check
+  that goes red on the expected state gets switched off before the unexpected one arrives.
+
+- **`.github/dependabot.yml`**, ecosystem `uv` — **not `pip`**. They are separate Dependabot
+  ecosystems, and `pip` would update `pyproject.toml` while leaving `uv.lock` frozen, which
+  looks exactly like coverage and is not. Majors ignored; see the note under *Changed*.
+
+- **`.github/workflows/release.yml`** — `build` → `verify` → attach, on `push: tags: v*`, with
+  `contents: write` escalated to the single job that needs it. All eight prior releases were cut
+  by hand and nothing ever asserted anything about the artefact attached to them.
+
+  **It does not write the release notes.** Existing titles name the finding each release fixes
+  (*"v0.7.0 — a cap chosen from last month's corpus decays silently"*); a commit-log generator
+  produces nothing like that. The human authors the release, then pushes the tag; this attaches
+  verified artefacts to it. The create path is a fallback that writes a bare placeholder saying
+  so, rather than inventing prose.
+
+- **`.github/ci/verify-dist.sh`**, run by both `ci.yml` and `release.yml` so the PR path and
+  the release path cannot drift. Beyond layout and version agreement it asserts two properties
+  of the **installed artefact** rather than of the source tree:
+
+  - `scribe.extract` imports in a venv where `httpx` is **not installed** — a stronger statement
+    than `tests/test_stdlib_only.py`'s AST walk, which cannot see a deferred import it does not
+    model. (A vacuity guard fails the run if `httpx` is somehow present.)
+  - The redactor works **in both directions**: secrets removed, and benign text left untouched.
+    A redactor that scrubbed its entire input would satisfy every removal assertion while
+    destroying the signal the event log exists to carry. Verified by neutering `scrub()` both
+    ways on a scratch tree — each build is caught by exactly one half.
+
+- **A schema migration test** (`tests/test_schema_migration.py`), the `stateful` requirement
+  that **nothing was checking** — it is not in `repo-conform.py`'s requirement set at all, so
+  the repo declared `stateful: true` and swept clean while the migration path was exercised
+  only by tests that create a fresh database.
+
+  The N-1 fixture is derived from `git show v0.2.0:src/scribe/state.py` — the last release
+  whose `SCHEMA_VERSION` was 1 — rather than hand-rolled, and a provenance test re-derives it
+  and asserts it still matches.
+
+  The assertion with substance is that the rows were **migrated**, not merely carried: schema
+  2's DDL is byte-identical to schema 1's, so `_backfill_session_ids` *is* the migration.
+  Confirmed discriminating — with that call deleted, the marker still advances and 10 of 12
+  tests still pass.
+
+### Changed
+
+- **`httpx>=0.27` is now `httpx>=0.27,<0.29`** (vikunja#627). A bare floor is the shape that let
+  `fastmcp>=2.0` resolve to 4.0.1 on a sibling repo, two majors past anything tested, unobserved
+  for ten days. The ceiling is chosen the way the `telemetry` extra chooses its `<2`: the
+  boundary past which the API contract may change. For a 0.x package that is the **minor**.
+
+  Measured 2026-09-18: exactly one httpx API is used anywhere in this repo —
+  `httpx.post(url, json=, headers=, timeout=)` at `summarize/providers.py:99`, plus
+  `.status_code` and `.json()`. Deployed is 0.28.1, which is also the newest real release, so
+  this excludes nothing that exists today.
+
+  Note the interaction with Dependabot: `0.28 -> 0.29` is *semver-minor*, so the `ignore`
+  rule does not catch it and this bound is what makes that bump a decision.
+
+- `ci.yml` checks out with `fetch-depth: 0` and sets `SCRIBE_REQUIRE_SCHEMA_PROVENANCE=1`, so
+  the fixture-provenance check runs there instead of silently skipping on a shallow clone. A
+  check that can quietly stop running is not a check.
+
+- `ci.yml` now builds and verifies the distribution on every PR. A `pyproject.toml` that
+  resolves but does not install is otherwise invisible until release day.
+
+### Notes
+
+- **`pip-audit --locked` does not silently fall back to re-resolving** (vikunja#905). The
+  rationale recorded across the fleet for isolating each pylock into its own directory says it
+  does. Measured against pip-audit 2.10.1 — and 2.9.0, the first version to have the flag — it
+  errors `no lockfiles found` and exits 1 instead.
+
+  The isolation is still required, for a different and measured reason: PEP 751 permits
+  `pylock.<name>.toml`, so **both** exports are valid lockfile names and a run from the repo
+  root audits **both** — 16 runtime + 17 dev = 33 packages in one gate. The failure is not a
+  silent green, it is a silent **merge** that erases the runtime/dev distinction the split
+  exists to draw. `ci.yml`'s comment states the measured behaviour.
+
 ## [0.7.0] — 2026-09-18
 
 **Minor.** The JSON schema sent to the provider now varies per session, `run` prints a line it
@@ -906,5 +1013,13 @@ Against the 429-transcript, 596 MB corpus on forge:
   `#1`–`#12` at the top of the frequency table, every one a PR number. Residual ambiguity
   remains for a bare `#N` in a markdown table.
 
-[Unreleased]: https://github.com/TadMSTR/scribe/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/TadMSTR/scribe/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/TadMSTR/scribe/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/TadMSTR/scribe/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/TadMSTR/scribe/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/TadMSTR/scribe/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/TadMSTR/scribe/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/TadMSTR/scribe/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/TadMSTR/scribe/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/TadMSTR/scribe/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/TadMSTR/scribe/releases/tag/v0.1.0
