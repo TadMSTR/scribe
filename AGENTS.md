@@ -55,6 +55,16 @@ so state records how far the file was READ (`last_offset`), not merely that it w
 `upsert_observed` must never regress that offset: an observation says what is on disk, not
 what has been processed, and conflating the two makes a rescan re-summarize finished work.
 
+**This is also where the dry run draws its line: it may OBSERVE, it must not PROCESS.** A dry
+run still calls `upsert_observed` — roughly 460 rows a sweep on the live corpus — and that is
+the pass doing its job. What it must not do is advance `last_offset` or mark a session
+summarized. `process_session` guards this by returning on `dry_run` ABOVE both
+`mark_summarized` calls; for a while it returned below them, so the two "nothing to summarize"
+branches retired sessions during a run documented as inert (vikunja#902). Note what that makes
+of any test asserting a dry run leaves the database untouched: hashing the file, or diffing a
+row whole, FAILS ON CORRECT CODE. Assert per column, against the fields `mark_summarized`
+owns. The whole-file check was proposed twice for this and was wrong both times.
+
 **9. Output ends with a newline.**
 A missing one glued ~1,030 headings together in the memory files downstream.
 
@@ -115,6 +125,17 @@ truncated ~/.pm2/logs/scribe-out.log` returned 0 for the whole period, so vikunj
 a number to be allowed to accumulate and looked at, and it had been accumulating into nothing.
 Give the counter a name, print it on the surface the operator actually reads, and keep the
 per-field breakdown: a scalar says a cap fired, and only the breakdown says which one.
+
+**14. Advice that names a command must name a command that runs.**
+`run_cli` told an operator to run `scribe recover --status`, a flag that has never existed, on
+the one line printed when a summary has been lost. Two more — `--dry-run` and `--once` — sat in
+`run_cli`'s own module docstring. All three survived because nothing tied a printed string to a
+parser: the test asserted `"scribe recover" in out`, and a SUBSTRING passes happily over a
+broken flag appended to a correct prefix. `tests/test_advice_strings.py` now reads every
+`` `scribe ...` `` and every bare `` `--flag` `` out of `src/scribe/` and checks it against the
+real parser's `--help`. Same shape as invariant 11's rule about a prompt stating a cap the
+validator does not enforce — here the parser is the validator. If you write advice, the test
+is what keeps it true; do not widen its pattern to make a new string pass.
 
 ## Porting notes
 

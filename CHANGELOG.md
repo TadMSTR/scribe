@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-19
+
+**Patch.** Two correctness fixes to what scribe says about itself, and the test that
+closes their class. No schema change (`SCHEMA_VERSION` stays at 2), no exit code moves,
+no digest or event log is rewritten.
+
+### Fixed
+
+- **A dry run no longer processes the sessions it has nothing to say about** (vikunja#902).
+  `process_session` returned on `dry_run` *below* the two `mark_summarized` calls that retire a
+  turnless or fully-processed session, so `python -m scribe run` — the documented, no-flags
+  invocation — advanced `last_offset` and set `status` on production state. Inertness is the
+  property people rely on when pointing a tool at production config. The guard now sits above
+  both.
+
+  **A dry run still writes, and that is correct.** `upsert_observed` records a transcript's
+  size and mtime during discovery — ~460 rows a sweep on the live corpus against this branch's
+  one — and guarding that too would make a dry run forget what it saw, contradicting invariant
+  8. The restored property is narrower and more defensible: **a dry run may observe, it must
+  not process.**
+
+  *Cost, stated rather than absorbed:* a dry run no longer retires turnless or fully-processed
+  sessions, so each dry run re-offers them and the next live run does the bookkeeping. Those
+  sessions have nothing to summarize, so the repeated work is a re-extract.
+
+- **`run` no longer recommends a flag that does not exist** (vikunja#903). The line printed
+  when a summary has been lost advised `scribe recover --status`, which exits 2 — at the exact
+  moment an operator is least inclined to go reading argparse. It now advises `scribe recover`,
+  the report-only default. Two more nonexistent flags, `--dry-run` and `--once`, were removed
+  from `run_cli`'s module docstring along with its retired Phase 6 shadow-run framing; the flag
+  is `--live`.
+
+- **README no longer claims a dry run writes nothing.** It never did write *nothing* —
+  discovery always recorded what it observed — so the sentence was false before #902 and would
+  have stayed false after it. It now states the observe/process boundary.
+
+### Added
+
+- **`tests/test_advice_strings.py` — every command scribe recommends must be one that runs.**
+  The deliverable of this change, and the reason it is more than two one-line edits. Both
+  defects above *already had tests, and both passed*: `test_a_placeholder_is_reported_loudly`
+  asserted `"scribe recover" in out`, a substring that a broken flag appended to a correct
+  prefix satisfies, and `test_a_dry_run_does_not_advance_the_session_state` asserted exactly
+  the right property against the one fixture that cannot exhibit the defect — it has pending
+  turns, so it took the guard and never reached either unguarded call.
+
+  The new sweep reads every `` `scribe ...` `` command and every bare `` `--flag` `` out of
+  `src/scribe/` and checks each against the real parser's `--help`, with an explicit exclusion
+  list rather than a weaker pattern. It runs clean over all 23 advice strings in the tree and
+  goes red on all three planted defect shapes. Recorded as invariant 14.
+
 ## [0.8.0] — 2026-09-18
 
 **Minor.** Adds a `deps-drift` subcommand, a committed lockfile, dependency-audit and release
