@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from scribe.eventlog import log_from_dict
 from scribe.extract import extract
 from scribe.extract.models import EventLog, Turn
 from scribe.qc import (
+    _ID_CONTEXT,
     _PATH_RE,
     CLAIM_CODE,
     CLAIM_COMMAND,
@@ -1055,3 +1057,27 @@ def test_the_control_claims_are_rejected_for_absence_and_not_by_a_broken_predica
         allowed,
         corpus,
     )
+
+
+def test_the_id_context_pattern_does_not_backtrack_on_a_long_word_run() -> None:
+    """`_ID_CONTEXT` must stay linear in corpus length.
+
+    Its first draft opened with `\\w*_id`, which the engine re-tries at every start position:
+    0.39s at 16k characters, 13.8s at 100k, and **232 seconds** measured against this corpus's
+    longest real event log at 414,187. The live corpus hid it completely -- event logs are JSON
+    and runs of word characters are short -- so one session logging a base64 blob or a minified
+    file would have hung the gate with nothing in any measurement to predict it.
+
+    The bound is deliberately loose. The fixed pattern does this in ~4ms; anything that trips a
+    two-second ceiling has reintroduced backtracking, not merely run on a slow machine.
+    """
+    corpus = "a" * 414_187
+    started = time.perf_counter()
+    re.search(_ID_CONTEXT + r"4242\b", corpus)
+    assert time.perf_counter() - started < 2.0
+
+    # And the same for the shapes it actually has to match, at full corpus length.
+    for filler in ("_" * 414_187, '{"args_digest":"task_id=541"} ' * 13_000):
+        started = time.perf_counter()
+        re.search(_ID_CONTEXT + r"4242\b", filler)
+        assert time.perf_counter() - started < 2.0

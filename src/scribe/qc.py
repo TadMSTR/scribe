@@ -210,10 +210,20 @@ _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{2,}|\d{2,}")
 #: Verified against the live tracker rather than inferred: id 541 is identifier #493, and id
 #: 930 is #847. A digest writing `#541` for id 541 names a real but unrelated ticket, which is
 #: the whole reason this message exists.
+#: **Every alternative starts with a literal and carries no unbounded quantifier.** That is a
+#: correctness requirement here, not style. The first draft opened with `\w*_id`, and `\w*` is
+#: re-tried at every start position: measured quadratic -- 0.02s at 4k characters, 0.39s at
+#: 16k, 13.8s at 100k, and **232 seconds** against this corpus's longest event log at 414,187
+#: characters. The live corpus hid it because event logs are JSON, where runs of word
+#: characters are short; one session logging a base64 blob or a minified file would have hung
+#: the gate outright.
+#:
+#: Note where this was found: the same module vikunja#889 had just capped a scan in. A pattern
+#: is as able to be quadratic as a loop, and only the loop had been looked at.
 _ID_CONTEXT = (
-    r'(?:"id"\s*:\s*'  # {"id": 417}
+    r'(?:"\w{0,32}id"\s*:\s*"?'  # {"id": 417}, {"task_id": "417"}
     r"|\bid\s*[:=]?\s*"  # id 417, id: 417, id=417
-    r'|\w*_id\s*[:=]\s*"?'  # task_id=417, "task_id": "417"  <- the commonest miss
+    r'|_id\s*[:=]\s*"?'  # task_id=417  <- the commonest miss
     r'|"target"\s*:\s*"'  # {"target": "417"} in an MCP event's args digest
     r"|/)"  # .../tasks/417
 )
