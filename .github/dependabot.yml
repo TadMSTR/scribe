@@ -1,0 +1,55 @@
+# Dependabot configuration.
+#
+# This file is not optional scaffolding. A committed lockfile with nothing maintaining it is a
+# *freeze*, not an improvement — pinned-and-forgotten is a different failure, not the absence
+# of one (vikunja#670). `uv.lock` arrives in the same commit as this file for that reason: the
+# lock is what makes the audit gates in ci.yml mean something, and this is what stops the lock
+# itself going stale.
+#
+# THE ECOSYSTEM IS `uv`, NOT `pip`. They are separate ecosystems in Dependabot and the
+# distinction is load-bearing: `pip` would update pyproject.toml and leave uv.lock frozen,
+# which is precisely the frozen-lock failure above wearing the appearance of coverage. Verified
+# on webhook-doorman during the repo-standards programme — within minutes of merge, Dependabot
+# opened a `dependabot/uv/...` PR, which the `pip` ecosystem would never have produced.
+#
+# No `docker` ecosystem: this repo has no Dockerfile. It is deployed by `venv-deploy.sh`, which
+# builds a wheel from source and pip-installs it into /opt/venvs/scribe.
+#
+# Majors are ignored for every dependency. A semver-major bump is a reading task, not a merge
+# task, and the bounded ranges in pyproject.toml already stop one arriving silently — that is
+# what vikunja#627 was: `fastmcp>=2.0` resolving to 4.0.1, two majors past anything tested,
+# unobserved for ten days. To take a major, do it by hand and read the upstream changelog.
+#
+# NOTE ON httpx SPECIFICALLY. Its ceiling is `<0.29`, because for a 0.x package the MINOR is
+# the breaking boundary. Dependabot classifies 0.28 -> 0.29 as `semver-minor`, so the ignore
+# rule below does not catch it — the pyproject bound is what makes that bump a decision. The
+# two controls are deliberately different shapes and neither is redundant.
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # Dev dependencies batch into one PR. They update often and none of them reach the
+    # deployed venv, so one PR per bump would drown the runtime updates that need reading.
+    # `ruff` is pinned exactly (see pyproject.toml) precisely so its bumps are deliberate;
+    # batching them keeps that decision in one place rather than one PR at a time.
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Actions are SHA-pinned with a trailing version comment (see .github/workflows/*.yml,
+    # and conformance requirement B12). Dependabot understands SHA pins and bumps the SHA
+    # while updating that comment, so pinning costs no update coverage.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

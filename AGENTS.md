@@ -173,3 +173,27 @@ into a fixture; the repo is private today and intended to go public.
 - Feature branches and PRs. `~/repos/personal` carries `branch_required: true`.
 - Baseline tier per `repo-conform.py`. Do not add flagship requirements ad hoc.
 - Actions pinned to a commit SHA, never a tag.
+
+## Dependencies and the lockfile
+
+`uv.lock` is committed and `ci.yml`'s audit job gates on it. Three things follow.
+
+**A version bump is a two-file change plus a re-lock.** `pyproject.toml`, `src/scribe/__init__.py`
+(`tests/test_version.py` enforces that pair) and then `uv lock`, because the lock records the
+project's own version. Skipping the re-lock turns `uv lock --check` red in CI. That gate is not
+boilerplate: on the exemplar repo it was added against a lock that was two and a half months
+stale, recorded the project at v1.3.4 against a real 1.14.0, and was missing a declared
+dependency outright — with every audit below it passing.
+
+**Ranges are bounded on both ends, with a dated reason.** `httpx>=0.27,<0.29`: for a 0.x
+package the minor is the breaking boundary, so the ceiling sits there rather than at `<1`.
+Dependabot classifies `0.28 -> 0.29` as *minor*, so the `ignore: semver-major` rule in
+`.github/dependabot.yml` does **not** catch it — the pyproject bound is what makes that bump a
+deliberate decision. The two controls are different shapes and neither is redundant.
+
+**The lock does not govern what forge runs.** `venv-deploy.sh` builds a wheel and pip-installs
+it, re-resolving from the ranges at deploy time; `uv` is not installed on forge and does not
+need to be. So a green audit in CI is a statement about a resolution the host may never have
+installed. `python -m scribe deps-drift` measures the gap — it reports and never fails, because
+the divergence is expected by construction. Fixing it at the deploy layer is sysadmin's, not
+this repo's.

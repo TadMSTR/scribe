@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import sys
 
-USAGE = "usage: python -m scribe {cap-survey|extract|events|journal|qc|qc-survey|recover|run} ..."
+USAGE = (
+    "usage: python -m scribe "
+    "{cap-survey|deps-drift|extract|events|journal|qc|qc-survey|recover|run} ..."
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -13,6 +16,10 @@ def main(argv: list[str] | None = None) -> int:
         from .cap_survey_cli import main as cap_survey_main
 
         return cap_survey_main(args[1:])
+    if args and args[0] == "deps-drift":
+        from .deps_drift_cli import main as deps_drift_main
+
+        return deps_drift_main(args[1:])
     if args and args[0] == "extract":
         from .extract.__main__ import main as extract_main
 

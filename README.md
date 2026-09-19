@@ -420,6 +420,39 @@ The floors in the composition rule are derived by `--probe`, which measures how 
 candidate grounds a path harvested from a *different* session's digest — a claim that session
 demonstrably was not shown. A floor chosen against the corpus it judges measures nothing.
 
+## Dependencies
+
+`uv.lock` is committed, and CI gates on it three ways: `uv lock --check` for currency, then
+`pip-audit --strict --locked` separately against the runtime and dev sets. The split is
+deliberate — a runtime advisory affects the service running on forge, a dev-tooling advisory
+affects only this repository's CI, and one combined red cannot tell you which you have.
+
+### The lock does not govern what forge runs
+
+`venv-deploy.sh` builds a wheel from source and pip-installs it, **re-resolving from the
+bounded ranges in `pyproject.toml` at deploy time**. Nothing on the host reads `uv.lock`, and
+`uv` is not installed there.
+
+So a green audit in CI is a statement about a resolution forge may never have installed. That
+gap is not closed here — making the deploy path honour a lock is a root-owned production
+script serving 20+ services, and belongs to whoever owns that script. What is closed is the
+*invisibility* of it:
+
+```bash
+python -m scribe deps-drift                      # compare /opt/venvs/scribe against the lock
+python -m scribe deps-drift --venv /path/to/venv # somewhere else
+python -m scribe deps-drift --json               # for a script
+```
+
+It reports three kinds of divergence — a version mismatch, locked-but-not-deployed, and
+deployed-but-not-locked — and **always exits 0 when the comparison ran**. Drift is expected by
+construction today; a check that went red on the expected state would be switched off long
+before the unexpected one arrived. Exit `2` means it could not look, which is deliberately not
+the same as looking and finding nothing.
+
+A clean result is reported as a coincidence of tight ranges rather than as coverage, because
+that is what it is.
+
 ## Status
 
 **In production on forge, and the only summarizer running there.** The `memsearch-summarize`
