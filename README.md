@@ -418,15 +418,29 @@ python -m scribe qc-survey                 # grade every block against its own e
 python -m scribe qc-survey --rule literal  # ... under the pre-vikunja#876 rule, for comparison
 python -m scribe qc-survey --bucket absent # the claims no tolerance reaches — the control set
 python -m scribe qc-survey --probe         # re-derive the segment floors from foreign claims
+python -m scribe qc-survey --probe-spans   # price the trim tolerance the span routes decline
 ```
 
 Read-only: it writes only to stdout or an explicit `--out`. Grading is **per block**, each
 against the log named in its own anchor — a daily digest holds many sessions, and grading the
 file against one of their logs reports 92% failure with every finding false (vikunja#852).
 
+Every finding is attributed to a named cause, not just the path ones — `--bucket` names the
+cause and `--kind` scopes it to one route. `--bucket absent` stays scoped to the path route by
+default, because that 26-claim set is the control three releases of measurements are stated
+against. `findings_unattributed` is reported rather than absorbed into a total: a tolerance
+cannot be chosen for a route whose failures cannot be named, and this instrument once
+classified 162 of 289 findings and counted the rest.
+
 The floors in the composition rule are derived by `--probe`, which measures how often each
 candidate grounds a path harvested from a *different* session's digest — a claim that session
-demonstrably was not shown. A floor chosen against the corpus it judges measures nothing.
+demonstrably was not shown. A floor chosen against the corpus it judges measures nothing, and
+the written corpus was produced under the gate being tuned.
+
+Trades are reported as **true claims recovered per false one**, which is what makes them
+comparable: `ADJACENCY_WINDOW` shipped at 5.0 and the blanket composition rule was rejected at
+1.3. `--probe-spans` exists to record a rejection at 1.2 — the tolerance is not in the gate,
+and the measurement that kept it out is re-runnable.
 
 ## Dependencies
 

@@ -23,8 +23,8 @@ Two rules it follows, both learned the hard way:
 
 from __future__ import annotations
 
-import ast
 import random
+import re
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -33,11 +33,23 @@ from pathlib import Path
 from .eventlog import EventLogError, eventlog_path, load_eventlog
 from .extract.models import EventLog
 from .qc import (
+    _CMD_RE,
+    _ID_CONTEXT,
+    _TOKEN_RE,
     ADJACENCY_WINDOW,
+    CLAIM_CODE,
+    CLAIM_COMMAND,
+    CLAIM_IDENTIFIER,
+    CLAIM_KINDS,
+    CLAIM_PATH,
+    CLAIM_TICKET,
+    CLAIM_TOOL,
+    MAX_SPAN_CHARS,
     MIN_PREFIX_SEGMENTS,
+    MIN_SPAN_CHARS,
     MIN_TAIL_SEGMENTS,
-    PATH_UNGROUNDED,
     Report,
+    _claims,
     check_groundedness,
     composition_split,
     grounding_terms,
@@ -45,6 +57,8 @@ from .qc import (
     path_grounded,
     path_literal,
     path_segments,
+    span_grounded,
+    strip_scribe_markers,
 )
 from .writeback import paired_blocks
 
@@ -68,6 +82,59 @@ ABSENT = "absent"
 #: Applied in this order, so the buckets are disjoint by construction and the earlier, stronger
 #: explanation always wins. Reordering changes every number this module reports.
 BUCKETS = (VERBATIM, HOME_EXPANSION, COMPOSED, SUFFIX, ABSENT)
+
+# --- non-path buckets -------------------------------------------------------------------
+# Of 289 findings this module classified 162 and counted the other 127 without naming a cause
+# for any of them, because every bucket above is about a *path*. A tolerance cannot be chosen
+# for a route whose failures cannot be attributed, so these exist before anything is tuned.
+
+#: The digest wrote `#N`, and the corpus holds `N` only as an internal id -- `task_id=417`,
+#: `"target": "417"`, `/tasks/417`, or an id/# table. **This is the gate working.** Verified
+#: against the live tracker: id 541 is identifier #493 and id 930 is #847, so a digest writing
+#: `#541` names a real but unrelated ticket. Nothing in this bucket wants a tolerance.
+ID_CONFLATION = "id-conflation"
+#: `N` appears in the corpus, but as a quantity rather than an id -- `73 pipelines`, `478
+#: lines`, a digit run inside a sha256. Coincidence, not evidence. Also a true finding.
+COINCIDENTAL_NUMBER = "coincidental-number"
+#: The claim is an artefact of `_CMD_RE`'s delimiter mis-pairing rather than anything a model
+#: asserted -- see the constant's docstring. **Must be 0**: the pattern was fixed, and this
+#: bucket exists so a regression shows up as a named cause rather than as a worse rate.
+DESYNC_ARTEFACT = "desync-artefact"
+#: Grounds once surrounding quotes or brackets are removed -- `"operator"`, `{"prs":[]}`.
+PUNCTUATION_WRAPPED = "punctuation-wrapped"
+#: Fewer than two significant tokens, so `_tokens_co_occur` returns early and the claim had no
+#: route but verbatim presence. Not a failure of tolerance so much as an absence of one.
+SINGLE_TOKEN = "single-token"  # noqa: S105 -- a lexical token (`_TOKEN_RE`), not a secret
+#: Every token is in the corpus, but never within `CO_OCCURRENCE_WINDOW` of the others.
+TOKEN_SPREAD = "token-spread"  # noqa: S105 -- ditto
+#: Some tokens are present and at least one is not -- a partly-grounded claim.
+TOKEN_MISSING = "token-missing"  # noqa: S105 -- ditto
+
+#: For `ticket`. Ordered strongest-explanation-first, like `BUCKETS`.
+TICKET_BUCKETS = (ID_CONFLATION, COINCIDENTAL_NUMBER, ABSENT)
+#: For `identifier`, `code` and `command` -- the backticked-span routes, which share a rule.
+SPAN_BUCKETS = (
+    DESYNC_ARTEFACT,
+    PUNCTUATION_WRAPPED,
+    SINGLE_TOKEN,
+    TOKEN_SPREAD,
+    TOKEN_MISSING,
+    ABSENT,
+)
+#: For `tool`.
+TOOL_BUCKETS = (ABSENT,)
+
+#: Which bucket set attributes each claim kind. A kind absent from here would be counted and
+#: never attributed, which is the gap this build opened with -- so `survey` asserts every
+#: finding lands in a bucket rather than letting one fall through to a remainder.
+BUCKETS_BY_KIND = {
+    CLAIM_PATH: BUCKETS,
+    CLAIM_TICKET: TICKET_BUCKETS,
+    CLAIM_TOOL: TOOL_BUCKETS,
+    CLAIM_COMMAND: SPAN_BUCKETS,
+    CLAIM_CODE: SPAN_BUCKETS,
+    CLAIM_IDENTIFIER: SPAN_BUCKETS,
+}
 
 
 def _segments(claim: str) -> list[str]:
@@ -105,12 +172,14 @@ def home_forms(claim: str, home: str) -> list[str]:
 
 @dataclass
 class ClaimVerdict:
-    """One rejected path claim, and the strongest available explanation for its rejection."""
+    """One rejected claim, and the strongest available explanation for its rejection."""
 
     claim: str
     bucket: str
     session_id: str
     digest: str
+    #: Which route rejected it — one of `CLAIM_KINDS`. Read off the finding, never re-derived.
+    kind: str = CLAIM_PATH
     #: Trailing segments of the claim the corpus can account for. The input to the floor.
     suffix_segments: int = 0
     #: The `(directory, tail)` that explains a `COMPOSED` claim; empty otherwise.
@@ -168,17 +237,84 @@ def iter_blocks(digest_root: str | Path) -> Iterator[Block]:
             )
 
 
-def rejected_paths(report: Report) -> list[str]:
-    """The path claims a report rejected, recovered from the findings themselves.
+def rejected_claims(report: Report, kind: str) -> list[str]:
+    """The claims of one kind a report rejected, recovered from the findings themselves.
 
-    Read back out of the gate's own output rather than recomputed, so this cannot disagree with
-    what the gate did. `PATH_UNGROUNDED` is shared with `check_groundedness` for the same reason.
+    Still read back out of the gate's own output rather than recomputed — that property is what
+    `Survey.gate_disagreements` polices and it has not changed. What changed is that the claim
+    is read from `Finding.claim`, a field the gate sets as it rejects, instead of being parsed
+    back out of the English in `Finding.detail`.
+
+    The parse could not be extended past the path route. `_ticket_detail` writes two different
+    sentences and the interesting one puts the claim mid-sentence, so attributing tickets by
+    prefix would have meant a regex over prose per route — a second implementation of the gate's
+    classification, kept in sync by hand. That is the drift this function exists to prevent.
     """
-    out = []
-    for f in report.findings:
-        if f.check == "groundedness" and f.detail.startswith(PATH_UNGROUNDED):
-            out.append(ast.literal_eval(f.detail[len(PATH_UNGROUNDED) :]))
-    return out
+    return [f.claim for f in report.findings if f.check == "groundedness" and f.kind == kind]
+
+
+def rejected_paths(report: Report) -> list[str]:
+    """The path claims a report rejected. The path route's `rejected_claims`, named."""
+    return rejected_claims(report, CLAIM_PATH)
+
+
+def _desynced_spans(body: str) -> set[str]:
+    """Backticked spans the OLD `_CMD_RE` would have invented from prose between two spans.
+
+    Kept so `DESYNC_ARTEFACT` is a bucket a regression can land in and be named, rather than a
+    silent worsening of the rate. Against the fixed pattern this is empty on every block.
+    """
+    text = strip_scribe_markers(body)
+    live = {
+        " ".join(m.group(1).split()).lower()
+        for m in _CMD_RE.finditer(text)
+        if MIN_SPAN_CHARS <= len(m.group(1)) <= MAX_SPAN_CHARS
+    }
+    old = {" ".join(m.group(1).split()).lower() for m in re.finditer(r"`([^`\n]{3,200})`", text)}
+    return old - live
+
+
+def classify_ticket_claim(claim: str, corpus: str) -> str:
+    """Why a `#N` was rejected. See `ID_CONFLATION` — most of this bucket is the gate working."""
+    number = claim.lstrip("#")
+    if re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus):
+        return ID_CONFLATION
+    if re.search(r"(?<!\d)" + re.escape(number) + r"(?!\d)", corpus):
+        return COINCIDENTAL_NUMBER
+    return ABSENT
+
+
+def classify_span_claim(claim: str, corpus: str, *, desynced: set[str]) -> str:
+    """Why a backticked span — `identifier`, `code` or `command` — was rejected."""
+    if claim in desynced:
+        return DESYNC_ARTEFACT
+    stripped = claim.strip("\"'`.,;:()[]{}<>* ")
+    if stripped and stripped != claim and stripped in corpus:
+        return PUNCTUATION_WRAPPED
+    tokens = {t.lower() for t in _TOKEN_RE.findall(claim)}
+    if not tokens:
+        return ABSENT
+    missing = [t for t in tokens if t not in corpus]
+    if len(missing) == len(tokens):
+        return ABSENT
+    if missing:
+        return TOKEN_MISSING
+    # Every token is present. Either there were too few for the co-occurrence route to run at
+    # all, or they are present and never near each other.
+    return SINGLE_TOKEN if len(tokens) < 2 else TOKEN_SPREAD
+
+
+def classify_claim(
+    claim: str, kind: str, allowed_paths: set[str], corpus: str, *, home: str, desynced: set[str]
+) -> tuple[str, int, tuple[str, str]]:
+    """Which bucket a rejected claim of any kind falls in. Dispatches on the finding's `kind`."""
+    if kind == CLAIM_PATH:
+        return classify_path_claim(claim, allowed_paths, corpus, home=home)
+    if kind == CLAIM_TICKET:
+        return classify_ticket_claim(claim, corpus), 0, ("", "")
+    if kind == CLAIM_TOOL:
+        return ABSENT, 0, ("", "")
+    return classify_span_claim(claim, corpus, desynced=desynced), 0, ("", "")
 
 
 @dataclass
@@ -194,7 +330,15 @@ class Survey:
     blocks_no_log: int = 0
     findings_total: int = 0
     findings_path: int = 0
+    #: Findings carrying no claim kind — a groundedness route that forgot to record one, or a
+    #: coverage finding. Reported rather than absorbed: an unattributed remainder is exactly
+    #: what this build had to fix before it could choose anything.
+    findings_unattributed: int = 0
     buckets: Counter = field(default_factory=Counter)
+    #: Findings by claim kind, and by `(kind, bucket)`. Every groundedness finding lands in
+    #: exactly one of the latter.
+    kinds: Counter = field(default_factory=Counter)
+    kind_buckets: Counter = field(default_factory=Counter)
     verdicts: list[ClaimVerdict] = field(default_factory=list)
 
     @property
@@ -202,8 +346,22 @@ class Survey:
         return self.blocks_failing / self.blocks if self.blocks else 0.0
 
     def control_set(self) -> list[ClaimVerdict]:
-        """Every claim in `ABSENT` — what must still fail after any tolerance lands."""
-        return [v for v in self.verdicts if v.bucket == ABSENT]
+        """Every PATH claim in `ABSENT` — what must still fail after any tolerance lands.
+
+        Deliberately still scoped to the path route. `ABSENT` now exists for other kinds too,
+        and widening this to include them would silently redefine the control set that three
+        releases of measurements are stated against — the comparison would stop meaning what it
+        meant. `absent_by_kind` reports the others separately.
+        """
+        return [v for v in self.verdicts if v.kind == CLAIM_PATH and v.bucket == ABSENT]
+
+    def absent_by_kind(self) -> dict[str, int]:
+        """`ABSENT` counts for every kind, so the non-path controls are visible but separate."""
+        return {
+            k: self.kind_buckets.get((k, ABSENT), 0)
+            for k in CLAIM_KINDS
+            if self.kind_buckets.get((k, ABSENT), 0)
+        }
 
     def to_dict(self) -> dict:
         return {
@@ -215,13 +373,20 @@ class Survey:
             "failure_rate": round(self.failure_rate, 4),
             "findings_total": self.findings_total,
             "findings_path": self.findings_path,
+            "findings_unattributed": self.findings_unattributed,
             "buckets": {b: self.buckets.get(b, 0) for b in BUCKETS},
+            "kinds": {k: self.kinds.get(k, 0) for k in CLAIM_KINDS},
+            "kind_buckets": {
+                k: {b: self.kind_buckets.get((k, b), 0) for b in BUCKETS_BY_KIND[k]}
+                for k in CLAIM_KINDS
+            },
             "suffix_segments": dict(
                 sorted(Counter(v.suffix_segments for v in self.verdicts).items())
             ),
             "verdicts": [
                 {
                     "claim": v.claim,
+                    "kind": v.kind,
                     "bucket": v.bucket,
                     "session_id": v.session_id,
                     "digest": v.digest,
@@ -283,19 +448,35 @@ def survey(
         out.findings_total += other + len(rejected)
         out.findings_path += len(rejected)
 
-        for claim in rejected:
-            bucket, suffix_n, split = classify_path_claim(claim, allowed, corpus, home=home)
-            out.buckets[bucket] += 1
-            out.verdicts.append(
-                ClaimVerdict(
-                    claim=claim,
-                    bucket=bucket,
-                    session_id=block.session_id,
-                    digest=block.digest,
-                    suffix_segments=suffix_n,
-                    split=split,
+        # Every groundedness finding is attributed, not just the path ones. Path claims keep
+        # coming from `rejected` — which is the independently recomputed set the disagreement
+        # counter compares — so the path numbers are unchanged by this. The other kinds are
+        # read straight off the findings, where there is nothing to disagree with.
+        desynced = _desynced_spans(block.body)
+        for kind in CLAIM_KINDS:
+            claims = rejected if kind == CLAIM_PATH else rejected_claims(report, kind)
+            out.kinds[kind] += len(claims)
+            for claim in claims:
+                bucket, suffix_n, split = classify_claim(
+                    claim, kind, allowed, corpus, home=home, desynced=desynced
                 )
-            )
+                if kind == CLAIM_PATH:
+                    out.buckets[bucket] += 1
+                out.kind_buckets[(kind, bucket)] += 1
+                out.verdicts.append(
+                    ClaimVerdict(
+                        claim=claim,
+                        bucket=bucket,
+                        kind=kind,
+                        session_id=block.session_id,
+                        digest=block.digest,
+                        suffix_segments=suffix_n,
+                        split=split,
+                    )
+                )
+        out.findings_unattributed += sum(
+            1 for f in report.findings if f.check == "groundedness" and f.kind not in CLAIM_KINDS
+        )
     return out
 
 
@@ -407,6 +588,106 @@ def cross_session_probe(
             for mp, mt in floors
         ],
     }
+
+
+#: Leading/trailing decoration a model adds around a real thing: quotes, parens, braces, a
+#: leading `@` or `#`. Path characters are deliberately NOT stripped.
+_TRIM_RE = re.compile(r"^[^0-9A-Za-z_~/.-]+|[^0-9A-Za-z_~/.-]+$")
+
+
+def trim_decoration(claim: str) -> str:
+    """`claim` with wrapping punctuation removed. `'"operator"'` -> `'operator'`."""
+    return _TRIM_RE.sub("", claim)
+
+
+def span_trim_probe(
+    digest_root: str | Path,
+    eventlog_root: str | Path,
+    *,
+    min_lengths: tuple[int, ...] = (0, 3, 4, 5, 6, 8, 10, 12),
+    per_block: int = 40,
+    seed: int = 20260919,
+) -> dict:
+    """Price the one tolerance the `identifier`/`code`/`command` routes actually suggest.
+
+    **This exists to record a REJECTION, and it is committed for the same reason the accepted
+    derivations are: a measurement that picked a decision has to be re-runnable by whoever
+    doubts it.** Reading the 43 residual span findings one by one, the dominant cause is not a
+    missing tolerance but decoration — `_is_loopback()` where the log holds `_is_loopback`,
+    `"operator"` where it holds `operator`, `@rootfs-pre-...` where it holds the bare snapshot
+    name. The obvious fix is to test the trimmed form too.
+
+    Priced by `cross_session_probe`'s method — foreign claims harvested from other sessions'
+    digests, which the model here demonstrably was not shown — it does not earn its place, and
+    it is not close. Measured 2026-09-19 over 494 blocks, ~17,800 controls per threshold:
+
+        min length   falsely grounded   truly grounded   true per false
+                 0     309   (1.74%)      14  (32.6%)             0.05
+                 3     266   (1.49%)      13  (30.2%)             0.05
+                 4     178   (1.00%)      12  (27.9%)             0.07
+                 6     136   (0.77%)      10  (23.3%)             0.07
+                 8      61   (0.34%)       8  (18.6%)             0.13
+                12       5   (0.03%)       6  (14.0%)             1.20
+
+    The bar is the project's own. `ADJACENCY_WINDOW` was chosen at **5.0 true claims per false
+    one** and the blanket composition rule was REJECTED at **1.3**. Trimming tops out at 1.2 —
+    below the number #876 already declined — while recovering 6 of 43 findings. So the span
+    routes ship unchanged, and the 22 findings this build removed from them came from fixing
+    `_CMD_RE`'s delimiter pairing, which was a correctness defect rather than a tolerance.
+
+    Re-run with `python -m scribe.qc_survey --probe-spans`.
+    """
+    rng = random.Random(seed)  # noqa: S311
+    span_kinds = (CLAIM_IDENTIFIER, CLAIM_CODE, CLAIM_COMMAND)
+    blocks = []
+    pool: list[str] = []
+    for b in iter_blocks(digest_root):
+        log = _load(eventlog_root, b)
+        if log is None:
+            continue
+        claimed = _claims(b.body)
+        spans = {k: sorted(claimed[k]) for k in span_kinds}
+        blocks.append((spans, grounding_terms(log), log.grounding_text().lower()))
+        for k in span_kinds:
+            pool.extend(spans[k])
+    pool = sorted(set(pool))
+
+    rows = []
+    for min_len in min_lengths:
+        false_ground = foreign_total = true_ground = own_total = 0
+        for spans, allowed, corpus in blocks:
+            own = {c for k in span_kinds for c in spans[k]}
+
+            def admits(claim: str, _corpus: str = "", _n: int = min_len) -> bool:
+                t = trim_decoration(claim)
+                return bool(t) and t != claim and len(t) >= _n and t in _corpus
+
+            foreign = [
+                c
+                for c in rng.sample(pool, min(per_block, len(pool)))
+                if c not in own and not span_grounded(c, CLAIM_IDENTIFIER, allowed, corpus)
+            ]
+            foreign_total += len(foreign)
+            false_ground += sum(1 for c in foreign if admits(c, corpus))
+            for kind in span_kinds:
+                real = [c for c in spans[kind] if not span_grounded(c, kind, allowed, corpus)]
+                own_total += len(real)
+                true_ground += sum(1 for c in real if admits(c, corpus))
+        rows.append(
+            {
+                "min_length": min_len,
+                "false_ground": false_ground,
+                "false_ground_rate": round(false_ground / foreign_total, 4)
+                if foreign_total
+                else 0.0,
+                "true_ground": true_ground,
+                "true_ground_rate": round(true_ground / own_total, 4) if own_total else 0.0,
+                "true_per_false": round(true_ground / false_ground, 2) if false_ground else 0.0,
+                "foreign_claims": foreign_total,
+                "own_failing_claims": own_total,
+            }
+        )
+    return {"candidates": rows}
 
 
 if __name__ == "__main__":  # pragma: no cover

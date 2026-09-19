@@ -83,7 +83,32 @@ _TOOL_RE = re.compile(
     r"|`(?:" + "|".join(_TOOL_AMBIGUOUS) + r")`"
     r"|\b(?:" + "|".join(_TOOL_DISTINCT) + r")\b"
 )
-_CMD_RE = re.compile(r"`([^`\n]{3,200})`")
+#: A backticked span. The length bounds are applied to the CAPTURED CONTENT in `_claims`, not
+#: baked into the pattern, and that separation is load-bearing rather than stylistic.
+#:
+#: This read `` r"`([^`\n]{3,200})`" `` and silently mis-paired its own delimiters. A span
+#: shorter than three characters cannot satisfy `{3,200}`, so the match starting at its opening
+#: backtick fails; the scan then resumes from that span's CLOSING backtick and pairs it with the
+#: NEXT span's OPENING one, capturing the ordinary prose in between. `` `ps` showing `nats pub
+#: ...` `` yields the claim `showing`; `` (`/`) to `/dashboard` `` yields `) to`; `` `#N` refs in
+#: `tasks_bulk_update` `` yields `refs in`. Measured over the live corpus 2026-09-19: 56
+#: fabricated spans across 36 blocks, producing 22 of the 65 non-path groundedness findings.
+#:
+#: It fails in both directions at once, which is why the rate alone never showed it. The
+#: fabricated span is graded against the event log and reported as a hallucinated identifier --
+#: a claim no model ever asserted, the same category error `strip_scribe_markers` exists to
+#: prevent -- while the 30 REAL spans it swallowed were never graded at all. A short span is not
+#: rare in a digest: `ps`, `uv`, `id`, `/`, `v1`, `#N` are exactly the tokens prose backticks.
+#:
+#: Matching `[^`\n]*` pairs delimiters the way a reader does, and the floor then does the job it
+#: was written for -- keeping a joining word from carrying a claim -- on the content rather than
+#: on the pairing.
+_CMD_RE = re.compile(r"`([^`\n]*)`")
+#: A backticked span shorter than this carries no claim: `in`, `to`, `of`. Unchanged in value
+#: from the bound that used to live in `_CMD_RE`; only where it applies has changed.
+MIN_SPAN_CHARS = 3
+#: And one longer than this is a code block quoted inline, not a claim about a single thing.
+MAX_SPAN_CHARS = 200
 
 #: Claim classes for a backticked span. The split IS vikunja#848: the gate used to call every
 #: one of these a `command` and demand a match in `rollup.commands`, so the ordinary
@@ -94,6 +119,20 @@ _CMD_RE = re.compile(r"`([^`\n]{3,200})`")
 CLAIM_COMMAND = "command"
 CLAIM_CODE = "code"
 CLAIM_IDENTIFIER = "identifier"
+#: The three claim classes that are not backticked spans. Named alongside the others because
+#: every finding now carries its kind as data -- see `Finding.kind`.
+CLAIM_PATH = "path"
+CLAIM_TOOL = "tool"
+CLAIM_TICKET = "ticket"
+#: Every kind a groundedness finding can carry, in the order `check_groundedness` tests them.
+CLAIM_KINDS = (
+    CLAIM_PATH,
+    CLAIM_TOOL,
+    CLAIM_TICKET,
+    CLAIM_COMMAND,
+    CLAIM_CODE,
+    CLAIM_IDENTIFIER,
+)
 
 _SHELL_META = ("|", "&&", "||", ">", "<", ";", "$(")
 _CODE_CHARS = frozenset("()[]{}=")
@@ -154,7 +193,30 @@ _BINARIES = frozenset(
 #: 3+ characters, so that joining words (`in`, `to`, `of`) never carry a claim on their own.
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{2,}|\d{2,}")
 #: `417` written as an internal id rather than as a `#` identifier. See `_ticket_detail`.
-_ID_CONTEXT = r'(?:"id"\s*:\s*|\bid\s*[:=]?\s*|/)'
+#:
+#: **This selects a MESSAGE, never a verdict.** Every branch of `_ticket_detail` returns a
+#: finding; the only question is whether it names the conflation or says "not in the event log".
+#: Widening it therefore cannot change the failure rate, and the rate was measured unchanged
+#: either side of this edit.
+#:
+#: It was too narrow to earn its keep. `\bid` requires a word boundary before `id`, and the
+#: form the corpus actually holds is `task_id=541` -- where `id` is preceded by an underscore,
+#: which is a word character, so the boundary fails. Measured over the live corpus 2026-09-19:
+#: **31 of 62 ticket findings** were true id conflations that fell through to the generic
+#: message, against 30 the pattern caught. The two commonest missed forms are the MCP argument
+#: digest (`task_id=541`, `"target": "930"`) and the id/identifier tables agents write into
+#: their own notes (`| **378 / #359** |`).
+#:
+#: Verified against the live tracker rather than inferred: id 541 is identifier #493, and id
+#: 930 is #847. A digest writing `#541` for id 541 names a real but unrelated ticket, which is
+#: the whole reason this message exists.
+_ID_CONTEXT = (
+    r'(?:"id"\s*:\s*'  # {"id": 417}
+    r"|\bid\s*[:=]?\s*"  # id 417, id: 417, id=417
+    r'|\w*_id\s*[:=]\s*"?'  # task_id=417, "task_id": "417"  <- the commonest miss
+    r'|"target"\s*:\s*"'  # {"target": "417"} in an MCP event's args digest
+    r"|/)"  # .../tasks/417
+)
 
 
 def classify_span(span: str) -> str:
@@ -183,8 +245,38 @@ def classify_span(span: str) -> str:
 
 @dataclass
 class Finding:
+    """One thing wrong with a digest, and -- for a groundedness finding -- what it was about.
+
+    `kind` and `claim` are **data the gate already had** at the moment it rejected something,
+    recorded rather than re-derived. Before they existed the only record of either was the
+    English prose in `detail`, and `qc_survey` recovered path claims by matching a shared
+    prefix constant and `literal_eval`-ing the tail.
+
+    That worked for exactly one route and could not be extended to the others, which is what
+    this build ran into first. `_ticket_detail` has two message shapes and the more
+    interesting one -- the id-vs-identifier conflation, **30 of 62 ticket findings on the live
+    corpus** -- puts the claim in the *middle* of a sentence:
+
+        ticket '#480' is not in the event log, which contains '480' only as an internal id ...
+
+    A prefix constant cannot recover that. Extending the instrument by prefix-matching would
+    have meant a regex over prose for every route, kept in sync by hand with the sentences the
+    gate happens to write -- a second implementation of the gate's own classification, which is
+    precisely the drift `qc_survey.rejected_paths`' docstring exists to forbid.
+
+    So the survey still reads verdicts "back out of the gate's own output rather than
+    recomputed"; it just reads a field instead of parsing a sentence. `detail` is unchanged and
+    stays the human-readable line -- these are additive, and `Report.to_dict` gains two keys
+    rather than changing any.
+    """
+
     check: str
     detail: str
+    #: Which claim class this is about: one of `CLAIM_KINDS`. Empty for non-groundedness
+    #: findings, which are not about a claim at all.
+    kind: str = ""
+    #: The claim itself, exactly as the gate tested it -- already normalized and lowercased.
+    claim: str = ""
 
 
 @dataclass
@@ -202,8 +294,8 @@ class Report:
     def ok(self) -> bool:
         return not self.findings
 
-    def add(self, check: str, detail: str) -> None:
-        self.findings.append(Finding(check, detail))
+    def add(self, check: str, detail: str, *, kind: str = "", claim: str = "") -> None:
+        self.findings.append(Finding(check, detail, kind=kind, claim=claim))
 
     def to_dict(self) -> dict:
         return {
@@ -213,7 +305,10 @@ class Report:
             "events_total": self.events_total,
             "events_referenced": self.events_referenced,
             "coverage": round(self.coverage, 4),
-            "findings": [{"check": f.check, "detail": f.detail} for f in self.findings],
+            "findings": [
+                {"check": f.check, "detail": f.detail, "kind": f.kind, "claim": f.claim}
+                for f in self.findings
+            ],
         }
 
 
@@ -289,6 +384,8 @@ def _claims(text: str) -> dict[str, set[str]]:
     }
     for m in _CMD_RE.finditer(text):
         span = m.group(1)
+        if not MIN_SPAN_CHARS <= len(span) <= MAX_SPAN_CHARS:
+            continue
         out[classify_span(span)].add(_norm(span))
     return out
 
@@ -304,10 +401,13 @@ def _in_category(claim: str, allowed: set[str]) -> bool:
     return any(claim in term or term in claim for term in allowed)
 
 
-#: Prefix of a path-claim groundedness finding. A constant rather than an inline f-string so
-#: `qc_survey` can recover the claim from the finding it produced, instead of re-deriving
-#: which claims the gate rejected. A second implementation of that one rule is precisely what
-#: made the two pre-build measurements of vikunja#876 disagree 16-fold.
+#: Prefix of a path-claim groundedness finding.
+#:
+#: It no longer carries the recovery — `Finding.claim` does, because the prefix trick could not
+#: be extended to the routes that needed it next. It is still a constant rather than an inline
+#: f-string, and `qc_survey` still asserts against it, because the *wording* of this finding is
+#: read by humans triaging a digest and a silent rewording is the kind of drift that made the
+#: two pre-build measurements of vikunja#876 disagree 16-fold.
 PATH_UNGROUNDED = "path not in the event log: "
 
 
@@ -318,15 +418,15 @@ MIN_PREFIX_SEGMENTS = 2
 #: And its relative half must be more than a bare filename -- see `composition_split`. Both
 #: floors are derived from `qc_survey.cross_session_probe`, which measures how often each
 #: candidate grounds a path harvested from a *different* session's digest — a claim the model
-#: here demonstrably was not shown. Measured 2026-09-17 over the live corpus (470 blocks), with
-#: 18,564 such controls against the corpus's own 880 failing claims:
+#: here demonstrably was not shown. Re-measured 2026-09-19 over the live corpus (494 blocks),
+#: with 19,495 such controls against the corpus's own 899 failing claims:
 #:
 #:     prefix  tail   falsely grounded   truly grounded
-#:          2     1     239   (1.3%)       774  (87.9%)
-#:          2     2      70   (0.4%)       550  (62.5%)
-#:          2     3      47   (0.2%)       315  (35.8%)
-#:          1     2      90   (0.5%)       551  (62.6%)
-#:          3     2      53   (0.3%)       517  (58.8%)
+#:          2     1     262   (1.3%)       790  (87.9%)
+#:          2     2      86   (0.4%)       562  (62.5%)
+#:          2     3      49   (0.2%)       323  (35.9%)
+#:          1     2      98   (0.5%)       563  (62.6%)
+#:          3     2      61   (0.3%)       528  (58.7%)
 #:
 #: `min_tail=2` is where the false-ground rate collapses — 3.4x lower than at 1 — and the step
 #: after it buys almost nothing for another 27 points of true claims. A tail of one segment is
@@ -335,6 +435,10 @@ MIN_PREFIX_SEGMENTS = 2
 #: dominates 1 (lower false-ground at the same true-ground), and 3 buys 0.1% for 3.7 points.
 #: Neither floor was chosen against the corpus it judges. Re-derive with
 #: `python -m scribe.qc_survey --probe`; the corpus is live, so the figures drift slightly.
+#:
+#: The shape is unchanged from the 2026-09-17 snapshot at 470 blocks and every conclusion above
+#: still holds -- which is the point of re-stating it rather than trusting it. Each absolute
+#: count moved, and a table that reads as measured has to have been.
 MIN_TAIL_SEGMENTS = 2
 
 
@@ -351,31 +455,82 @@ def path_segments(claim: str) -> list[str]:
 #: The bare filename case is the corpus's largest remaining shape by far -- a repository
 #: directory the log names plus `changelog.md`, `agents.md`, `pyproject.toml`. Admitting it on
 #: presence alone means any directory pairs with any common filename, which the probe prices at
-#: 1.3% false-ground for 224 true claims recovered. Requiring adjacency instead recovers 104
-#: for 21, measured over the same 2026-09-17 snapshot — 330 own claims and 18,494 controls that
+#: 1.3% false-ground for 224 true claims recovered. Requiring adjacency instead recovers 107
+#: for 25, re-measured 2026-09-19 over 494 blocks — 337 own claims and 19,409 controls that
 #: composition alone still fails:
 #:
-#:     window   falsely grounded   truly grounded
-#:         40       8   (0.04%)      47  (14.2%)
-#:         80      14   (0.08%)      95  (28.8%)
-#:        120      21   (0.11%)     104  (31.5%)
-#:        200      35   (0.19%)     111  (33.6%)
+#:     window   falsely grounded   truly grounded   true per false
+#:         40      12   (0.06%)      48  (14.2%)             4.0
+#:         80      20   (0.10%)      98  (29.1%)             4.9
+#:        120      25   (0.13%)     107  (31.8%)             4.3
+#:        200      40   (0.21%)     114  (33.8%)             2.9
+#:        400      51   (0.26%)     133  (39.5%)             2.6
 #:
-#: 120 is 5.0 true claims per false one against the blanket rule's 1.3, and widening to 200
-#: buys 7 more true claims for 14 more false. It is not coincidence that this lands on the same
+#: 120 is 4.3 true claims per false one against the blanket rule's 1.3, and widening to 200
+#: buys 7 more true claims for 15 more false. It is not coincidence that this lands on the same
 #: number as `CO_OCCURRENCE_WINDOW` -- it is the same corpus and the same question.
+#:
+#: **80 has the better pooled ratio here, and 120 is kept anyway — on the margin, not the
+#: pool.** The step from 80 to 120 buys 9 true claims for 5 false, which is 1.8 and still above
+#: the 1.3 this gate already declined as too weak; 80 scores higher only because it averages in
+#: the cheap first 80 characters, where the evidence is densest. That was equally true of the
+#: 2026-09-17 snapshot (80 scored 6.8 against 120's 5.0) and 120 was chosen then for the same
+#: reason. Recorded because the ranking invites the opposite conclusion at a glance.
 ADJACENCY_WINDOW = 120
 
 
-def _adjacent(prefix: str, tail: str, corpus: str, window: int) -> bool:
+#: How much of the corpus `_adjacent` will scan for one claim, in characters. `0` disables the
+#: cap. vikunja#889: `_adjacent` walks every occurrence of `prefix`, and `composition_split`
+#: calls it for every cut point of every path claim, so the work is quadratic in corpus size
+#: crossed with a claim's segment count.
+#:
+#: **The cap is on LENGTH, not on occurrences, and the difference is the whole finding.** An
+#: iteration cap -- "bail after N hits of `prefix`" -- makes the verdict depend on where in the
+#: log the evidence happens to sit: a true composition whose directory is named once, late,
+#: after N earlier mentions, starts failing. That is a NEW false positive in a gate built to
+#: remove them, which is why #889 was deferred rather than patched in one line. A length cap
+#: truncates the same prefix of the same corpus on every run, so the verdict is a function of
+#: the corpus and the claim alone -- order-independent, and reproducible.
+#:
+#: It is not free, and the cost is stated rather than hidden: evidence sitting beyond the cap
+#: is not seen. So the value is DERIVED, by the same method as the floors above -- sweep it and
+#: keep the tightest one that costs nothing. Measured 2026-09-19 over the live corpus, 494
+#: blocks, against the uncapped rule:
+#:
+#:     cap          path claims rejected   verdict changes vs uncapped
+#:     uncapped                     162       -
+#:     1,048,576                    162       0
+#:       524,288                    162       0
+#:       262,144                    162       0
+#:       131,072                    168       6
+#:        65,536                    187      25
+#:
+#: 262,144 is the tightest cap that changes no verdict; below it the cap starts failing true
+#: compositions, 6 of them at half the value and 25 at a quarter.
+#:
+#: Note what it does NOT say. 11 of the 494 blocks (2.2%) have a corpus longer than this --
+#: `grounding_text()` runs to 414,187 characters at the longest, 197,432 at p95, 68,082 at the
+#: median -- so the cap really does truncate on real logs, and the verdicts are identical
+#: anyway. A cap "above the largest corpus" would have been 524,288 and would have bounded
+#: nothing that matters; this one bites and is still free, which is the property worth having.
+#: Re-derive by sweeping `cap` in `composition_split`; the corpus is live and grows.
+ADJACENCY_SCAN_CAP = 262_144
+
+
+def _adjacent(prefix: str, tail: str, corpus: str, window: int, *, cap: int = 0) -> bool:
     """Whether `tail` follows some occurrence of `prefix` within `window` characters.
 
     Every occurrence is tried, not just the first: a directory named a hundred times in a log
     is named once next to the file in question, and stopping at the first would turn a true
-    composition into a coin flip on ordering.
+    composition into a coin flip on ordering. `cap` bounds the corpus scanned, never the number
+    of occurrences visited — see `ADJACENCY_SCAN_CAP`.
     """
     if window <= 0:
         return False
+    if cap:
+        # Truncate the corpus, not the loop. The window is kept whole past the cut so a
+        # composition straddling the boundary is judged the same way as one before it.
+        corpus = corpus[: cap + window]
     i = corpus.find(prefix)
     while i != -1:
         end = i + len(prefix)
@@ -392,6 +547,7 @@ def composition_split(
     min_prefix: int = MIN_PREFIX_SEGMENTS,
     min_tail: int = MIN_TAIL_SEGMENTS,
     window: int = ADJACENCY_WINDOW,
+    cap: int = ADJACENCY_SCAN_CAP,
 ) -> tuple[str, str] | None:
     """Split `claim` into a directory the corpus names and a relative tail it also names.
 
@@ -409,7 +565,7 @@ def composition_split(
         tail = "/".join(segs[cut:])
         if prefix not in corpus or tail not in corpus:
             continue
-        if len(segs) - cut >= min_tail or _adjacent(prefix, tail, corpus, window):
+        if len(segs) - cut >= min_tail or _adjacent(prefix, tail, corpus, window, cap=cap):
             return prefix, tail
     return None
 
@@ -436,8 +592,8 @@ def _tilde_anchored(claim: str, allowed_paths: set[str], corpus: str) -> bool:
 
     The `MIN_TAIL_SEGMENTS` floor is what keeps it honest: the re-anchored remainder must still
     be at least that long, so `~/audit.md` is never a candidate. Measured over the same controls
-    as the segment floors, this grounds 68 of the 226 claims left after composition (30.1%) and
-    15 of 18,473 foreign claims (0.08%).
+    as the segment floors and re-run 2026-09-19 at 494 blocks, this grounds 68 of the 230 claims
+    left after composition (29.6%) and 12 of 19,384 foreign claims (0.06%).
     """
     if claim.startswith("~"):
         return False
@@ -473,12 +629,11 @@ def path_grounded(claim: str, allowed_paths: set[str], corpus: str) -> bool:
     consults only the derived rollup set; the corpus route was **exact substring**. So a true
     claim that *composes* -- a directory the log names joined to a relative path the log also
     names -- was neither literal and graded as a hallucination. Between them the three routes
-    clear 722 of the 880 path findings on the live corpus (vikunja#876), and none is a loosening
-    in kind: both halves
+    clear 737 of the 899 path findings on the live corpus (vikunja#876, re-measured 2026-09-19
+    at 494 blocks), and none is a loosening in kind: both halves
     are things the model really was shown, and the floors keep a short common tail (`/src/`,
-    `readme.md`) from excusing a claim on its own. Across the live corpus it takes block failure
-    from 39.6% to 21.5% and path findings from 880 to 158, while every one of the 26 claims
-    absent from their own log still fails.
+    `readme.md`) from excusing a claim on its own. Path findings fall from 899 to 162, while
+    every one of the 26 claims absent from their own log still fails.
 
     Extracted from `check_groundedness` so that the survey which measures this gate and the
     gate itself cannot drift: every tolerance lives here, and there is exactly one of it.
@@ -570,6 +725,28 @@ def _tokens_co_occur(claim: str, corpus: str, *, window: int = CO_OCCURRENCE_WIN
     return False
 
 
+def span_grounded(claim: str, kind: str, allowed: dict[str, set[str]], corpus: str) -> bool:
+    """Whether a backticked span — `command`, `code` or `identifier` — is grounded.
+
+    Extracted from `check_groundedness` for the reason `path_grounded` was: the survey that
+    measures this gate has to be able to ask the gate's own question, and a second
+    implementation of it is how two measurements of the same corpus came to disagree 16-fold.
+
+    The rule is unchanged by this build and that is a measured decision rather than an
+    omission. The one tolerance the residual findings suggest — testing the claim with its
+    wrapping punctuation removed, so `_is_loopback()` is grounded by a log holding
+    `_is_loopback` — is priced by `qc_survey.span_trim_probe` at **1.2 true claims per false
+    one at best**, against the 5.0 that bought `ADJACENCY_WINDOW` and the 1.3 that was rejected
+    as too weak in #876. It does not earn its place, so it is not here.
+
+    What these routes actually needed was `_CMD_RE`: its delimiter mis-pairing was manufacturing
+    22 of their 65 findings out of prose no model ever wrote.
+    """
+    if kind == CLAIM_COMMAND and _in_category(claim, allowed["commands"]):
+        return True
+    return claim in corpus or _tokens_co_occur(claim, corpus)
+
+
 def _ticket_in_corpus(claim: str, corpus: str) -> bool:
     """Is this exact `#N` present, as a whole reference?
 
@@ -620,11 +797,16 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
 
     for claim in sorted(claimed["paths"]):
         if not path_grounded(claim, allowed["paths"], corpus):
-            report.add("groundedness", f"{PATH_UNGROUNDED}{claim!r}")
+            report.add("groundedness", f"{PATH_UNGROUNDED}{claim!r}", kind=CLAIM_PATH, claim=claim)
 
     for claim in sorted(claimed["tools"]):
         if not _in_category(claim, allowed["tools"]) and claim not in corpus:
-            report.add("groundedness", f"tool not in the event log: {claim!r}")
+            report.add(
+                "groundedness",
+                f"tool not in the event log: {claim!r}",
+                kind=CLAIM_TOOL,
+                claim=claim,
+            )
 
     # Exact, not containment: `#41` must not be excused by a log that mentions `#417`. The
     # `#` is part of the identifier, so the corpus check is for the sigil form too -- which
@@ -632,23 +814,23 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     # `#417` (written only as `id 417`, and false).
     for claim in sorted(claimed["tickets"]):
         if claim not in allowed["tickets"] and not _ticket_in_corpus(claim, corpus):
-            report.add("groundedness", _ticket_detail(claim, corpus))
+            report.add(
+                "groundedness", _ticket_detail(claim, corpus), kind=CLAIM_TICKET, claim=claim
+            )
 
-    for claim in sorted(claimed[CLAIM_COMMAND]):
-        if (
-            not _in_category(claim, allowed["commands"])
-            and claim not in corpus
-            and not _tokens_co_occur(claim, corpus)
-        ):
-            report.add("groundedness", f"command not in the event log: {claim!r}")
-
-    # No category set exists for these, and none should be invented: there is no authoritative
-    # list of the statuses, model names, config keys and field names a session touched. The
-    # corpus is the only honest ground truth, and it is the right one.
-    for kind in (CLAIM_CODE, CLAIM_IDENTIFIER):
+    # No category set exists for `code` or `identifier`, and none should be invented: there is
+    # no authoritative list of the statuses, model names, config keys and field names a session
+    # touched. The corpus is the only honest ground truth, and it is the right one. `command`
+    # has one and consults it first; otherwise all three share `span_grounded`.
+    for kind in (CLAIM_COMMAND, CLAIM_CODE, CLAIM_IDENTIFIER):
         for claim in sorted(claimed[kind]):
-            if claim not in corpus and not _tokens_co_occur(claim, corpus):
-                report.add("groundedness", f"{kind} not in the event log: {claim!r}")
+            if not span_grounded(claim, kind, allowed, corpus):
+                report.add(
+                    "groundedness",
+                    f"{kind} not in the event log: {claim!r}",
+                    kind=kind,
+                    claim=claim,
+                )
 
 
 def check_event_coverage(

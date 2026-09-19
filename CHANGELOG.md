@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-19
+
+**Minor.** The QC gate's non-path routes, measured rather than tuned (vikunja#888), and
+#889's deferred scan cap landed in the same pass because it invalidates the same tables. No
+schema change (`SCHEMA_VERSION` stays at 2), no exit code moves, no digest or event log is
+rewritten.
+
+Block failure falls from **21.9% to 20.0%** over the live corpus and the 26-claim control set
+still fails — both, or neither would mean anything.
+
+### Fixed
+
+- **`_CMD_RE` mis-paired its own delimiters, manufacturing claims out of prose** (vikunja#888).
+  The pattern was `` r"`([^`\n]{3,200})`" ``. A backticked span shorter than three characters
+  cannot satisfy `{3,200}`, so the match starting at its opening backtick failed, the scan
+  resumed at that span's *closing* backtick, and it paired with the *next* span's *opening*
+  one — capturing the ordinary prose between them. `` `ps` showing `nats pub ...` `` yielded
+  the claim `showing`; `` (`/`) to `/dashboard` `` yielded `) to`; `` `uv` in dependabot.yml
+  instead of `pip` `` yielded `in dependabot.yml instead of`.
+
+  It failed in both directions at once, which is why the failure rate never showed it: the
+  fabricated span was graded and reported as a hallucinated identifier — **a claim no model
+  ever asserted**, the same category error `strip_scribe_markers` exists to prevent — while the
+  real span that swallowed it was never graded at all. Measured over 494 blocks: 56 fabricated
+  spans across 36 blocks and 30 real spans dropped, together producing **22 of the 65 non-path
+  groundedness findings**. The length bound now applies to the captured content, where it does
+  the job it was written for.
+
+- **The id-conflation finding now names the conflation in the cases it was missing**
+  (vikunja#888). `_ID_CONTEXT`'s `\bid` requires a word boundary before `id`, and the form the
+  corpus actually holds is `task_id=541` — where `id` follows an underscore, so the boundary
+  fails. 31 of 62 ticket findings were true id conflations falling through to the generic
+  message. **This selects a message and never a verdict**; both branches fail, and the rate is
+  identical either side of it.
+
+### Added
+
+- **Every groundedness finding carries its claim kind as data** (`Finding.kind`,
+  `Finding.claim`). `Report.to_dict()` gains two keys and changes none. The prefix-and-`repr`
+  recovery `qc_survey` used could not be extended past the path route: `_ticket_detail` writes
+  two sentences and the interesting one puts the claim *mid-sentence*, so attributing tickets
+  by prefix would have meant a regex over prose per route — a second implementation of the
+  gate's own classification. The survey still reads verdicts back out of the gate's output
+  rather than recomputing them; it reads a field instead of parsing a sentence, and
+  `gate_disagreements` keeps its original meaning and its original scope.
+
+- **`qc-survey` attributes every finding, not just path ones.** It classified 162 of 289 and
+  counted the other 127 without naming a cause for any. New buckets: `id-conflation`,
+  `coincidental-number` for tickets; `desync-artefact`, `punctuation-wrapped`, `single-token`,
+  `token-spread`, `token-missing` for the backticked-span routes. `findings_unattributed` is
+  reported rather than absorbed, and is 0. `--kind` scopes `--bucket`, which keeps
+  `--bucket absent` meaning the 26-claim path control set and nothing else.
+
+- **`qc-survey --probe-spans`** prices the one tolerance the residual findings suggest —
+  testing a claim with its wrapping punctuation trimmed, so `_is_loopback()` is grounded by a
+  log holding `_is_loopback`. It is **committed in order to record a rejection**: 1.2 true
+  claims per false one at its very tightest, against the 5.0 that bought `ADJACENCY_WINDOW` and
+  the 1.3 #876 already declined as too weak. The span routes ship unchanged.
+
+- **`ADJACENCY_SCAN_CAP`** (vikunja#889) bounds the corpus `_adjacent` scans. **A length cap,
+  not an iteration cap**, and that is the whole finding: bailing after N occurrences makes the
+  verdict depend on where in the log the evidence sits, so a true composition whose directory
+  is named late starts failing — a new false positive in a gate built to remove them. Derived
+  by sweep: 262,144 is the tightest value that changes no verdict (131,072 costs 6 true claims,
+  65,536 costs 25), and it is verdict-neutral on **both** sides — 0 of 19,495 foreign controls
+  and 0 of 899 own claims change.
+
+### Changed
+
+- **All three derived tables in `qc.py` re-measured** (`MIN_TAIL_SEGMENTS`, `ADJACENCY_WINDOW`,
+  `_tilde_anchored`), at 494 blocks and 19,495 cross-session controls. They had already drifted
+  before the cap touched them — false-ground on the shipped configuration read 0.49% when #876
+  recorded it and 0.57% now. Every conclusion still holds; every absolute count moved. A stale
+  measured number in a docstring is worse than none, because it reads as evidence.
+
+### Not changed, deliberately
+
+- **The ticket route is not widened.** #888 hypothesised the #876 shape — a true claim whose
+  evidence is in the log in a form the exact test cannot see. Measured, it is the opposite:
+  **61 of 62 ticket findings are the gate working**, catching a digest that wrote `#N` for what
+  the log holds only as an internal id. Verified against the live tracker rather than inferred
+  — id 541 is identifier #493, id 930 is #847, and `#73` was written for a Woodpecker
+  `pipeline_id=73`. Each names a real but unrelated ticket.
+
+- **The identifier route is neither widened nor narrowed.** It needed its parser fixed, not its
+  tolerance: the mis-pairing above accounted for 34% of its findings. The residual 43 were read
+  individually and are mostly true — a UUID absent from its log, a tool name that does not
+  exist, a path written with a typo.
+
+- **Backticked paths keep being graded by the span routes.** `_PATH_RE` requires whitespace
+  before a claim, so 693 path-shaped backticked spans never reach the path route's measured
+  tolerance. Rerouting them was measured and is **net negative** — it removes 1 finding and
+  adds 5. Recorded so it is not rediscovered as an obvious fix.
+
 ## [0.8.1] — 2026-09-19
 
 **Patch.** Two correctness fixes to what scribe says about itself, and the test that

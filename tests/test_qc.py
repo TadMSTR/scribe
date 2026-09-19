@@ -19,16 +19,23 @@ from scribe.extract import extract
 from scribe.extract.models import EventLog, Turn
 from scribe.qc import (
     _PATH_RE,
+    CLAIM_CODE,
+    CLAIM_COMMAND,
+    CLAIM_IDENTIFIER,
     DEFAULT_COVERAGE_FLOOR,
     Report,
+    _claims,
+    _ticket_detail,
     _tokens_co_occur,
     check_digest,
     check_freshness,
     check_groundedness,
     classify_span,
+    composition_split,
     grounding_terms,
     path_grounded,
     path_literal,
+    span_grounded,
     strip_scribe_markers,
 )
 from scribe.qc_cli import main as qc_main
@@ -894,3 +901,157 @@ def test_the_control_set_still_fails(claim: str) -> None:
         "the files were service.env, editor-agent.yml, host-overview.json and index.md",
     )
     assert not _grounded(claim, log)
+
+
+# --- vikunja#888 / #889 -------------------------------------------------------------------
+
+
+def test_a_short_backticked_span_does_not_desync_the_ones_after_it() -> None:
+    """The delimiter-pairing defect, as the corpus actually produced it.
+
+    `_CMD_RE` used to be `` r"`([^`\n]{3,200})`" ``. A span under three characters cannot match,
+    so the scan resumed at that span's CLOSING backtick and paired it with the NEXT span's
+    OPENING one -- capturing the prose between them as a claim. It fails in both directions at
+    once: a claim no model asserted is invented AND the real span that swallowed it is never
+    graded at all, so the gate reports a hallucinated identifier while missing a true one.
+
+    Measured over the live corpus 2026-09-19: 56 fabricated spans across 36 blocks, producing
+    22 of 65 non-path groundedness findings. Every prose fragment in the residual traced here.
+    """
+    text = "Verified via `ps` showing `nats pub --password x` on the host."
+    spans = _claims(text)
+    everything = spans[CLAIM_COMMAND] | spans[CLAIM_CODE] | spans[CLAIM_IDENTIFIER]
+
+    # The prose between the two spans is not a claim about anything.
+    assert "showing" not in everything
+    # And the span the defect used to swallow is graded.
+    assert "nats pub --password x" in everything
+
+
+@pytest.mark.parametrize(
+    "text,swallowed",
+    [
+        ("used `uv` in dependabot.yml instead of `pip`", "in dependabot.yml instead of"),
+        ("the public `id` and resolve internally to `_id`", "and resolve internally to"),
+        ("redirect (`/`) to `/dashboard`", ") to"),
+        ("resolve `#N` refs in `tasks_bulk_update`", "refs in"),
+    ],
+)
+def test_no_prose_fragment_is_ever_read_as_a_claim(text: str, swallowed: str) -> None:
+    """The four shapes the live corpus produced, each from a real digest."""
+    spans = _claims(text)
+    everything = spans[CLAIM_COMMAND] | spans[CLAIM_CODE] | spans[CLAIM_IDENTIFIER]
+    assert swallowed not in everything
+
+
+def test_the_scan_cap_is_on_length_so_late_evidence_still_grounds() -> None:
+    """vikunja#889's cap must not make the verdict depend on WHERE the evidence sits.
+
+    This is the test the deferred "obvious fix" would fail. An iteration cap -- bail after N
+    occurrences of `prefix` -- turns a true composition into a coin flip on ordering: here the
+    directory is named 500 times before the one mention that sits beside the file, so any
+    iteration cap below 500 rejects a claim the uncapped rule accepts. A length cap truncates
+    the same prefix of the same corpus every run, so the verdict is a function of the corpus
+    and the claim alone.
+    """
+    prefix = "/home/ted/repos/scribe"
+    # A ONE-segment tail, so `MIN_TAIL_SEGMENTS` cannot admit the claim and `_adjacent` is the
+    # only route left. With two segments the floor grounds it outright and the cap is never
+    # consulted -- a version of this test written that way passes on an iteration cap too.
+    claim = f"{prefix}/notes.md"
+    decoys = f"{prefix} mentioned alone. " * 500
+    corpus = (decoys + f"cd {prefix} && cat notes.md").lower()
+
+    assert composition_split(claim, corpus) is not None
+    # And the cap really is a length: cut the corpus short of where the evidence sits and the
+    # claim stops grounding, which is what proves the parameter is wired in at all.
+    assert composition_split(claim, corpus, cap=100) is None
+
+
+def test_the_scan_cap_keeps_the_adjacency_window_whole_past_the_cut() -> None:
+    """A composition straddling the cap boundary is judged like one before it, not truncated."""
+    corpus = ("x" * 4000 + " /home/ted/repos/scribe notes.md").lower()
+    claim = "/home/ted/repos/scribe/notes.md"
+    assert composition_split(claim, corpus, cap=4005) is not None
+
+
+def test_a_ticket_written_for_an_mcp_argument_id_names_the_conflation() -> None:
+    """The commonest live shape, and the one `\\bid` could not see.
+
+    `task_id=541` has a word character before `id`, so the word boundary fails and 31 of 62
+    live ticket findings fell through to the generic message. Verified against the tracker:
+    id 541 is identifier #493, so `#541` names a real but unrelated ticket -- exactly what the
+    message exists to say. This selects a MESSAGE and never a verdict; both branches fail.
+    """
+    corpus = '{"tool": "vikunja_task_get", "args_digest": "task_id=541", "ok": true}'
+    assert "internal id" in _ticket_detail("#541", corpus)
+    assert "internal id" in _ticket_detail("#930", '{"target": "930", "kind": "mcp"}')
+    # A number that is nowhere still fails, with the plain message.
+    assert "internal id" not in _ticket_detail("#4242", corpus)
+
+
+def test_span_routes_do_not_admit_a_claim_on_trimmed_punctuation() -> None:
+    """The one tolerance the residual suggested, priced and declined.
+
+    `qc_survey.span_trim_probe` puts it at 1.2 true claims per false one at its very tightest,
+    against the 5.0 that bought `ADJACENCY_WINDOW` and the 1.3 #876 rejected as too weak. If a
+    future change admits it, this goes red and the probe is the argument to re-run.
+    """
+    allowed = {"commands": set(), "paths": set(), "tools": set(), "tickets": set()}
+    corpus = "the helper _is_loopback returns true for 127.0.0.1"
+    assert not span_grounded("_is_loopback()", CLAIM_CODE, allowed, corpus)
+
+
+CONTROL_CLAIMS = (
+    "/home/ted/.claude/comms/artifacts/audit-requests/never-ran/request.md",
+    "~/repos/personal/imaginary-tool/src/imaginary/main.py",
+    "/opt/appdata/nonexistent-service/config.yml",
+    "/var/log/fabricated/output.log",
+)
+
+
+@pytest.mark.parametrize("claim", CONTROL_CLAIMS)
+def test_a_claim_absent_from_its_log_fails_every_route(claim: str) -> None:
+    """The control set, in miniature. **Lowering the failure rate is not the goal on its own.**
+
+    The live corpus carries 26 path claims whose basename appears nowhere in their own event
+    log (`qc-survey --bucket absent`, still exactly 26 after this build). They are what says a
+    tolerance went too far, and they cannot be pinned in-repo by name because the corpus is not
+    in the repo -- so the property is pinned instead, against a log that plausibly *could* have
+    held them.
+
+    vikunja#848 and #868 are both cases where a gate was "fixed" into uselessness, and a build
+    that only showed the rate falling would not have noticed. Every route has to reject these:
+    the derived category set, verbatim corpus presence, composition, and `~` re-anchoring.
+    """
+    corpus = (
+        "read /home/ted/repos/personal/scribe/src/scribe/qc.py and "
+        "~/repos/personal/scribe/tests/test_qc.py; wrote /home/ted/.claude/comms/artifacts/"
+        "build-plans/real-build-2026-09/plan.md; ran pytest -q in /home/ted/repos/personal/scribe"
+    ).lower()
+    allowed = {
+        "/home/ted/repos/personal/scribe/src/scribe/qc.py",
+        "~/repos/personal/scribe/tests/test_qc.py",
+    }
+    assert not path_grounded(claim, allowed, corpus)
+
+
+def test_the_control_claims_are_rejected_for_absence_and_not_by_a_broken_predicate() -> None:
+    """The other half: a predicate that rejects everything would pass the test above.
+
+    A control set is only evidence if the same corpus grounds a true claim -- otherwise
+    `path_grounded` could be `return False` and every assertion still hold. This is the
+    positive half that makes the negative one mean something.
+    """
+    corpus = (
+        "read /home/ted/repos/personal/scribe/src/scribe/qc.py and "
+        "~/repos/personal/scribe/tests/test_qc.py; wrote /home/ted/.claude/comms/artifacts/"
+        "build-plans/real-build-2026-09/plan.md; ran pytest -q in /home/ted/repos/personal/scribe"
+    ).lower()
+    allowed = {"/home/ted/repos/personal/scribe/src/scribe/qc.py"}
+    assert path_grounded("/home/ted/repos/personal/scribe/src/scribe/qc.py", allowed, corpus)
+    assert path_grounded(
+        "/home/ted/.claude/comms/artifacts/build-plans/real-build-2026-09/plan.md",
+        allowed,
+        corpus,
+    )
