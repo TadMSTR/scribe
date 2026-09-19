@@ -82,6 +82,19 @@ still fails — both, or neither would mean anything.
   recorded it and 0.57% now. Every conclusion still holds; every absolute count moved. A stale
   measured number in a docstring is worse than none, because it reads as evidence.
 
+### Security
+
+- **`_ID_CONTEXT` is linear, and its first draft in this branch was not.** Caught by the
+  pre-audit baseline. Opening the pattern with `\w*_id` makes the engine re-try `\w*` at every
+  start position: 0.39s at 16k characters, 13.8s at 100k, **232 seconds** at 414,187 — this
+  corpus's longest event log. `_ticket_detail` calls it once per rejected ticket claim, so one
+  session logging a base64 blob or a minified file would have hung the gate. Nothing in the
+  live measurement predicted it; event logs are JSON, where runs of word characters are short.
+  Every alternative now starts with a literal and carries no unbounded quantifier — same input,
+  232.49s → 0.004s, with classification unchanged. Found in the same module vikunja#889 had
+  just capped a scan in: **a pattern is as able to be quadratic as a loop**, and only the loop
+  had been looked at.
+
 ### Not changed, deliberately
 
 - **The ticket route is not widened.** #888 hypothesised the #876 shape — a true claim whose
