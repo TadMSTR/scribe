@@ -1,0 +1,3 @@
+{"type": "user", "uuid": "t-m1", "isMeta": true, "sessionId": "sess-turnless", "timestamp": "2026-09-19T09:00:00Z", "message": {"role": "user", "content": "INJECTED SKILL BODY, not a person speaking"}}
+{"type": "user", "uuid": "t-i1", "sessionId": "sess-turnless", "timestamp": "2026-09-19T09:00:01Z", "message": {"role": "user", "content": "<command-name>archival-search</command-name>"}}
+{"type": "user", "uuid": "t-m2", "isMeta": true, "sessionId": "sess-turnless", "timestamp": "2026-09-19T09:00:02Z", "message": {"role": "user", "content": "ANOTHER INJECTED BODY"}}

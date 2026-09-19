@@ -331,6 +331,24 @@ def process_session(
     # instead of collapsing them all into the day the backfill ran (vikunja#847).
     when = session_when(log, now or datetime.now(UTC))
 
+    # ABOVE the two `mark_summarized` calls below, and that placement is the whole of
+    # vikunja#902. It used to sit under them, so the two "nothing to summarize" branches
+    # retired a session during a run documented as inert -- and the documentation is what
+    # makes it safe to point a dry run at production config.
+    #
+    # This is a guard against PROCESSING, not against writing. A dry run has already called
+    # `upsert_observed` in `scan`, recording the transcript's size and mtime, and that must
+    # keep happening: AGENTS.md invariant 8 says an observation records what is on disk, not
+    # what has been handled. Measured on the real corpus, discovery touches ~460 rows a sweep
+    # against this branch's one. Guarding that too would make a dry run forget what it saw.
+    #
+    # The cost, which is real and was accepted deliberately: a turnless or fully-processed
+    # session is no longer retired by a dry run, so every dry run re-offers it and the next
+    # live run does the bookkeeping. Those sessions have nothing to summarize, so the work
+    # is a re-extract and nothing else.
+    if dry_run or provider is None:
+        return result
+
     if not log.turns:
         # A transcript with no real user turn is not a failure; there is simply nothing to
         # summarize. Marking it summarized stops it being re-offered on every scan.
@@ -348,9 +366,6 @@ def process_session(
             last_turn_uuid=_last_turn_uuid(log),
             turn_uuids=[],
         )
-        return result
-
-    if dry_run or provider is None:
         return result
 
     # Persist the event log HERE: past the dry-run guard, and strictly before the

@@ -1058,3 +1058,124 @@ def test_an_ordinary_sweep_reports_no_truncation(env) -> None:
     t = summarize_run(run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub()))
     assert t["truncated"] == 0
     assert t["truncated_items"] == 0
+
+
+# --- vikunja#902 -------------------------------------------------------------------------
+#
+# `test_a_dry_run_does_not_advance_the_session_state` above asserts exactly the right
+# property and passes anyway, because the `env` fixture's session has PENDING TURNS: it
+# takes the guard at `process_session`'s `if dry_run or provider is None` and never reaches
+# either `mark_summarized` above it. The two fixtures below are the ones that do reach them.
+#
+# What is asserted, and what is deliberately NOT:
+#
+#   A dry run may OBSERVE. It must not PROCESS.
+#
+# `upsert_observed` (size_bytes, mtime_ns, updated_at) and `scan`'s `set_status` -> COMPLETE
+# are both discovery recording what is on disk. AGENTS.md invariant 8 makes that the job, not
+# a side effect, so asserting the row is unchanged -- or hashing the database -- fails on
+# CORRECT code. What a dry run must not touch is what `mark_summarized` owns: the read
+# offset, the last turn uuid, the `summarized` status, and the processed_turns ledger.
+
+
+def _row_state(store, target):
+    """The fields `mark_summarized` writes, which are the ones a dry run must not move."""
+    row = store.get(str(target))
+    with store._connect() as conn:
+        processed = conn.execute("SELECT COUNT(*) AS n FROM processed_turns").fetchone()["n"]
+    return {
+        "last_offset": row.last_offset,
+        "last_turn_uuid": row.last_turn_uuid,
+        "status_is_summarized": row.status == STATUS_SUMMARIZED,
+        "processed_turns": processed,
+    }
+
+
+def _env_for(tmp_path, fixture_name):
+    projects = tmp_path / "projects"
+    d = projects / "-home-ted--claude-projects-research"
+    d.mkdir(parents=True)
+    target = d / "sess.jsonl"
+    target.write_bytes((FIXTURES / fixture_name).read_bytes())
+    old = 1_000_000.0 - 3600
+    os.utime(target, (old, old))
+    cfg = Config(
+        quiet_period_minutes=15,
+        project_globs=(str(projects / "*") + "/",),
+        output_dir=str(tmp_path / "out"),
+        eventlog_dir=str(tmp_path / "eventlogs"),
+        state_path=str(tmp_path / "state.sqlite3"),
+        providers={
+            "stub": ProviderConfig(
+                name="stub", type="openai-compatible", base_url="http://x/v1", model="m"
+            )
+        },
+        stages={"session": StageConfig(provider="stub", model="m")},
+    )
+    return cfg, Store(cfg.state_path), target
+
+
+@pytest.fixture
+def turnless_env(tmp_path):
+    """A transcript with bytes but no real turn -- reaches the `if not log.turns` branch."""
+    return _env_for(tmp_path, "transcript-turnless.jsonl")
+
+
+def test_a_dry_run_does_not_process_a_turnless_session(turnless_env) -> None:
+    """vikunja#902, branch one: `if not log.turns`.
+
+    A transcript of nothing but injected records is the commonest shape in the corpus that
+    reaches this. The session has no summary to write, so retiring it looks harmless -- but
+    a dry run is documented inert, and inertness is the property people rely on when they
+    point the tool at production config.
+    """
+    cfg, store, target = turnless_env
+    run_once(cfg, store, dry_run=True, now=1_000_000.0, provider_factory=lambda: Exploding())
+
+    after = _row_state(store, target)
+    assert after["status_is_summarized"] is False, "a dry run must not retire the session"
+    assert after["last_offset"] == 0, "a dry run must not advance the offset"
+    assert after["last_turn_uuid"] == ""
+    assert after["processed_turns"] == 0
+
+    # Still offered on the next sweep -- that is the cost of the fix, and it is the point:
+    # the live run that follows is the one entitled to do the bookkeeping.
+    assert len(run_once(cfg, store, dry_run=True, now=1_000_000.0)) == 1
+
+
+def test_a_dry_run_does_not_process_a_fully_processed_session(env) -> None:
+    """vikunja#902, branch two: `if not pending`.
+
+    Every turn is already in the ledger, so there is nothing pending -- and the code retires
+    the session before it ever consults `dry_run`. Seeded at offset 0 so the byte check still
+    offers the row; that is what a resumed session looks like.
+    """
+    cfg, store, target = env
+    stat = target.stat()
+    store.upsert_observed(str(target), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
+    store.mark_summarized(str(target), offset=0, last_turn_uuid="", turn_uuids=["s1", "s2"])
+    before = _row_state(store, target)
+    assert before["processed_turns"] == 2, "seeding must put both turns in the ledger"
+
+    run_once(cfg, store, dry_run=True, now=1_000_000.0, provider_factory=lambda: Exploding())
+
+    after = _row_state(store, target)
+    assert after["last_offset"] == before["last_offset"], "a dry run must not advance the offset"
+    assert after["last_turn_uuid"] == before["last_turn_uuid"]
+    assert after["processed_turns"] == before["processed_turns"]
+
+
+def test_a_dry_run_still_records_what_it_observed(turnless_env) -> None:
+    """The other side of the guard, and the reason this build does not simply freeze the DB.
+
+    Discovery writing `size_bytes`/`mtime_ns` is an observation of what is on disk. Guarding
+    it would make a dry run forget its own findings -- the opposite of what a discovery pass
+    is for, and a contradiction of AGENTS.md invariant 8. A fix that makes this test fail has
+    gone too far.
+    """
+    cfg, store, target = turnless_env
+    run_once(cfg, store, dry_run=True, now=1_000_000.0, provider_factory=lambda: Exploding())
+    row = store.get(str(target))
+    assert row is not None, "a dry run must still record that it saw the transcript"
+    assert row.size_bytes == target.stat().st_size
+    assert row.mtime_ns == target.stat().st_mtime_ns

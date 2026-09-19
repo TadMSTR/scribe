@@ -1,8 +1,12 @@
 """`python -m scribe run` — one sweep of the pipeline.
 
-Defaults to `--dry-run`. Phase 6 is a shadow run and the live path must not change, so the
-mode that costs money and sends data off the machine is the one you have to ask for by name.
-`--once` without `--dry-run` is the shadow run proper.
+Dry by default; `--live` is the mode that calls a provider and writes digests. The mode that
+costs money and sends data off the machine is the one you have to ask for by name.
+
+A dry run discovers and extracts, and records what it OBSERVED — a transcript's size and
+mtime. It does not process: no provider call, no digest, and no advance of the read offset
+(vikunja#902). So pointing it at production config is safe, which is the property the default
+exists to provide.
 """
 
 from __future__ import annotations
@@ -86,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"  !! {totals['placeholders']} placeholder(s) written -- "
                 f"{totals['placeholders']} session summar"
                 f"{'y' if totals['placeholders'] == 1 else 'ies'} not yet written"
-                f" (retryable: `scribe recover --status`)"
+                f" (retryable: `scribe recover`)"
             )
         if totals["suppressed"]:
             print(f"  {totals['suppressed']} suppressed (contamination fallback)")

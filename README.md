@@ -165,7 +165,7 @@ Two consequences of that shape are worth naming, because they are what the desig
 
 ```bash
 python -m scribe run                 # dry run: discover, extract, check. No network.
-python -m scribe run --live          # shadow run: also summarize and write
+python -m scribe run --live          # live run: also summarize and write
 python -m scribe events SESSION_ID   # print the event log behind a digest
 python -m scribe qc --digest D --events E   # exits non-zero on an ungrounded digest
 python -m scribe journal             # SessionStart hook payload for this agent
@@ -174,8 +174,16 @@ python -m scribe recover --apply     # reopen them, so the next run redoes them
 ```
 
 **`run` defaults to a dry run.** It discovers finished sessions, extracts them and reports —
-without constructing a provider, reading a credential, calling anything or writing anything.
-The mode that spends money and sends data off the machine has to be asked for by name.
+without constructing a provider, reading a credential or calling anything. The mode that
+spends money and sends data off the machine has to be asked for by name.
+
+**A dry run may observe; it must not process.** It writes no digest and no event log, and it
+does not advance a session's read offset or mark it summarized, so the live run that follows
+still has everything to do (vikunja#902). What it *does* write is discovery's own record of
+what is on disk — a transcript's size and mtime — because an observation says what was seen,
+not what was handled (invariant 8). Measured on the live corpus, one sweep touches ~460 such
+rows. That is the pass doing its job, not a leak in the guarantee: `scribe run` earlier said
+it wrote *nothing*, which was never true of discovery and is the claim #902 corrected.
 
 A session is finished once its transcript has been idle past a quiet period, because the Stop
 hook fires per *turn* and there is no session-end signal. That inference can be wrong in one

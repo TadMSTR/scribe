@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -283,3 +284,36 @@ def test_the_placeholder_count_reaches_the_json_totals(workspace, capsys, monkey
     totals = json.loads(capsys.readouterr().out)["totals"]
     assert totals["placeholders"] == 1
     assert totals["written"] == 1
+
+
+# --- vikunja#903: advice that names a command has to name a command that runs --------------
+
+
+def _advised_commands(text: str) -> list[list[str]]:
+    """Every `scribe ...` command quoted in backticks, as argv token lists.
+
+    Extracted from the output rather than hardcoded, and that is the whole point. The reason
+    #903 survived is that `test_a_placeholder_is_reported_loudly` asserts
+    `"scribe recover" in out` -- a SUBSTRING, which passes just as happily over
+    `scribe recover --status` as over `scribe recover`. Hardcoding the expected string here
+    would rebuild exactly the coupling that failed: the test would agree with whatever the
+    message says, which is the one thing it must not do.
+    """
+    return [m.split()[1:] for m in re.findall(r"`(scribe [^`]+)`", text)]
+
+
+def test_the_command_a_placeholder_recommends_actually_runs(workspace, capsys, monkeypatch):
+    """vikunja#903. The advice fires when a summary has been lost, which is the moment an
+    operator is least inclined to go reading argparse. It must not exit 2."""
+    cfg, _tmp = workspace
+    _with_placeholder(monkeypatch, placeholder=True, written=True)
+    run_main(["--config", str(cfg)])
+    advised = _advised_commands(capsys.readouterr().out)
+    assert advised, "the placeholder line must recommend a command"
+
+    for argv in advised:
+        try:
+            code = dispatch([*argv, "--config", str(cfg)])
+        except SystemExit as exc:  # argparse rejects unknown flags this way
+            code = exc.code
+        assert code != 2, f"`scribe {' '.join(argv)}` is not runnable -- exited 2"
