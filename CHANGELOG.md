@@ -101,6 +101,32 @@ no exit code moves, and `SCHEMA_VERSION` stays at 2.
 - `ci.yml` now builds and verifies the distribution on every PR. A `pyproject.toml` that
   resolves but does not install is otherwise invisible until release day.
 
+### Security
+
+Two Low findings from the pre-merge audit, both fixed in the same PR rather than deferred.
+
+- **`deps-drift` no longer follows symlinked `dist-info/METADATA`.** It walks a tree and
+  head-reads every `METADATA` under the venv it is pointed at, which is the shape that has
+  surfaced `~/.secrets` elsewhere on this fleet. Measured against the unguarded build: a
+  `METADATA` symlinked at a secrets file whose first lines parse as RFC822 headers was
+  reported as `{'mistral-api-key': 'NOTREAL-abcdef123456'}` — the target's content rendered as
+  a package name and version.
+
+  Exploiting it needs write access to the target's site-packages (`/opt/venvs/scribe` is
+  root-owned), so this is defence in depth rather than a reachable hole. Symlinks are
+  **skipped and reported on stderr**, not rejected, because a `--link-mode=symlink` tree is a
+  legitimate thing to point this at — and the skip biases toward *more* drift, never less: an
+  omitted package reads as "locked but not deployed", which gets investigated.
+
+- **`release.yml`'s fallback now creates a DRAFT rather than publishing.** Reaching that
+  branch means a `v*` tag was pushed with no release written for it, and once this repo goes
+  public a process slip — a mistyped tag, a stray `git push --tags` — would put an
+  unfinished-looking release on the internet within the same workflow run.
+
+  Draft rather than hard-fail deliberately: failing would discard a build that already passed
+  `verify`, so a tagging mistake would cost the artefact too. The draft keeps the verified
+  artefacts attached and reviewable, and stays invisible until someone writes the notes.
+
 ### Notes
 
 - **`pip-audit --locked` does not silently fall back to re-resolving** (vikunja#905). The

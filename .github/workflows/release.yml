@@ -86,6 +86,18 @@ jobs:
   # job attaches the verified artefacts to it. `--notes-from-tag`-style generation is not used,
   # and the create path below is a FALLBACK that writes a deliberately bare placeholder telling
   # the operator to fill it in — it does not invent prose.
+  #
+  # THE FALLBACK CREATES A DRAFT (audit finding, 2026-09-18, Low). It previously published.
+  # Reaching that branch means a `v*` tag was pushed with no release written for it, which is a
+  # process slip — and once part 4 of this programme flips this repo public, publishing on a
+  # slip puts an unfinished-looking release on the internet within the same workflow run. A
+  # mistyped tag or a stray `git push --tags` is enough.
+  #
+  # Draft rather than hard-fail, deliberately: failing would discard a build that has already
+  # passed `verify`, so a tagging mistake would cost the artefact too. A draft keeps the
+  # verified artefacts attached and reviewable, costs nothing, and is invisible until someone
+  # writes the notes and presses publish. Drafts remain visible to `gh release view`, so a
+  # re-run of this job takes the `--clobber` path above rather than creating a second one.
   create-github-release:
     name: Attach artifacts to the release
     runs-on: ubuntu-latest
@@ -116,16 +128,20 @@ jobs:
             # which is a process slip rather than an error — the artefacts are verified either
             # way and losing them would be worse. The notes say exactly what happened so the
             # gap is visible in the release list rather than looking finished.
-            echo "::warning::Release ${TAG_NAME} does not exist. Creating it with placeholder" \
-                 "notes and attaching artifacts. Edit the notes by hand — this workflow does" \
-                 "not generate them."
+            echo "::warning::Release ${TAG_NAME} does not exist. Creating it as a DRAFT with" \
+                 "placeholder notes and attaching artifacts. Write the notes by hand and" \
+                 "publish it — this workflow does not generate notes and does not publish."
             gh release create "${TAG_NAME}" \
               dist/*.whl dist/*.tar.gz \
               --title "${TAG_NAME}" \
-              --notes "_Release notes not yet written._
+              --draft \
+              --notes "_Draft — release notes not yet written, do not publish as-is._
 
-          Artifacts were built and verified by \`.github/workflows/release.yml\` and attached
-          automatically. The notes for this release are authored by hand — see the previous
-          releases for the form. Replace this text." \
+          A \`${TAG_NAME}\` tag was pushed with no release written for it. The artifacts here
+          were built and verified by \`.github/workflows/release.yml\` and attached
+          automatically, but the notes are authored by hand — see the previous releases for the
+          form. Replace this text, then publish.
+
+          If this tag was pushed by mistake, delete the tag and this draft." \
               --verify-tag
           fi

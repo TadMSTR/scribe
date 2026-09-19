@@ -28,6 +28,7 @@ used to produce the lock is absent.
 from __future__ import annotations
 
 import re
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,6 +127,20 @@ def installed_versions(venv: str | Path) -> dict[str, str]:
         inheriting `PYTHONPATH` or `VIRTUAL_ENV` can be. This function's whole job is to
         describe a venv that is not the one running it.
       * It is a read, so it cannot mutate the production environment it is pointed at.
+
+    **Symlinked metadata is skipped, not followed** (audit finding, 2026-09-18). This walks a
+    directory tree and head-reads every `METADATA` it finds, which is the shape that has
+    surfaced `~/.secrets` elsewhere on this fleet: a `METADATA` symlinked at another file
+    would have that file's header lines reported as a package name and version. Exploiting it
+    needs write access to the target's site-packages, which is already a compromise, and the
+    read is bounded to the header block — so this is defence in depth rather than a fix for a
+    reachable hole.
+
+    Skipping rather than raising, because a `uv pip install --link-mode=symlink` tree is a
+    legitimate thing to point this at. The skip is **reported on stderr** and it biases the
+    result toward *more* drift, never less: an omitted package reads as "locked but not
+    deployed", which is the direction that gets investigated rather than the one that goes
+    unnoticed.
     """
     root = Path(venv).expanduser()
     site_packages = sorted(root.glob("lib/python*/site-packages"))
@@ -136,6 +151,12 @@ def installed_versions(venv: str | Path) -> dict[str, str]:
     for sp in site_packages:
         for dist_info in sp.glob("*.dist-info"):
             metadata = dist_info / "METADATA"
+            if dist_info.is_symlink() or metadata.is_symlink():
+                print(
+                    f"scribe: skipping {dist_info.name} — symlinked metadata is not followed",
+                    file=sys.stderr,
+                )
+                continue
             if not metadata.is_file():
                 continue
             name = version = ""

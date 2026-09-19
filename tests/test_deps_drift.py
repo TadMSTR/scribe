@@ -235,6 +235,67 @@ def test_a_directory_that_is_not_a_venv_is_an_error(tmp_path) -> None:
         installed_versions(tmp_path)
 
 
+def test_a_symlinked_metadata_file_is_not_followed(tmp_path, capsys) -> None:
+    """Audit finding, 2026-09-18 (Low).
+
+    This function walks a tree and head-reads every `METADATA` it finds — the shape that has
+    surfaced `~/.secrets` elsewhere on this fleet. The discriminating part is not that the
+    package is skipped, it is that the TARGET FILE'S CONTENT never appears in the result: a
+    secrets file whose first lines happen to parse as RFC822 headers would otherwise be
+    reported as a package name and version.
+    """
+    venv = _venv(tmp_path / "v", {"httpx": "0.28.1"})
+    sp = venv / "lib" / "python3.13" / "site-packages"
+
+    secret = tmp_path / "not-a-package.env"
+    secret.write_text("Name: leaked-secret-name\nVersion: leaked-secret-value\n\nbody\n")
+
+    evil = sp / "evil-1.0.dist-info"
+    evil.mkdir()
+    (evil / "METADATA").symlink_to(secret)
+
+    found = installed_versions(venv)
+
+    assert found == {"httpx": "0.28.1"}
+    assert "leaked-secret-name" not in found
+    assert "leaked-secret-value" not in found.values()
+    assert "symlinked metadata is not followed" in capsys.readouterr().err
+
+
+def test_a_symlinked_dist_info_directory_is_not_followed(tmp_path, capsys) -> None:
+    """The other half: the symlink can be the DIRECTORY rather than the file inside it.
+    Guarding only `METADATA` would walk straight into a symlinked dist-info."""
+    venv = _venv(tmp_path / "v", {"httpx": "0.28.1"})
+    sp = venv / "lib" / "python3.13" / "site-packages"
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "METADATA").write_text("Name: smuggled\nVersion: 9.9.9\n\n")
+
+    (sp / "smuggled-9.9.9.dist-info").symlink_to(elsewhere, target_is_directory=True)
+
+    assert installed_versions(venv) == {"httpx": "0.28.1"}
+    assert "symlinked metadata is not followed" in capsys.readouterr().err
+
+
+def test_skipping_a_symlink_biases_toward_more_drift_not_less(tmp_path, lock, capsys) -> None:
+    """The skip must fail safe. An omitted package has to read as "locked but not deployed" —
+    something an operator investigates — rather than silently shrinking the compared set and
+    reporting a cleaner result than the truth."""
+    venv = _venv(tmp_path / "v", {"httpx": "0.28.1", "idna": "3.20", "typing_extensions": "4.16.0"})
+    sp = venv / "lib" / "python3.13" / "site-packages"
+
+    real = tmp_path / "otel"
+    real.mkdir()
+    (real / "METADATA").write_text("Name: opentelemetry-sdk\nVersion: 1.44.0\n\n")
+    (sp / "opentelemetry_sdk-1.44.0.dist-info").symlink_to(real, target_is_directory=True)
+
+    drift = compare(runtime_closure(lock), installed_versions(venv))
+
+    assert drift.missing == {"opentelemetry-sdk": "1.44.0"}
+    assert not drift.clean
+
+
 # --------------------------------------------------------------------------- render
 
 
