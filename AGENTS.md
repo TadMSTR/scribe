@@ -137,6 +137,42 @@ real parser's `--help`. Same shape as invariant 11's rule about a prompt stating
 validator does not enforce — here the parser is the validator. If you write advice, the test
 is what keeps it true; do not widen its pattern to make a new string pass.
 
+**15. Before tuning a gate's tolerance, check whether its parser is manufacturing the findings.**
+`_CMD_RE` was `` r"`([^`\n]{3,200})`" ``. A backticked span under three characters cannot match,
+so the scan resumed at *that* span's closing backtick and paired it with the *next* span's
+opening one, capturing the prose in between: `` `ps` showing `nats pub ...` `` produced the
+claim `showing`. 22 of the 65 non-path groundedness findings were claims **no model ever
+asserted** — the same category error `strip_scribe_markers` exists to prevent — and the 30 real
+spans that were swallowed had never been graded at all.
+
+Nothing in the failure rate could show this, because it fails in both directions at once: a
+fabricated finding appears while a true claim silently disappears, and the headline moves by
+neither. It had survived every measurement of this gate. The lesson generalises past regexes —
+**a length or shape bound belongs on what you captured, not on the pairing that captures it**,
+because a bound inside the pairing rule silently changes what counts as a pair.
+
+So when a route looks like it is over-firing, read its findings before proposing a tolerance.
+vikunja#888 asked for the ticket and identifier routes to be widened; measured, the ticket route
+was **right 61 times out of 62** and the identifier route wanted its parser fixed. A tolerance
+derived on top of the mis-pairing would have been fitted to noise, and it would have had a
+measured table beside it.
+
+**16. A tolerance is priced against foreign controls, and the price has a standing bar.**
+`qc_survey.cross_session_probe` and `span_trim_probe` harvest claims from *other* sessions'
+digests — claims the model here demonstrably was not shown — because a floor chosen against the
+corpus it judges measures nothing, and the written corpus was produced under the gate being
+tuned (the same censoring argument as invariant 11). Report the trade as **true claims recovered
+per false one**, which is the unit the existing constants are already stated in:
+`ADJACENCY_WINDOW` shipped at 5.0 and the blanket composition rule was rejected at 1.3. A
+candidate scoring below 1.3 has been declined here before; `span_trim_probe` records one at 1.2
+and is committed *in order to record the rejection*, because a measurement that decided
+something has to be re-runnable by whoever doubts it.
+
+**And a pooled ratio is not the margin.** 80 outscores 120 on `ADJACENCY_WINDOW`'s pooled
+figure in every snapshot taken so far, and 120 is still right: the step from 80 to 120 buys 9
+true claims for 5 false, and 80 only wins the pool by averaging in the cheap first 80
+characters where evidence is densest. Compare the increment, not the average.
+
 ## Porting notes
 
 `_INJECTED_PREFIXES` and the `isMeta` guard are ported verbatim from

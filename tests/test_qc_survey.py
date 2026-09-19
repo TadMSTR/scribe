@@ -19,20 +19,36 @@ import pytest
 
 from scribe.eventlog import write_eventlog
 from scribe.extract.models import EventLog, Turn
-from scribe.qc import Report
+from scribe.qc import (
+    CLAIM_CODE,
+    CLAIM_PATH,
+    CLAIM_TICKET,
+    CLAIM_TOOL,
+    Report,
+)
 from scribe.qc_survey import (
     ABSENT,
     BUCKETS,
+    COINCIDENTAL_NUMBER,
     COMPOSED,
+    ID_CONFLATION,
+    PUNCTUATION_WRAPPED,
     RULE_CURRENT,
     RULE_LITERAL,
+    SINGLE_TOKEN,
     SUFFIX,
+    TOKEN_MISSING,
+    TOKEN_SPREAD,
     classify_path_claim,
+    classify_span_claim,
+    classify_ticket_claim,
     cross_session_probe,
     home_forms,
     iter_blocks,
     longest_present_suffix,
+    rejected_claims,
     rejected_paths,
+    span_trim_probe,
     survey,
 )
 from scribe.qc_survey_cli import main as survey_main
@@ -136,14 +152,44 @@ def test_a_missing_event_log_is_counted_not_skipped_silently(corpus) -> None:
     assert result.blocks == 0 and result.blocks_no_log == 2
 
 
-def test_rejected_paths_recovers_a_claim_containing_a_quote() -> None:
-    """The claim is read back out of the finding's `repr`. A naive strip would corrupt any
-    claim carrying a quote, and silently misfile it into `absent`."""
+def test_rejected_claims_survive_a_quote_and_are_kept_apart_by_kind() -> None:
+    """A claim carrying a quote must come back exactly, and must not cross routes.
+
+    This used to guard a `repr` parse: the claim was recovered by stripping a shared prefix off
+    `detail` and `literal_eval`-ing the rest, and a naive strip would corrupt any claim holding
+    a quote and silently misfile it into `absent`. `Finding.claim` removed the parse, so the
+    corruption it guarded is now unreachable by construction.
+
+    The property it was really protecting is not: recovery must be exact, and it must separate
+    the routes. So it is asserted against the replacement mechanism rather than retired -- and
+    with the detail deliberately set to a *different* claim, which the old parse would have
+    believed and this one cannot even see.
+    """
     report = Report()
     weird = "/tmp/it's/a/path.md"
-    report.add("groundedness", f"path not in the event log: {weird!r}")
-    report.add("groundedness", "tool not in the event log: 'WebFetch'")
+    report.add(
+        "groundedness",
+        "path not in the event log: '/decoy/not/the/claim.md'",
+        kind=CLAIM_PATH,
+        claim=weird,
+    )
+    report.add(
+        "groundedness", "tool not in the event log: 'WebFetch'", kind=CLAIM_TOOL, claim="webfetch"
+    )
+    report.add(
+        "groundedness",
+        "ticket '#417' is not in the event log, which contains '417' only as an internal id",
+        kind=CLAIM_TICKET,
+        claim="#417",
+    )
+    report.add("event_coverage", "digest references 1/90 events", kind="", claim="")
+
     assert rejected_paths(report) == [weird]
+    assert rejected_claims(report, CLAIM_TOOL) == ["webfetch"]
+    # The mid-sentence claim no prefix constant could have recovered -- the case that decided
+    # the design. 30 of 62 live ticket findings take this shape.
+    assert rejected_claims(report, CLAIM_TICKET) == ["#417"]
+    assert rejected_claims(report, CLAIM_CODE) == []
 
 
 def test_buckets_are_disjoint_and_ordered() -> None:
@@ -295,3 +341,85 @@ def test_a_traversal_payload_in_an_anchor_cannot_escape_the_eventlog_root(corpus
     result = survey(digests, events)
     assert result.blocks == 1, "the planted log outside the root was read"
     assert result.blocks_no_log == 1
+
+
+# --- vikunja#888: attribution past the path route -----------------------------------------
+
+
+def test_every_groundedness_finding_lands_in_a_bucket(corpus) -> None:
+    """The gap this build opened with: 289 findings, 162 classified, 127 counted and unnamed.
+
+    A tolerance cannot be chosen for a route whose failures cannot be attributed, so an
+    unclassified remainder is a defect rather than a rounding detail. `findings_unattributed`
+    exists to make one visible instead of absorbing it into a total.
+    """
+    digests, events = corpus
+    (digests / "developer" / "extra.md").write_text(
+        _block(
+            _log("s-extra", "nothing relevant here"),
+            "Closed `#4242` after reading `/nowhere/at/all.md` with `WebFetch` and "
+            "`fabricated_helper()`.",
+        ),
+        encoding="utf-8",
+    )
+    write_eventlog(events, _log("s-extra", "nothing relevant here"))
+    result = survey(digests, events)
+
+    assert result.findings_unattributed == 0
+    assert sum(result.kind_buckets.values()) == sum(result.kinds.values())
+    assert result.gate_disagreements == 0
+
+
+@pytest.mark.parametrize(
+    "claim,corpus_text,expected",
+    [
+        ("#541", '"args_digest": "task_id=541"', ID_CONFLATION),
+        ("#930", '{"target": "930"}', ID_CONFLATION),
+        ("#73", "the run reported 73 pipelines", COINCIDENTAL_NUMBER),
+        ("#783", "nothing of the sort here", ABSENT),
+    ],
+)
+def test_ticket_findings_are_attributed_to_a_cause(claim, corpus_text, expected) -> None:
+    """61 of 62 live ticket findings are `id-conflation` — the gate working, not over-firing."""
+    assert classify_ticket_claim(claim, corpus_text) == expected
+
+
+@pytest.mark.parametrize(
+    "claim,corpus_text,expected",
+    [
+        ('"operator"', "role operator assigned", PUNCTUATION_WRAPPED),
+        ("#vikunja", "posted to the vikunja room", SINGLE_TOKEN),
+        ("alpha beta", "alpha here ... and much later beta", TOKEN_SPREAD),
+        ("alpha missingtok", "alpha here only", TOKEN_MISSING),
+        ("zzz yyy", "nothing", ABSENT),
+    ],
+)
+def test_span_findings_are_attributed_to_a_cause(claim, corpus_text, expected) -> None:
+    assert classify_span_claim(claim, corpus_text * 40, desynced=set()) == expected
+
+
+def test_the_control_set_stays_scoped_to_the_path_route(corpus) -> None:
+    """`ABSENT` is a bucket for every kind now. Widening `control_set` to match would silently
+    redefine what three releases of "the 26 absent claims" refers to."""
+    digests, events = corpus
+    result = survey(digests, events)
+    assert all(v.kind == CLAIM_PATH for v in result.control_set())
+
+
+def test_the_span_trim_probe_prices_the_tolerance_it_declines(corpus) -> None:
+    """The rejection is committed as a re-runnable measurement, not as an assertion."""
+    digests, events = corpus
+    probe = span_trim_probe(digests, events, min_lengths=(0, 12))
+    assert [row["min_length"] for row in probe["candidates"]] == [0, 12]
+    for row in probe["candidates"]:
+        assert row["false_ground"] >= 0 and row["true_ground"] >= 0
+
+
+def test_the_span_probe_prints_the_bar_it_is_judged_against(corpus, capsys) -> None:
+    """A false-ground rate with nothing to compare it to is a number, not a decision. The
+    threshold #876 accepted and the one it rejected print beside the table."""
+    digests, events = corpus
+    assert survey_main(["--digests", str(digests), "--events", str(events), "--probe-spans"]) == 0
+    out = capsys.readouterr().out
+    assert "true/false" in out
+    assert "5.0 true per false" in out and "1.3 was rejected" in out
