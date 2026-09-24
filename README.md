@@ -492,7 +492,7 @@ grader worked; it was pointed at the wrong artefact. So every check here asserts
   For a **path**, "appear" means the log holds it literally, *or* holds a directory prefix of
   it together with the whole remaining relative tail — a tail of one segment only when the two
   sit within 120 characters of each other — *or* holds it with the leading directories replaced
-  by `~`. A digest that writes `/home/ted/repos/personal/alpha/tests/unit/test_one.py` where the
+  by `~`. A digest that writes `/home/user/repos/personal/alpha/tests/unit/test_one.py` where the
   session named the repo and the test file separately is making a true claim about what it was
   shown, and grading it as a hallucination was the single largest source of findings on the live
   corpus (vikunja#876). `~` is read as a literal in the log, never resolved against `$HOME`: a
@@ -569,27 +569,30 @@ that is what it is.
 ## Status
 
 **In production on forge, and the only summarizer running there.** The `memsearch-summarize`
-retirement (vikunja#863) completed 2026-09-17; a `grep -c memsearch` over the crontab returns
-`0`. There is no longer a shadow path, an incumbent, or a cutover pending.
+retirement (vikunja#863) completed 2026-09-17. There is no longer a shadow path, an incumbent,
+or a cutover pending. The running version is whatever `CHANGELOG.md` last released.
 
-Deployed shape, measured 2026-09-18:
+### Example deployment
+
+This is the shape forge runs, with the paths made generic. None of it is required: scribe
+reads one config file and writes under three directories, and how it is scheduled is the
+operator's business.
 
 | | |
 |---|---|
-| Version | v0.5.0, from `/opt/venvs/scribe` |
-| Batch run | cron `40 * * * *`, wrapped in `flock -n` — scribe has no internal process lock, so two overlapping runs would both work the same queue |
-| Session feed | `SessionStart` hook `/usr/local/sbin/forge/scribe-session-start.sh` (root-owned), registered in `~/.claude/settings.json` |
-| Config | `~/scripts/scribe-config.toml`, passed explicitly with `--config` |
-| Digests | `~/.local/share/scribe/digests/<agent>/<date>.md` — 9 agent directories, 189 files, 2.9 MB |
-| Event logs | `~/.local/share/scribe/eventlogs/<session-id>.json` — 467 files, 43 MB |
-| State | `~/.local/state/scribe/scribe.sqlite3`, `PRAGMA user_version = 2` |
-| Watchdog | `scribe-recover-check.sh` daily at `06:20`, reporting digests lost or left provisional |
+| Install | a venv built from a wheel of this repo, e.g. `/opt/venvs/scribe` |
+| Batch run | cron hourly, e.g. `40 * * * *`, wrapped in `flock -n`. scribe has no internal process lock, so two overlapping runs would both work the same queue |
+| Session feed | a `SessionStart` hook script (e.g. `/usr/local/sbin/scribe-session-start.sh`, root-owned so an agent cannot edit what injects into its own context), registered in `~/.claude/settings.json`. See [Feeding the SessionStart injection](#feeding-the-sessionstart-injection) |
+| Config | e.g. `~/.config/scribe/config.toml`, passed explicitly with `--config`. Start from `scribe.example.toml` |
+| Digests | `~/.local/share/scribe/digests/<agent>/<date>.md` (the default `output_dir`) |
+| Event logs | `~/.local/share/scribe/eventlogs/<session-id>.json` (the default `eventlog_dir`) |
+| State | `~/.local/state/scribe/scribe.sqlite3` |
+| Watchdog | `python -m scribe recover` (a dry run unless `--apply`) daily, alerting on its exit code: non-zero means digests were lost or left provisional. The codes are a contract, documented in `recover_cli.py` |
 
 The event-log directory is a **sibling** of the digest directory, never a child. Digests are
-indexed by qmd via a `<output_dir>/**/*.md` glob, and nesting the logs underneath would quietly
-pull 43 MB of JSON into that collection.
-
-The counts above are a snapshot and will drift; the paths and the cadence are the durable part.
+indexed by a `<output_dir>/**/*.md` glob, and nesting the logs underneath would quietly pull
+every event log's JSON into that collection. Event logs are kept indefinitely by default; see
+`AGENTS.md` for why, and for what any future retention setting must do.
 
 See `CHANGELOG.md`.
 
@@ -599,7 +602,7 @@ Off by default. Spans are emitted only when **both** of these are true:
 
 ```sh
 pip install 'scribe[telemetry]'          # 1. the extra is installed
-export OTEL_EXPORTER_OTLP_ENDPOINT=...   # 2. the endpoint is set (forge: http://127.0.0.1:4317)
+export OTEL_EXPORTER_OTLP_ENDPOINT=...   # 2. the endpoint is set (e.g. http://127.0.0.1:4317)
 ```
 
 **Neither alone does anything**, and that is the part worth stating plainly, because forge has
