@@ -316,6 +316,35 @@ def test_claude_cli_env_passes_path_home_and_config_dir(monkeypatch, tmp_path) -
     assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "cfg")
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ANTHROPIC_BASE_URL",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "NODE_EXTRA_CA_CERTS",
+    ],
+)
+def test_claude_cli_env_passes_where_the_credential_goes(monkeypatch, name) -> None:
+    monkeypatch.setenv(name, f"value-of-{name}")
+    assert _captured_env(monkeypatch)[name] == f"value-of-{name}"
+
+
+def test_claude_cli_env_keeps_a_gateway_token_with_its_gateway(monkeypatch) -> None:
+    """The failure this pairing prevents: a gateway's token passed while its base URL is
+    dropped, so `claude` presents the token to the default endpoint instead (CodeRabbit, #25).
+    """
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example.com")
+    env = _captured_env(monkeypatch)
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "gateway-token"
+    assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example.com"
+
+
 def test_claude_cli_env_passes_a_configured_api_key_env_and_only_when_configured(
     monkeypatch,
 ) -> None:
