@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-24
+
+**Minor.** Readiness for a public repository, and one subprocess behaviour change. The
+`claude-cli` provider now runs `claude -p` with a named environment instead of inheriting
+the sweep's (vikunja#961), which can change what a `claude-cli` deployment sees. Nothing else
+behaves differently: no schema change (`SCHEMA_VERSION` stays at 2), no exit code moves, no
+config key added or removed.
+
+### Changed
+
+- **`claude -p` no longer inherits the sweep's environment** (vikunja#961, SC-06). It gets
+  `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `TMPDIR`; the
+  credentials `claude` authenticates with (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, by exact name); `CLAUDE_CONFIG_DIR`; and the provider's
+  `api_key_env` if the config names one. Before, every other provider's key in the sweep
+  (`MISTRAL_API_KEY`, say) reached it too. `HOME` is kept because `claude` reads its
+  credentials file and its settings from under it. **If a `claude-cli` deployment relied on
+  another inherited variable** (a proxy setting, for example), `claude -p` no longer sees it,
+  and there is no config key to add one yet.
+- The post-write hook and `claude -p` share one base set, now in `scribe.childenv`.
+  `pipeline.HOOK_BASE_ENV` is kept as an alias for it.
+- **Vikunja task URLs are recognised on any `vikunja.<host>`**, not on one deployment's
+  hostname. The old pattern extracted no ticket from a URL anywhere else. Any other host's
+  `/tasks/N` is still not a ticket.
+- Package licence metadata uses the SPDX form, `license = "MIT"` plus `license-files`
+  (vikunja#964). The `{ text = "MIT" }` table is deprecated in setuptools with a removal date
+  of 2027-02-18, and a deploy that builds with isolation always gets the newest setuptools,
+  so it would have broken on that date. The wheel now carries `License-Expression: MIT`.
+- Dependabot groups: `dev-tools` (ruff, pytest, pytest-cov) and one group for all GitHub
+  Actions. The previous `dev-dependencies` group matches only uv's own development
+  dependencies and the build floor, not the `dev` extra, so ruff was arriving alone while
+  the comment said it batched. The Actions group keeps codeql-action's matched subpaths in
+  one PR.
+
+### Documentation
+
+- README *Status* is an example deployment with generic paths, not a snapshot of one host.
+  The stale version row and the file counts are gone (vikunja#952).
+- AGENTS.md invariant 18: event logs are kept indefinitely, by decision (vikunja#954). After
+  Claude Code's 30-day transcript expiry, the event log is the only source a digest can be
+  re-summarized from. Any future retention setting must default off and count what it
+  deletes.
+- `.github/CODEOWNERS`.
+
+### Removed
+
+- Deployment-specific values from the tracked tree: home paths, hostnames, a service data
+  path, and a username, in source docstrings, docs, tests and fixtures. They are replaced
+  consistently, so no test changed what it asserts, and the test IDs before and after map
+  one-to-one. The one test that read a real transcript by literal path now builds the path
+  from the real home, so it still runs on the host that has the file.
+
 ## [0.10.0] — 2026-09-24
 
 **Minor.** scribe was indexer-agnostic only for indexers that glob a directory. This release
