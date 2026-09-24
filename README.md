@@ -171,6 +171,8 @@ python -m scribe qc --digest D --events E   # exits non-zero on an ungrounded di
 python -m scribe journal             # SessionStart hook payload for this agent
 python -m scribe recover             # report sessions whose digest was never written
 python -m scribe recover --apply     # reopen them, so the next run redoes them
+python -m scribe index --rebuild     # regenerate index.jsonl from the digests on disk
+python -m scribe index --check       # exits non-zero if index.jsonl has drifted
 ```
 
 **`run` defaults to a dry run.** It discovers finished sessions, extracts them and reports —
@@ -197,7 +199,7 @@ What scribe keeps is layered by cost, and each layer is reachable from the one a
 
 | Tier | Where | Size per session | Indexed |
 |---|---|---|---|
-| **Digest** — what happened | `~/.local/share/scribe/digests/<agent>/<date>.md` | ~2 KB | yes — qmd `session-digests` |
+| **Digest** — what happened | `~/.local/share/scribe/digests/<agent>/<date>.md` | ~2 KB | yes — by whatever indexer you point at it (forge uses qmd) |
 | **Event log** — the evidence | `~/.local/share/scribe/eventlogs/<session-id>.json` | ~190 KB | **no** |
 | **Raw transcript** — everything | `~/.claude/projects/*/*.jsonl`, and Backrest | ~2.5 MB | no |
 
@@ -223,6 +225,91 @@ written `0600` inside a `0700` directory, like everything else derived from a tr
 
 Retention is settled: **keep everything.** The measured corpus is 429 sessions in ~39 MB,
 growing at roughly 0.46 GB/year. There is no pruning and none is planned.
+
+### Using a different indexer
+
+scribe does not depend on any indexer. It writes plain markdown and leaves indexing to
+whatever you run: forge happens to use qmd, whose `session-digests` collection globs
+`<output_dir>/**/*.md`, but there is no qmd code in scribe. Whichever indexer you use, it
+has two rules to follow:
+
+1. **Index `output_dir`.** Every digest is a `.md` file under it, at `<agent>/<date>.md`.
+2. **Never index `eventlog_dir`.** Those files are evidence you look up from a digest, not
+   something to search. They are large, less redacted, and would drown out the digests in
+   every query. The directory sits next to `output_dir`, not inside it, so a glob over
+   `output_dir` can't pick them up by accident.
+
+A **pull** indexer (one that globs a directory) needs nothing else. A **push** indexer, which
+has to be told what changed (a vector DB, Meilisearch, OpenSearch behind an API), gets
+two more things to work with:
+
+**`index.jsonl`, an append-only manifest.** scribe appends one line each time it writes a
+block:
+
+```json
+{"path": "research/2026-09-23.md", "sha256": "…", "agent": "research", "date": "2026-09-23",
+ "session_id": "…", "turn_uuid": "…", "provisional": "", "eventlog_path": "….json",
+ "written_at": "2026-09-23T19:40:02+00:00"}
+```
+
+| field | meaning |
+|---|---|
+| `path` | the digest file, **relative to `output_dir`** |
+| `sha256` | hash of **this block** (anchor line through closing marker), not of the file |
+| `agent`, `date` | the directory and the day the digest was filed under |
+| `session_id`, `turn_uuid` | the block's identity, as written in its anchor |
+| `provisional` | `""` for a real digest, `"placeholder"` or `"suppressed"` for a stand-in (see [When a digest is not written](#when-a-digest-is-not-written)) |
+| `eventlog_path` | the event log, relative to `eventlog_dir`; `""` if there is none |
+| `written_at` | when the line was appended; `null` on a rebuilt line. Informational only, never checked |
+
+By default it lives next to `output_dir`, at `<output_dir>/../index.jsonl`, and is created
+`0600`. Put it somewhere else with `[index] manifest_path`. scribe refuses to load a
+config that puts it inside `output_dir` or `eventlog_dir`.
+
+**Digests are not write-once, so a consumer needs two rules:**
+
+- **Each record is identified by `(path, turn_uuid)`, and the last line for that pair
+  wins.** A stand-in block is replaced in place when its real digest arrives. That keeps
+  the same `turn_uuid` and produces a second line with a new `sha256`.
+- **Index whole files.** Any number of sessions share one daily file, so the same `path`
+  shows up again with different `turn_uuid`s. Whenever a line names a `path`, re-ingest
+  that whole file; don't try to rebuild it from the block records.
+
+If you only want real digests, filter on `provisional == ""`.
+
+The manifest is **derived state**. Every field except `written_at` can be recomputed from the
+digests themselves. `scribe index --rebuild` regenerates it from the files, which is how
+digests written before the manifest existed get added to it. `scribe index --check` does the
+same rebuild in memory and exits `1` on any missing, stale, changed or malformed line, so a
+manifest that has drifted from the digests gets caught. Run `--rebuild` when no sweep
+is in progress. A line appended during the rebuild can be lost, and `--check` will then
+report it as missing.
+
+**`[index] on_digest_written`, an optional notification.** An argv list, run once for each
+block written, after its manifest line is in place, with the digest's absolute path
+appended as the last argument:
+
+```toml
+[index]
+on_digest_written = ["/usr/local/bin/my-indexer", "--file"]
+on_digest_written_timeout_seconds = 30   # default; a guess, not a measurement
+```
+
+It is run without a shell and with stdin closed. It gets a timeout, and a hook still
+running at the deadline is killed along with its child processes. **A string value is
+rejected when the config loads:** the path appended to the command is built from an
+agent name that comes from outside scribe, so passing a string through a shell would open a
+command-injection hole. Hook failures never affect the run. They are counted
+(`on_digest_written: N ok, M failed` in the run output, `hook_ok` / `hook_failed` in
+`--json`) and never change whether a digest was written.
+
+**`[discovery] emit_frontmatter = true`, optional YAML frontmatter.** Off by default. When
+on, each daily file starts with `agent`, `date`, `source: scribe` and `session_ids`. The
+per-block anchors don't change, and the journal preview reads the file exactly as before;
+a test runs the reference parser over both forms to prove it.
+
+The `<agent>/` partition comes from the transcript's project directory. It isn't configurable
+yet.
 
 ### Feeding the SessionStart injection
 

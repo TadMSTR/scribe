@@ -31,6 +31,7 @@ arrives for the same turn.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime
@@ -350,4 +351,66 @@ def append_block(
         fh.flush()
         os.fsync(fh.fileno())
     secure_file(path)
+    return True
+
+
+#: The frontmatter scribe writes always carries this line, and only a leading block carrying
+#: it is ever treated as scribe's own. A file that opens with somebody else's `---` block is
+#: left alone rather than rewritten -- recognising "ours" by delimiter alone would let this
+#: function delete hand-written content.
+FRONTMATTER_SOURCE = "source: scribe"
+_FRONTMATTER_RE = re.compile(r"\A---\n(?P<body>.*?)\n---\n", re.DOTALL)
+_DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+
+
+def frontmatter(path: Path, text: str) -> str:
+    """YAML frontmatter for a daily digest, derived entirely from the file itself.
+
+    Values are JSON-quoted, which is valid YAML: an agent named `true`, `null` or `1e3` must
+    stay a string. `session_ids` is a FLOW sequence (`[...]`) on one line, never a block
+    sequence, because a line opening with `- ` is exactly what the incumbent's preview parser
+    (`tests/reference/recent_memory_preview.awk`) treats as a digest bullet. None of the lines
+    written here starts with `#` or `- `, so that parser -- and `journal.preview`, its port --
+    reads a frontmatter-on file identically to a frontmatter-off one (invariant 10).
+    """
+    ids: list[str] = []
+    for a, _c in paired_blocks(text):
+        if a.group(1) not in ids:
+            ids.append(a.group(1))
+    date = path.stem if _DATE_RE.match(path.stem) else json.dumps(path.stem)
+    return (
+        "---\n"
+        f"agent: {json.dumps(path.parent.name)}\n"
+        f"date: {date}\n"
+        f"{FRONTMATTER_SOURCE}\n"
+        f"session_ids: [{', '.join(json.dumps(i) for i in ids)}]\n"
+        "---\n"
+    )
+
+
+def strip_frontmatter(text: str) -> str:
+    """`text` without scribe's own leading frontmatter, if it has one."""
+    m = _FRONTMATTER_RE.match(text)
+    if m and FRONTMATTER_SOURCE in m.group("body").splitlines():
+        return text[m.end() :]
+    return text
+
+
+def apply_frontmatter(path: Path) -> bool:
+    """Put current frontmatter at the top of `path`. Returns True if the file changed.
+
+    Idempotent: a file whose frontmatter is already current is not rewritten. Otherwise the
+    whole file goes through `atomic_replace`, like every other rewrite of a daily file. The
+    anchors and blocks are untouched, so a block's manifest hash is unaffected.
+    """
+    text = _read(path)
+    body = strip_frontmatter(text)
+    if body.startswith("---\n"):
+        # Someone else's frontmatter. Not ours to replace, and prepending a second block
+        # would produce a file no YAML-frontmatter reader parses as intended.
+        return False
+    updated = frontmatter(path, body) + body
+    if updated == text:
+        return False
+    atomic_replace(path, updated)
     return True

@@ -16,12 +16,28 @@ output_dir    = "~/.local/share/scribe/digests"
 # The per-session event logs — the drill-down tier behind each digest. Written before the
 # summarization call, so a failed model call still leaves the evidence of what it saw.
 #
-# Keep this a SIBLING of output_dir, never a child. Digests are indexed (qmd collection
-# `session-digests`, which globs `<output_dir>/**/*.md`); event logs must not be, because
-# they are evidence reached *from* a digest rather than a search target, and ~39 MB of tool
-# arguments would swamp the digest signal in every semantic query. Nesting them under
-# output_dir is what would quietly undo that.
+# Keep this a SIBLING of output_dir, never a child. Digests are meant to be indexed by
+# whatever indexer you run (on forge, a qmd collection that globs `<output_dir>/**/*.md`);
+# event logs must not be, because they are evidence reached *from* a digest rather than a
+# search target, and ~39 MB of tool arguments would swamp the digest signal in every
+# semantic query. Nesting them under output_dir is what would quietly undo that.
 eventlog_dir  = "~/.local/share/scribe/eventlogs"
+# YAML frontmatter (agent, date, source, session_ids) at the top of each daily digest, for
+# indexers that read it. The per-block anchors are unchanged either way.
+# emit_frontmatter = false
+
+# For push indexers -- ones that must be told what changed rather than globbing a
+# directory. See README, "Using a different indexer". Everything here is optional; with no
+# [index] block scribe still appends to the manifest and runs no hook.
+[index]
+# Append-only manifest, one line per block written. Default is a sibling of output_dir.
+# Refused if it resolves inside output_dir or eventlog_dir.
+# manifest_path = "~/.local/share/scribe/index.jsonl"
+#
+# An ARGV LIST, run without a shell, once per written digest, with the digest's path
+# appended. A string is refused at load: the path derives from an external agent name.
+# on_digest_written = ["/usr/local/bin/my-indexer", "--file"]
+# on_digest_written_timeout_seconds = 30
 
 [summarize.session]
 # Post-extraction the task is formatting a structured log, not inference, so `small` is

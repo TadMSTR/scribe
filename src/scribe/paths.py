@@ -132,6 +132,19 @@ def secure_create(path: str | os.PathLike[str]) -> IO[str]:
     return os.fdopen(fd, "w", encoding="utf-8")
 
 
+def secure_append(path: str | os.PathLike[str]) -> IO[str]:
+    """Open `path` for appending, created 0600 at creation if it does not exist yet.
+
+    `secure_create`'s argument, for a file that is added to rather than replaced: `O_APPEND`
+    instead of `O_TRUNC`, the mode still applied by the kernel at `O_CREAT`. A file that
+    already exists keeps its mode, so this is also tightened after the fact by the caller's
+    `secure_file` -- the pair that `writeback.append_block` already uses.
+    """
+    p = Path(path).expanduser()
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, FILE_MODE)
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
 def secure_sqlite(db_path: str | os.PathLike[str]) -> None:
     """Tighten a SQLite database and its WAL sidecars.
 

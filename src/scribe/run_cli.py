@@ -126,6 +126,22 @@ def main(argv: list[str] | None = None) -> int:
                 f"{'y' if totals['discarded'] == 1 else 'ies'} LOST; "
                 f"this should be unreachable, report it"
             )
+        # Printed here, not only in `--json`, for invariant 13's second half: the cron reads
+        # this branch. A manifest behind the corpus is silent otherwise -- every consumer
+        # tailing it simply never hears about the digests it missed.
+        if totals["manifest_errors"]:
+            print(
+                f"  !! {totals['manifest_errors']} digest(s) written but NOT recorded in "
+                f"index.jsonl -- run `scribe index --rebuild`"
+            )
+            for r in results:
+                if r.manifest_error:
+                    print(f"    {Path(r.transcript_path).name}: manifest: {r.manifest_error}")
+        if totals["hook_ok"] or totals["hook_failed"]:
+            print(f"  on_digest_written: {totals['hook_ok']} ok, {totals['hook_failed']} failed")
+            for r in results:
+                if r.hook_error:
+                    print(f"    {Path(r.transcript_path).name}: hook: {r.hook_error}")
         if totals["errors"]:
             print(f"  {totals['errors']} error(s)")
             for r in results:

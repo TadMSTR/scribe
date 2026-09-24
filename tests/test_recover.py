@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from scribe.config import Config
 from scribe.eventlog import write_eventlog
 from scribe.extract.models import EventLog, Turn
 from scribe.recover_cli import (
@@ -35,10 +36,11 @@ from scribe.writeback import existing_turns, provisional_turns
 WHEN = datetime(2026, 8, 19, 9, 14, tzinfo=UTC)
 
 
-class _Cfg:
-    def __init__(self, output_dir: Path, eventlog_dir: Path) -> None:
-        self.output_dir = str(output_dir)
-        self.eventlog_dir = str(eventlog_dir)
+def _Cfg(output_dir: Path, eventlog_dir: Path) -> Config:
+    """A real `Config`, not a duck-typed stand-in: a fake carrying only the attributes that
+    existed when it was written stops matching the type the moment `recover` reads a new one
+    (it did, when stamping started appending manifest lines)."""
+    return Config(output_dir=str(output_dir), eventlog_dir=str(eventlog_dir))
 
 
 def _legacy_block(turn: str, transcript: str, body: str) -> str:
@@ -529,3 +531,24 @@ def test_reopening_a_session_re_arms_the_signal(corpus, tmp_path) -> None:
 
     store.reset_for_retry(paths["lost"])
     assert recover(cfg, store, apply=False)["superseded"] == 0
+
+
+def test_stamping_keeps_the_manifest_clean(corpus) -> None:
+    """Stamping rewrites anchors, which changes each stamped block's hash and `provisional`.
+    Without a manifest line per stamped block, a legitimate recovery would turn
+    `scribe index --check` red -- and a check that fires on correct data gets ignored."""
+    from scribe.manifest import check, rebuild, write
+
+    cfg, store, _md, _paths = corpus
+    write(cfg, rebuild(cfg))
+    assert check(cfg).clean
+    report = recover(cfg, store, apply=True)
+    assert report["stamped"] == 2
+    assert report["manifest_errors"] == []
+    assert check(cfg).clean
+
+
+def test_a_dry_run_recover_appends_nothing(corpus) -> None:
+    cfg, store, _md, _paths = corpus
+    recover(cfg, store, apply=False)
+    assert not cfg.manifest_file().exists()

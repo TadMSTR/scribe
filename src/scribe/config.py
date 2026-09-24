@@ -25,6 +25,11 @@ DEFAULT_OUTPUT_DIR = "~/.local/share/scribe/digests"
 #: collection globs `<output_dir>/**/*.md`, so keeping event logs outside that tree is what
 #: stops them being indexed — a structural exclusion rather than a pattern to maintain.
 DEFAULT_EVENTLOG_DIR = "~/.local/share/scribe/eventlogs"
+#: Not measured. 30 s is a guess at "long enough for a local indexer to ingest one ~2 KB
+#: file, short enough that a hung one cannot stall an hourly sweep". The hook is invoked once
+#: per written digest, so a sweep's worst case is this times the sessions it writes.
+DEFAULT_HOOK_TIMEOUT_SECONDS = 30.0
+MANIFEST_NAME = "index.jsonl"
 
 
 class ConfigError(ValueError):
@@ -78,6 +83,27 @@ class Config:
     port: int = 8499
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     stages: dict[str, StageConfig] = field(default_factory=dict)
+    #: YAML frontmatter at the top of each daily digest. Off by default: the anchors are the
+    #: authoritative identity and the journal preview is pinned to the unadorned format.
+    emit_frontmatter: bool = False
+    #: Where `index.jsonl` lives. Empty means the default; read it through `manifest_file()`,
+    #: which is the one place that resolves it.
+    manifest_path: str = ""
+    #: argv run once per written digest, with the digest's path appended. Empty runs nothing.
+    on_digest_written: tuple[str, ...] = ()
+    on_digest_written_timeout_seconds: float = DEFAULT_HOOK_TIMEOUT_SECONDS
+
+    def manifest_file(self) -> Path:
+        """The digest manifest: `manifest_path` if set, else `<output_dir>/../index.jsonl`.
+
+        **A sibling of the digest root by default, never a child**, for the reason the event
+        log directory is one: an indexer that globs `<output_dir>/**` must not be one pattern
+        change away from ingesting the manifest as if it were a digest. Structural, not a
+        pattern somebody has to keep correct.
+        """
+        if self.manifest_path:
+            return Path(self.manifest_path).expanduser()
+        return Path(self.output_dir).expanduser().parent / MANIFEST_NAME
 
     def provider_for(self, stage: str) -> ProviderConfig:
         """Return the provider serving `stage`, raising a config error if it is undeclared.
@@ -117,6 +143,38 @@ def _api_key_env(raw: object, where: str) -> str:
     )
 
 
+def _hook_argv(raw: object) -> tuple[str, ...]:
+    """Accept `on_digest_written = ["/path/to/indexer", "--flag"]` and reject a string.
+
+    **A string is refused, not split.** The digest path is appended to this argv, and that
+    path is built from an agent name which reaches it from three external routes
+    (`paths.valid_agent` lists them). Handed to a shell, a string is a command-injection
+    surface; as an argv list run with `shell=False` it is not. Splitting a string with
+    `shlex` would accept the unsafe form and quietly make it look safe, so the only
+    enforceable rule is the one that refuses to load it -- the same reasoning as
+    `_api_key_env`'s refusal of a literal key.
+    """
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        raise ConfigError(
+            "index.on_digest_written must be an argv list, e.g. "
+            '`on_digest_written = ["/usr/local/bin/my-indexer", "--file"]`, not a string -- '
+            "the digest path is appended to it and a shell string would be an injection surface"
+        )
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("index.on_digest_written must be a non-empty list of strings")
+    if not all(isinstance(arg, str) and arg for arg in raw):
+        raise ConfigError("index.on_digest_written: every element must be a non-empty string")
+    return tuple(raw)
+
+
+def _inside(child: Path, root: Path) -> bool:
+    """Whether `child` is `root` or anywhere beneath it, compared as resolved paths."""
+    c, r = child.resolve(strict=False), root.resolve(strict=False)
+    return c == r or r in c.parents
+
+
 def load(path: str | os.PathLike[str] | None = None) -> Config:
     """Load `scribe.toml`. With no path, return defaults."""
     cfg = Config()
@@ -146,6 +204,33 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
         cfg.output_dir = str(disc["output_dir"])
     if "eventlog_dir" in disc:
         cfg.eventlog_dir = str(disc["eventlog_dir"])
+    if "emit_frontmatter" in disc:
+        if not isinstance(disc["emit_frontmatter"], bool):
+            raise ConfigError("discovery.emit_frontmatter must be true or false")
+        cfg.emit_frontmatter = disc["emit_frontmatter"]
+
+    index = data.get("index", {})
+    if not isinstance(index, dict):
+        raise ConfigError("index: expected a table")
+    cfg.on_digest_written = _hook_argv(index.get("on_digest_written"))
+    timeout = index.get("on_digest_written_timeout_seconds", DEFAULT_HOOK_TIMEOUT_SECONDS)
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
+        raise ConfigError("index.on_digest_written_timeout_seconds must be a positive number")
+    cfg.on_digest_written_timeout_seconds = float(timeout)
+    if "manifest_path" in index:
+        cfg.manifest_path = str(index["manifest_path"])
+    # Checked on the EFFECTIVE path, so a default that lands somewhere unsafe is caught too:
+    # an `eventlog_dir` set to `output_dir`'s parent would otherwise swallow the default.
+    # Inside `output_dir` the manifest is one indexer glob away from being indexed as if it
+    # were a digest; inside `eventlog_dir` it is a file that directory's contract says is
+    # never a search target.
+    effective = cfg.manifest_file()
+    for key, root in (("output_dir", cfg.output_dir), ("eventlog_dir", cfg.eventlog_dir)):
+        if _inside(effective, Path(root).expanduser()):
+            raise ConfigError(
+                f"index.manifest_path resolves to {effective}, inside {key}; keep it outside "
+                "both the digest tree and the event-log tree"
+            )
 
     service = data.get("service", {})
     cfg.host = str(service.get("host", cfg.host))
