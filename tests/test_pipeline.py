@@ -1393,3 +1393,35 @@ def test_the_hook_does_not_inherit_the_summarizers_credential(env, tmp_path, mon
     assert "MISTRAL_API_KEY" not in names
     assert "MY_INDEXER_TOKEN" in names
     assert "PATH" in names
+
+
+def test_a_hook_that_leaves_a_worker_behind_succeeds_on_time(env, tmp_path) -> None:
+    """The hook's outcome is its own exit status. A background worker holding stderr must not
+    turn a clean exit into a reported timeout (CodeRabbit, PR #24)."""
+    import time
+
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(_hook(tmp_path, "sleep 20 &\nexit 0\n")),)
+    cfg.on_digest_written_timeout_seconds = 5
+    start = time.monotonic()
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "ok", r.hook_error
+    assert time.monotonic() - start < 4
+
+
+def test_a_hook_whose_worker_escapes_the_group_cannot_stall_the_sweep(env, tmp_path) -> None:
+    """`setsid` puts the worker outside the process group, so `killpg` cannot reach it. With a
+    stderr pipe, the sweep then waited out the worker's whole lifetime. The timeout must bound
+    the sweep regardless of what the hook leaves behind."""
+    import shutil
+    import time
+
+    if shutil.which("setsid") is None:
+        pytest.skip("setsid not installed")
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(_hook(tmp_path, "setsid sleep 20 &\nsleep 20\n")),)
+    cfg.on_digest_written_timeout_seconds = 1
+    start = time.monotonic()
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "failed" and "timed out" in r.hook_error
+    assert time.monotonic() - start < 6

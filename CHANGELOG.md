@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-24
+
+**Minor.** scribe was indexer-agnostic only for indexers that glob a directory. This release
+adds what an indexer that has to be *told* what changed needs (vikunja#891). Everything new is
+additive and defaults to current behaviour except the manifest, which is an append-only
+side file. No schema change (`SCHEMA_VERSION` stays at 2), no exit code moves, no digest or
+event log is rewritten.
+
+### Added
+
+- **`index.jsonl`, an append-only manifest of digest blocks.** One line per block written:
+  `path` (relative to `output_dir`), `sha256` of the **block**, `agent`, `date`,
+  `session_id`, `turn_uuid`, `provisional`, `eventlog_path`, `written_at`. It lives next to
+  `output_dir`, never inside it, and is created `0600`. Record identity is
+  `(path, turn_uuid)` and the last line wins. A provisional block replaced by its real digest
+  keeps its `turn_uuid`, so the same key legitimately recurs. The indexable document is the
+  file. See README, *Using a different indexer*.
+- **`scribe index --rebuild` / `--check`.** Rebuild the manifest from the digests on disk
+  (this is how existing digests get into it), or rebuild in memory and exit `1` on any
+  missing, stale, changed or malformed line. `written_at` is excluded from the comparison
+  because nothing on disk records it.
+- **`[index] on_digest_written`**, an optional post-write hook. It takes an argv list; a
+  string is refused at config load. It runs without a shell, with a minimal environment
+  (`on_digest_written_env` names any extra variables) and a timeout. It never fails the
+  run: outcomes are counted as `hook_ok` / `hook_failed` and printed.
+- **`[index] manifest_path`**, refused if it resolves inside `output_dir` or
+  `eventlog_dir`.
+- **`[discovery] emit_frontmatter`**, opt-in YAML frontmatter (`agent`, `date`,
+  `source: scribe`, `session_ids`). The per-block anchors are unchanged, and a test pins the
+  reference preview parser's output as byte-identical with and without it.
+- `manifest_appended` / `manifest_errors` in the run totals. A digest written but not
+  recorded is printed with the command that repairs it.
+
+### Changed
+
+- `scribe recover --apply` appends a manifest line for every anchor it stamps. Stamping
+  changes the block's hash and its `provisional` field, so without this a legitimate
+  recovery made `--check` fail.
+- README and `scribe.example.toml` describe qmd as forge's choice of indexer, not a
+  requirement. AGENTS.md gains invariant 17.
+
+### Fixed
+
+- **The gitleaks prover no longer scans `.venv/`** (vikunja#899). Its repository check
+  walked the working directory with `--no-git`, so the verdict depended on what a developer
+  had pip-installed: forge's distro binary reported 202 findings there. It now scans only
+  the files a commit could carry (tracked, plus untracked files that aren't ignored). The
+  version-skew warning is now a banner, repeated next to the verdict.
+
+### Security
+
+- The hook does not inherit the sweep's environment, which holds the summarizer's API key
+  (pattern SC-06, found in the pre-audit baseline). It gets a fixed base set plus the
+  variables named in `on_digest_written_env`, matched by exact name.
+- The hook's outcome is its own exit status, and only the hook process itself is waited on.
+  Its stderr goes to a temp file rather than a pipe. Before this, a hook that exited cleanly
+  but left a background worker running was reported as timed out, and a worker that escaped
+  the process group could stall the sweep for as long as the worker ran. Found by
+  CodeRabbit on PR #24.
+
 ## [0.9.0] — 2026-09-19
 
 **Minor.** The QC gate's non-path routes, measured rather than tuned (vikunja#888), and

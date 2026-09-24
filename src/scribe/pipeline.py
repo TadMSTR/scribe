@@ -15,6 +15,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -271,6 +272,8 @@ def classify_post_render(eventlog_path: str, values: list[str]) -> str:
 #: How much of a failing hook's stderr is kept. Its last line is usually the reason; the rest
 #: is the hook's business, and an unbounded string does not belong in a run report.
 HOOK_STDERR_CHARS = 200
+#: How much of the stderr file is read to find that last line.
+HOOK_STDERR_TAIL_BYTES = 4096
 
 
 #: What every hook sees, whatever it is configured with: enough to find its binary and run in
@@ -298,39 +301,51 @@ def run_hook(
 
     `shell=False` with an argv list -- `config._hook_argv` refuses a string at load for the
     injection reason given there. stdin is closed and stdout discarded, so a hook can neither
-    wait on the sweep's terminal nor write into the cron log; stderr is captured for the
-    failure reason.
+    wait on the sweep's terminal nor write into the cron log.
 
-    **Its own process group, killed as a group on timeout.** `subprocess.run(timeout=)` kills
-    only the direct child and then waits for the pipes to close, so a hook that forks a
-    grandchild holding stderr would stall the sweep past the timeout it was given -- the one
-    thing the timeout exists to prevent.
+    **The outcome is the direct child's, and only the direct child is waited on.** stderr goes
+    to an unlinked temp file, not a pipe. Waiting on a pipe waits for *every* process holding
+    its write end, and an indexer hook that starts a background worker, or daemonises into its
+    own session, hands that end on. With a pipe, a hook that exited 0 leaving a worker behind
+    was reported as timed out, and one whose worker escaped the process group stalled the
+    sweep for the worker's whole lifetime -- the timeout bounded nothing. Both reproduced, and
+    CodeRabbit named them on PR #24. A file has no reader to block.
+
+    **Its own process group, killed as a group on timeout**, so a hung hook takes its children
+    with it. A child that has left the group (`setsid`) survives; it no longer delays the
+    sweep, and killing processes outside the hook's group is not scribe's business.
     """
-    try:
-        proc = subprocess.Popen(  # noqa: S603 -- argv list from validated config, no shell
-            # Absolute, so the appended path can never begin with `-` and be read as an option
-            # by the hook -- a relative `output_dir` would otherwise pass one through as-is.
-            [*argv, str(Path(digest).absolute())],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-            env=hook_env() if env is None else env,
-        )
-    except OSError as exc:
-        return f"could not start: {exc}"
-    try:
-        _out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
-        return f"timed out after {timeout:g}s"
-    if proc.returncode:
-        lines = [ln for ln in err.decode("utf-8", "replace").splitlines() if ln.strip()]
-        tail = lines[-1].strip()[:HOOK_STDERR_CHARS] if lines else ""
-        return f"exit {proc.returncode}" + (f": {tail}" if tail else "")
-    return ""
+    with tempfile.TemporaryFile() as errf:
+        try:
+            proc = subprocess.Popen(  # noqa: S603 -- argv list from validated config, no shell
+                # Absolute, so the appended path can never begin with `-` and be read as an
+                # option by the hook -- a relative `output_dir` would pass one through as-is.
+                [*argv, str(Path(digest).absolute())],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=errf,
+                start_new_session=True,
+                env=hook_env() if env is None else env,
+            )
+        except OSError as exc:
+            return f"could not start: {exc}"
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            return f"timed out after {timeout:g}s"
+        if not proc.returncode:
+            return ""
+        # Only the tail: the last line is usually the reason, and a hook's stderr is otherwise
+        # unbounded -- a worker left behind may still be appending to it.
+        size = errf.seek(0, os.SEEK_END)
+        errf.seek(max(0, size - HOOK_STDERR_TAIL_BYTES))
+        err = errf.read(HOOK_STDERR_TAIL_BYTES).decode("utf-8", "replace")
+    lines = [ln for ln in err.splitlines() if ln.strip()]
+    tail = lines[-1].strip()[:HOOK_STDERR_CHARS] if lines else ""
+    return f"exit {proc.returncode}" + (f": {tail}" if tail else "")
 
 
 def _after_write(cfg: Config, result: SessionResult, path: Path, turn_uuid: str) -> None:
