@@ -1425,3 +1425,21 @@ def test_a_hook_whose_worker_escapes_the_group_cannot_stall_the_sweep(env, tmp_p
     (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
     assert r.hook == "failed" and "timed out" in r.hook_error
     assert time.monotonic() - start < 6
+
+
+def test_no_temp_storage_for_the_hook_is_a_hook_failure_not_a_crash(env, tmp_path, monkeypatch):
+    """`run_hook` never raises. With /tmp full, the digest is already written; the sweep must
+    carry on and report the hook as failed (CodeRabbit, PR #24, second pass)."""
+    import tempfile
+
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(_hook(tmp_path, "exit 0\n")),)
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tempfile, "TemporaryFile", full)
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.written is True
+    assert r.hook == "failed" and "No space left" in r.hook_error
+    assert _identity_holds([r])

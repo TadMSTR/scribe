@@ -315,7 +315,12 @@ def run_hook(
     with it. A child that has left the group (`setsid`) survives; it no longer delays the
     sweep, and killing processes outside the hook's group is not scribe's business.
     """
-    with tempfile.TemporaryFile() as errf:
+    try:
+        errf = tempfile.TemporaryFile()  # noqa: SIM115 -- entered by `with errf:` below
+    except OSError as exc:
+        # The digest is already on disk; a full /tmp must cost the hook, not the sweep.
+        return f"could not start: no temp file for stderr ({exc})"
+    with errf:
         try:
             proc = subprocess.Popen(  # noqa: S603 -- argv list from validated config, no shell
                 # Absolute, so the appended path can never begin with `-` and be read as an
