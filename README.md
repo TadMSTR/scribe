@@ -295,7 +295,11 @@ on_digest_written = ["/usr/local/bin/my-indexer", "--file"]
 on_digest_written_timeout_seconds = 30   # default; a guess, not a measurement
 ```
 
-It is run without a shell and with stdin closed. It gets a timeout, and a hook still
+It is run without a shell and with stdin closed, and it does **not** inherit scribe's
+environment. That environment holds the summarizer's API key, which an indexer has no use
+for. The hook gets `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and
+`TMPDIR`, plus any variables you list by exact name in `on_digest_written_env` (for example
+the indexer's own token). It gets a timeout, and a hook still
 running at the deadline is killed along with its child processes. **A string value is
 rejected when the config loads:** the path appended to the command is built from an
 agent name that comes from outside scribe, so passing a string through a shell would open a

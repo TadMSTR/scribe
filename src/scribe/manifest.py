@@ -49,6 +49,7 @@ credential-shaped when paired with `claude -p --resume`.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -191,11 +192,17 @@ def write(cfg: Config, records: list[dict]) -> Path:
     path = cfg.manifest_file()
     _ensure_parent(path)
     tmp = path.with_name(path.name + ".tmp")
-    with secure_create(tmp) as fh:
-        fh.write("".join(_line(r) for r in records))
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    try:
+        with secure_create(tmp) as fh:
+            fh.write("".join(_line(r) for r in records))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        # A half-written temp file is a second copy of every session id, left lying around.
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     return path
 
 

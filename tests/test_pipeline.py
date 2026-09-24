@@ -1377,3 +1377,19 @@ def test_frontmatter_is_off_by_default(env) -> None:
     run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
     (written,) = list(output_root(cfg).rglob("*.md"))
     assert written.read_text().startswith("# 2026-09-13")
+
+
+def test_the_hook_does_not_inherit_the_summarizers_credential(env, tmp_path, monkeypatch):
+    """SC-06: a new subprocess without `env=` inherits every secret the sweep holds."""
+    cfg, store, _t = env
+    monkeypatch.setenv("MISTRAL_API_KEY", "NOTREAL-summarizer-key")
+    monkeypatch.setenv("MY_INDEXER_TOKEN", "NOTREAL-indexer-token")
+    seen = tmp_path / "env"
+    cfg.on_digest_written = (str(_hook(tmp_path, f"env > {seen}\n")),)
+    cfg.on_digest_written_env = ("MY_INDEXER_TOKEN",)
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "ok"
+    names = {ln.split("=", 1)[0] for ln in seen.read_text().splitlines() if "=" in ln}
+    assert "MISTRAL_API_KEY" not in names
+    assert "MY_INDEXER_TOKEN" in names
+    assert "PATH" in names

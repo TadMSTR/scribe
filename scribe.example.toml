@@ -38,6 +38,9 @@ eventlog_dir  = "~/.local/share/scribe/eventlogs"
 # appended. A string is refused at load: the path derives from an external agent name.
 # on_digest_written = ["/usr/local/bin/my-indexer", "--file"]
 # on_digest_written_timeout_seconds = 30
+# The hook does NOT inherit scribe's environment -- which holds the summarizer's API key. It
+# gets PATH, HOME, USER, LOGNAME, LANG, LC_ALL, LC_CTYPE, TZ, TMPDIR, plus exact names here.
+# on_digest_written_env = ["MY_INDEXER_TOKEN"]
 
 [summarize.session]
 # Post-extraction the task is formatting a structured log, not inference, so `small` is

@@ -12,6 +12,7 @@ Loading uses stdlib `tomllib`, so config handling adds no dependency.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,9 @@ DEFAULT_EVENTLOG_DIR = "~/.local/share/scribe/eventlogs"
 #: per written digest, so a sweep's worst case is this times the sessions it writes.
 DEFAULT_HOOK_TIMEOUT_SECONDS = 30.0
 MANIFEST_NAME = "index.jsonl"
+#: An environment variable NAME, as the hook's passthrough list accepts it. Names only: a
+#: pattern or prefix here would be SC-06's glob passthrough by another route.
+ENV_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 class ConfigError(ValueError):
@@ -92,6 +96,8 @@ class Config:
     #: argv run once per written digest, with the digest's path appended. Empty runs nothing.
     on_digest_written: tuple[str, ...] = ()
     on_digest_written_timeout_seconds: float = DEFAULT_HOOK_TIMEOUT_SECONDS
+    #: Extra environment variables the hook may see, by exact name. See `pipeline.hook_env`.
+    on_digest_written_env: tuple[str, ...] = ()
 
     def manifest_file(self) -> Path:
         """The digest manifest: `manifest_path` if set, else `<output_dir>/../index.jsonl`.
@@ -217,6 +223,15 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
     if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
         raise ConfigError("index.on_digest_written_timeout_seconds must be a positive number")
     cfg.on_digest_written_timeout_seconds = float(timeout)
+    env_names = index.get("on_digest_written_env", [])
+    if not isinstance(env_names, list) or not all(
+        isinstance(n, str) and ENV_NAME_RE.match(n) for n in env_names
+    ):
+        raise ConfigError(
+            "index.on_digest_written_env must be a list of exact environment variable names "
+            "-- no patterns or prefixes"
+        )
+    cfg.on_digest_written_env = tuple(env_names)
     if "manifest_path" in index:
         cfg.manifest_path = str(index["manifest_path"])
     # Checked on the EFFECTIVE path, so a default that lands somewhere unsafe is caught too:

@@ -273,7 +273,27 @@ def classify_post_render(eventlog_path: str, values: list[str]) -> str:
 HOOK_STDERR_CHARS = 200
 
 
-def run_hook(argv: Sequence[str], digest: Path, timeout: float) -> str:
+#: What every hook sees, whatever it is configured with: enough to find its binary and run in
+#: the operator's locale, and nothing that authenticates anything.
+HOOK_BASE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR")
+
+
+def hook_env(extra: Sequence[str] = ()) -> dict[str, str]:
+    """The hook's environment: `HOOK_BASE_ENV` plus the names the operator listed. Nothing else.
+
+    **Not the sweep's own environment.** A sweep runs with the summarizer's credential in it
+    (`MISTRAL_API_KEY` on forge), and an indexer has no use for that key. Inheriting by
+    default would hand it to whatever binary `on_digest_written` names -- SC-06 in the fleet's
+    pattern base, where the recurring form is exactly a new subprocess added without `env=`.
+    An indexer that genuinely needs a secret of its own names it in `on_digest_written_env`,
+    by exact name, so the grant is visible in the config that makes it.
+    """
+    return {k: os.environ[k] for k in (*HOOK_BASE_ENV, *extra) if k in os.environ}
+
+
+def run_hook(
+    argv: Sequence[str], digest: Path, timeout: float, env: dict[str, str] | None = None
+) -> str:
     """Run `argv + [digest]`. Returns "" on success, else why it failed. Never raises.
 
     `shell=False` with an argv list -- `config._hook_argv` refuses a string at load for the
@@ -288,11 +308,14 @@ def run_hook(argv: Sequence[str], digest: Path, timeout: float) -> str:
     """
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv list from validated config, no shell
-            [*argv, str(digest)],
+            # Absolute, so the appended path can never begin with `-` and be read as an option
+            # by the hook -- a relative `output_dir` would otherwise pass one through as-is.
+            [*argv, str(Path(digest).absolute())],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            env=hook_env() if env is None else env,
         )
     except OSError as exc:
         return f"could not start: {exc}"
@@ -331,7 +354,10 @@ def _after_write(cfg: Config, result: SessionResult, path: Path, turn_uuid: str)
         result.manifest_error = str(exc)
     if cfg.on_digest_written:
         result.hook_error = run_hook(
-            cfg.on_digest_written, path, cfg.on_digest_written_timeout_seconds
+            cfg.on_digest_written,
+            path,
+            cfg.on_digest_written_timeout_seconds,
+            env=hook_env(cfg.on_digest_written_env),
         )
         result.hook = "failed" if result.hook_error else "ok"
 

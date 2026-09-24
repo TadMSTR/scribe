@@ -473,3 +473,11 @@ def test_frontmatter_does_not_disturb_the_manifest(tmp_path) -> None:
         )
         hashes.append([r["sha256"] for r in rebuild(c)])
     assert hashes[0] == hashes[1]
+
+
+def test_hook_env_passthrough_takes_exact_names_only(tmp_path) -> None:
+    cfg = _load(tmp_path, '[index]\non_digest_written_env = ["MY_TOKEN"]\n')
+    assert cfg.on_digest_written_env == ("MY_TOKEN",)
+    for bad in ('["MY_*"]', '["A B"]', '"MY_TOKEN"', "[1]"):
+        with pytest.raises(ConfigError, match="exact"):
+            _load(tmp_path, f"[index]\non_digest_written_env = {bad}\n")
