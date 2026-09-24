@@ -8,6 +8,7 @@ called, nothing responds.
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -255,3 +256,77 @@ def test_claude_cli_exit_zero_with_error_text_is_not_caught_here(monkeypatch) ->
     _fake_run(monkeypatch, returncode=0, stdout="You've hit your limit - resets 11am")
     c = ClaudeCliProvider(CLI).complete("sys", "user")
     assert "hit your limit" in c.text  # passed through; the schema rejects it downstream
+
+
+# --- claude -p: the child's environment (vikunja#961, SC-06) -------------------------
+
+
+def _captured_env(monkeypatch, cfg: ProviderConfig = CLI) -> dict[str, str]:
+    """Run the provider against a fake `subprocess.run` and return the `env=` it was handed.
+
+    Asserting on `child_env()` alone would pass with `complete()` never passing it on; what
+    matters is what reaches the subprocess call."""
+    seen: dict = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "out", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("shutil.which", lambda _b: "/usr/local/bin/claude")
+    ClaudeCliProvider(cfg).complete("sys", "user")
+    assert isinstance(seen.get("env"), dict), "claude -p ran with the sweep's own environment"
+    return seen["env"]
+
+
+def test_claude_cli_env_withholds_another_providers_key(monkeypatch) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "sk-mistral-not-for-claude")
+    assert os.environ["MISTRAL_API_KEY"] == "sk-mistral-not-for-claude"  # control: parent has it
+    env = _captured_env(monkeypatch)
+    assert "MISTRAL_API_KEY" not in env
+    assert "sk-mistral-not-for-claude" not in env.values()
+
+
+def test_claude_cli_env_withholds_lookalike_names(monkeypatch) -> None:
+    """Enumerated, not globbed: a name that merely starts like a credential is not one."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL_OTHER", "x")
+    monkeypatch.setenv("CLAUDE_SOMETHING_ELSE", "y")
+    env = _captured_env(monkeypatch)
+    assert "ANTHROPIC_BASE_URL_OTHER" not in env and "CLAUDE_SOMETHING_ELSE" not in env
+
+
+@pytest.mark.parametrize(
+    "name", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
+)
+def test_claude_cli_env_passes_its_own_credential(monkeypatch, name) -> None:
+    monkeypatch.setenv(name, f"value-of-{name}")
+    assert _captured_env(monkeypatch)[name] == f"value-of-{name}"
+
+
+def test_claude_cli_env_passes_path_home_and_config_dir(monkeypatch, tmp_path) -> None:
+    """HOME carries `claude`'s credentials file and its settings `env` block; PATH finds node.
+    `CLAUDE_CONFIG_DIR`, when set, moves both -- dropping it would authenticate as someone
+    else rather than fail."""
+    monkeypatch.setenv("PATH", "/opt/x/bin:/usr/bin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    env = _captured_env(monkeypatch)
+    assert env["PATH"] == "/opt/x/bin:/usr/bin"
+    assert env["HOME"] == str(tmp_path)
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "cfg")
+
+
+def test_claude_cli_env_passes_a_configured_api_key_env_and_only_when_configured(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MY_CLAUDE_KEY", "k")
+    assert "MY_CLAUDE_KEY" not in _captured_env(monkeypatch)  # control: not named, not passed
+    named = ProviderConfig(name="claude-cli", type="claude-cli", api_key_env="MY_CLAUDE_KEY")
+    assert _captured_env(monkeypatch, named)["MY_CLAUDE_KEY"] == "k"
+
+
+def test_claude_cli_env_and_the_hook_share_one_base_set() -> None:
+    """Defined once, so the two children cannot drift apart."""
+    from scribe import childenv, pipeline
+
+    assert pipeline.HOOK_BASE_ENV is childenv.BASE_ENV

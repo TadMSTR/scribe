@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .childenv import BASE_ENV, allowlisted_env
 from .config import Config
 from .discovery import orphaned, scan
 from .eventlog import (
@@ -276,9 +277,9 @@ HOOK_STDERR_CHARS = 200
 HOOK_STDERR_TAIL_BYTES = 4096
 
 
-#: What every hook sees, whatever it is configured with: enough to find its binary and run in
-#: the operator's locale, and nothing that authenticates anything.
-HOOK_BASE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR")
+#: What every hook sees, whatever it is configured with. The same set `claude -p` gets; it is
+#: defined once, in `childenv`, so the two children cannot drift apart.
+HOOK_BASE_ENV = BASE_ENV
 
 
 def hook_env(extra: Sequence[str] = ()) -> dict[str, str]:
@@ -291,7 +292,7 @@ def hook_env(extra: Sequence[str] = ()) -> dict[str, str]:
     An indexer that genuinely needs a secret of its own names it in `on_digest_written_env`,
     by exact name, so the grant is visible in the config that makes it.
     """
-    return {k: os.environ[k] for k in (*HOOK_BASE_ENV, *extra) if k in os.environ}
+    return allowlisted_env((*HOOK_BASE_ENV, *extra))
 
 
 def run_hook(
