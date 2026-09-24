@@ -82,7 +82,7 @@ def test_a_hostile_session_id_cannot_leave_the_root(hostile, tmp_path) -> None:
     """
     root = tmp_path / "eventlogs"
     root.mkdir()
-    path = eventlog_path(root, hostile, "/home/ted/.claude/projects/p/sess.jsonl")
+    path = eventlog_path(root, hostile, "/home/user/.claude/projects/p/sess.jsonl")
     assert path.resolve().parent == root.resolve()
     assert path.suffix == SUFFIX
     assert path.name.count(SUFFIX) == 1

@@ -59,7 +59,18 @@ _INJECTED_PREFIXES = (
 # A repo-qualified `<name>#N` or an explicit `PR #N` is a pull request. Everything else,
 # including a bare `#843`, is a Vikunja ticket, because that is the fleet default recorded
 # in CLAUDE.md and the form build plans use in prose.
-_VIKUNJA_URL_RE = re.compile(r"vikunja\.helmforge\.me/tasks/(\d+)")
+#
+# The task URL is matched on any host whose first label is `vikunja`, not on one deployment's
+# hostname. A Vikunja instance is self-hosted, so the domain is the operator's, and a pattern
+# naming one of them extracts nothing anywhere else. Any other host's `/tasks/N` is not a
+# ticket: a tracker scribe has not been told about is not one it can ground against.
+#
+# "First label" is enforced by the lookbehind, not by `\b`. A word boundary also sits after a
+# `.` or `-`, so `\bvikunja\.` matched `try.vikunja.io` and `x-vikunja.example` too -- a
+# claim this comment made and the regex did not keep (CodeRabbit, TadMSTR/scribe#25). Any
+# other instance whose host starts `vikunja.` still matches; naming the host in config would
+# close that, and is not done here.
+_VIKUNJA_URL_RE = re.compile(r"(?<![\w.-])vikunja\.[a-z0-9.-]+/tasks/(\d+)", re.I)
 _PR_QUALIFIED_RE = re.compile(r"\b((?:[\w.-]+/)?[a-z][\w.-]*[a-z0-9])#(\d{1,6})\b", re.I)
 _PR_WORD_RE = re.compile(r"\b(?:PRs?|pull(?:\s+request)?s?|issues?)\s+\[?#(\d{1,6})\b", re.I)
 # `(#7)` trailing a commit subject is GitHub's squash-merge convention, and `[#7](url)`
@@ -117,7 +128,7 @@ def _agent_from_project_dir(project_dir: str) -> str:
     """Recover the agent name from Claude Code's flattened project directory name.
 
     Claude Code encodes the project path by replacing separators, so
-    `-home-ted--claude-projects-research` is `~/.claude/projects/research`. Returns ""
+    `-home-user--claude-projects-research` is `~/.claude/projects/research`. Returns ""
     rather than a guess when the shape is unfamiliar.
 
     **This encoding is lossy and cannot be inverted from the string alone.** A separator and
@@ -177,8 +188,8 @@ def agent_for_path(path: str) -> str:
 
     **The flattened form is checked first, and that ordering is a form discriminator rather
     than a ranking.** A flattened transcript directory really does live at
-    `~/.claude/projects/-home-ted--claude-projects-sysadmin`, so it satisfies the working-
-    directory shape exactly -- and answering `-home-ted--claude-projects-sysadmin` would be
+    `~/.claude/projects/-home-user--claude-projects-sysadmin`, so it satisfies the working-
+    directory shape exactly -- and answering `-home-user--claude-projects-sysadmin` would be
     both wrong and well-formed. The `-claude-projects-` marker is the only thing that says
     which form a string is in, so it decides, and `_agent_from_cwd` handles what is left.
     """

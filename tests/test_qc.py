@@ -636,7 +636,7 @@ def bare_log() -> EventLog:
     """A minimal event log whose corpus contains no path resembling a scribe marker.
 
     The `log` and `qc_log` fixtures both extract real transcripts **from this repository**,
-    so their grounding corpora contain `/home/ted/repos/personal/scribe/...` — and the
+    so their grounding corpora contain `/home/user/repos/personal/scribe/...` — and the
     groundedness check tests `claim not in corpus` by substring, which means `/scribe` is
     "grounded" against either of them. A marker test built on those passes whether or not
     the stripping exists. This fixture is what makes these assertions able to fail.
@@ -777,17 +777,17 @@ def test_a_path_that_composes_two_things_the_log_named_is_grounded() -> None:
     digest writes the two joined. That is a true claim about what the model was shown, and it
     was 770 of 875 path findings on the live corpus."""
     log = _log_naming(
-        "cloned into /home/ted/repos/personal/webhook-doorman",
+        "cloned into /home/user/repos/personal/webhook-doorman",
         "the failing test is in tests/unit/test_router.py",
     )
-    assert _grounded("/home/ted/repos/personal/webhook-doorman/tests/unit/test_router.py", log)
+    assert _grounded("/home/user/repos/personal/webhook-doorman/tests/unit/test_router.py", log)
 
 
 def test_a_path_the_log_never_named_is_still_ungrounded() -> None:
     """The matched pair. Neither half of this appears, so no amount of composition reaches it
     -- and it must not, or the gate passes everything."""
     log = _log_naming(
-        "cloned into /home/ted/repos/personal/webhook-doorman",
+        "cloned into /home/user/repos/personal/webhook-doorman",
         "the failing test is in tests/unit/test_router.py",
     )
     assert not _grounded("/etc/nginx/sites-enabled/doorman.conf", log)
@@ -796,8 +796,8 @@ def test_a_path_the_log_never_named_is_still_ungrounded() -> None:
 def test_the_root_is_not_a_directory_prefix() -> None:
     """`MIN_PREFIX_SEGMENTS`. At a floor of one, `/home` plus everything after it composes,
     which would ground every absolute path on the machine against any log that says `/home`."""
-    log = _log_naming("under /home somewhere", "ted/repos/personal/scribe/src/scribe/qc.py")
-    assert not _grounded("/home/ted/repos/personal/scribe/src/scribe/qc.py", log)
+    log = _log_naming("under /home somewhere", "user/repos/personal/scribe/src/scribe/qc.py")
+    assert not _grounded("/home/user/repos/personal/scribe/src/scribe/qc.py", log)
 
 
 def test_a_bare_filename_far_from_its_directory_does_not_compose() -> None:
@@ -806,20 +806,20 @@ def test_a_bare_filename_far_from_its_directory_does_not_compose() -> None:
     that triples the false-ground rate -- and this is the exact shape a fabricated claim takes:
     two real things the session never put together."""
     log = _log_naming(
-        "working in /home/ted/repos/personal/githost-mcp today",
+        "working in /home/user/repos/personal/githost-mcp today",
         "x " * 200,
         "unrelated later work touched changelog.md in another repo",
     )
-    assert not _grounded("/home/ted/repos/personal/githost-mcp/changelog.md", log)
+    assert not _grounded("/home/user/repos/personal/githost-mcp/changelog.md", log)
 
 
 def test_a_bare_filename_beside_its_directory_does_compose() -> None:
     """The matched pair, and the whole reason the window exists rather than a flat refusal:
     said together, they are one claim about one file."""
     log = _log_naming(
-        "in /home/ted/repos/personal/githost-mcp I updated changelog.md for the release"
+        "in /home/user/repos/personal/githost-mcp I updated changelog.md for the release"
     )
-    assert _grounded("/home/ted/repos/personal/githost-mcp/changelog.md", log)
+    assert _grounded("/home/user/repos/personal/githost-mcp/changelog.md", log)
 
 
 def test_an_absolute_claim_grounds_against_a_home_relative_log() -> None:
@@ -827,7 +827,7 @@ def test_an_absolute_claim_grounds_against_a_home_relative_log() -> None:
     digest expands it. Neither composes on its own -- the claim's absolute prefix appears
     nowhere -- and this was the largest bucket left after composition landed."""
     log = _log_naming("filed it to ~/repos/gitea/host-forge-build-reports/thing-2026-09/audit.md")
-    assert _grounded("/home/ted/repos/gitea/host-forge-build-reports/thing-2026-09/audit.md", log)
+    assert _grounded("/home/user/repos/gitea/host-forge-build-reports/thing-2026-09/audit.md", log)
 
 
 def test_re_anchoring_at_tilde_keeps_the_tail_floor() -> None:
@@ -835,7 +835,7 @@ def test_re_anchoring_at_tilde_keeps_the_tail_floor() -> None:
     `~/audit.md` were a candidate, every absolute path ending in a file the log mentions
     home-relative would ground."""
     log = _log_naming("wrote ~/audit.md")
-    assert not _grounded("/home/ted/repos/gitea/host-forge-build-reports/x/audit.md", log)
+    assert not _grounded("/home/user/repos/gitea/host-forge-build-reports/x/audit.md", log)
 
 
 def test_tilde_is_read_from_the_corpus_and_never_from_the_environment(monkeypatch) -> None:
@@ -847,9 +847,9 @@ def test_tilde_is_read_from_the_corpus_and_never_from_the_environment(monkeypatc
     different environments, one verdict.
     """
     log = _log_naming("filed it to ~/repos/gitea/reports/thing/audit.md")
-    claim = "/home/ted/repos/gitea/reports/thing/audit.md"
+    claim = "/home/user/repos/gitea/reports/thing/audit.md"
     verdicts = set()
-    for home in ("/home/ted", "/home/someone-else", "/nonexistent"):
+    for home in ("/home/user", "/home/someone-else", "/nonexistent"):
         monkeypatch.setenv("HOME", home)
         verdicts.add(_grounded(claim, log))
     assert verdicts == {True}
@@ -859,10 +859,10 @@ def test_the_pre_876_rule_is_still_available_and_still_strict() -> None:
     """`path_literal` is what reproduces the "before" number from this commit. If it silently
     acquired the new tolerance, the comparison this build reports would be against itself."""
     log = _log_naming(
-        "cloned into /home/ted/repos/personal/webhook-doorman",
+        "cloned into /home/user/repos/personal/webhook-doorman",
         "the failing test is in tests/unit/test_router.py",
     )
-    claim = "/home/ted/repos/personal/webhook-doorman/tests/unit/test_router.py"
+    claim = "/home/user/repos/personal/webhook-doorman/tests/unit/test_router.py"
     corpus = log.grounding_text().lower()
     allowed = grounding_terms(log)["paths"]
     assert path_grounded(claim, allowed, corpus)
@@ -956,7 +956,7 @@ def test_the_scan_cap_is_on_length_so_late_evidence_still_grounds() -> None:
     the same prefix of the same corpus every run, so the verdict is a function of the corpus
     and the claim alone.
     """
-    prefix = "/home/ted/repos/scribe"
+    prefix = "/home/user/repos/scribe"
     # A ONE-segment tail, so `MIN_TAIL_SEGMENTS` cannot admit the claim and `_adjacent` is the
     # only route left. With two segments the floor grounds it outright and the cap is never
     # consulted -- a version of this test written that way passes on an iteration cap too.
@@ -972,8 +972,8 @@ def test_the_scan_cap_is_on_length_so_late_evidence_still_grounds() -> None:
 
 def test_the_scan_cap_keeps_the_adjacency_window_whole_past_the_cut() -> None:
     """A composition straddling the cap boundary is judged like one before it, not truncated."""
-    corpus = ("x" * 4000 + " /home/ted/repos/scribe notes.md").lower()
-    claim = "/home/ted/repos/scribe/notes.md"
+    corpus = ("x" * 4000 + " /home/user/repos/scribe notes.md").lower()
+    claim = "/home/user/repos/scribe/notes.md"
     assert composition_split(claim, corpus, cap=4005) is not None
 
 
@@ -1005,9 +1005,9 @@ def test_span_routes_do_not_admit_a_claim_on_trimmed_punctuation() -> None:
 
 
 CONTROL_CLAIMS = (
-    "/home/ted/.claude/comms/artifacts/audit-requests/never-ran/request.md",
+    "/home/user/.claude/comms/artifacts/audit-requests/never-ran/request.md",
     "~/repos/personal/imaginary-tool/src/imaginary/main.py",
-    "/opt/appdata/nonexistent-service/config.yml",
+    "/opt/app/data/nonexistent-service/config.yml",
     "/var/log/fabricated/output.log",
 )
 
@@ -1027,12 +1027,12 @@ def test_a_claim_absent_from_its_log_fails_every_route(claim: str) -> None:
     the derived category set, verbatim corpus presence, composition, and `~` re-anchoring.
     """
     corpus = (
-        "read /home/ted/repos/personal/scribe/src/scribe/qc.py and "
-        "~/repos/personal/scribe/tests/test_qc.py; wrote /home/ted/.claude/comms/artifacts/"
-        "build-plans/real-build-2026-09/plan.md; ran pytest -q in /home/ted/repos/personal/scribe"
+        "read /home/user/repos/personal/scribe/src/scribe/qc.py and "
+        "~/repos/personal/scribe/tests/test_qc.py; wrote /home/user/.claude/comms/artifacts/"
+        "build-plans/real-build-2026-09/plan.md; ran pytest -q in /home/user/repos/personal/scribe"
     ).lower()
     allowed = {
-        "/home/ted/repos/personal/scribe/src/scribe/qc.py",
+        "/home/user/repos/personal/scribe/src/scribe/qc.py",
         "~/repos/personal/scribe/tests/test_qc.py",
     }
     assert not path_grounded(claim, allowed, corpus)
@@ -1046,14 +1046,14 @@ def test_the_control_claims_are_rejected_for_absence_and_not_by_a_broken_predica
     positive half that makes the negative one mean something.
     """
     corpus = (
-        "read /home/ted/repos/personal/scribe/src/scribe/qc.py and "
-        "~/repos/personal/scribe/tests/test_qc.py; wrote /home/ted/.claude/comms/artifacts/"
-        "build-plans/real-build-2026-09/plan.md; ran pytest -q in /home/ted/repos/personal/scribe"
+        "read /home/user/repos/personal/scribe/src/scribe/qc.py and "
+        "~/repos/personal/scribe/tests/test_qc.py; wrote /home/user/.claude/comms/artifacts/"
+        "build-plans/real-build-2026-09/plan.md; ran pytest -q in /home/user/repos/personal/scribe"
     ).lower()
-    allowed = {"/home/ted/repos/personal/scribe/src/scribe/qc.py"}
-    assert path_grounded("/home/ted/repos/personal/scribe/src/scribe/qc.py", allowed, corpus)
+    allowed = {"/home/user/repos/personal/scribe/src/scribe/qc.py"}
+    assert path_grounded("/home/user/repos/personal/scribe/src/scribe/qc.py", allowed, corpus)
     assert path_grounded(
-        "/home/ted/.claude/comms/artifacts/build-plans/real-build-2026-09/plan.md",
+        "/home/user/.claude/comms/artifacts/build-plans/real-build-2026-09/plan.md",
         allowed,
         corpus,
     )

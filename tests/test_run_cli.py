@@ -40,7 +40,7 @@ api_key  = {{ env = "SCRIBE_ABSENT_KEY" }}
 
 @pytest.fixture
 def workspace(tmp_path):
-    projects = tmp_path / "projects" / "-home-ted--claude-projects-research"
+    projects = tmp_path / "projects" / "-home-user--claude-projects-research"
     projects.mkdir(parents=True)
     target = projects / "sess.jsonl"
     target.write_bytes((FIXTURES / "transcript-structural.jsonl").read_bytes())
@@ -85,7 +85,7 @@ def test_json_output_carries_totals_and_sessions(workspace, capsys) -> None:
 
 def test_limit_is_honoured(workspace, capsys) -> None:
     cfg, tmp = workspace
-    src = tmp / "projects" / "-home-ted--claude-projects-research" / "sess.jsonl"
+    src = tmp / "projects" / "-home-user--claude-projects-research" / "sess.jsonl"
     for name in ("b.jsonl", "c.jsonl"):
         sibling = src.parent / name
         sibling.write_bytes(src.read_bytes())

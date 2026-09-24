@@ -17,6 +17,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from ..childenv import BASE_ENV, allowlisted_env
 from ..config import ProviderConfig
 
 
@@ -135,6 +136,31 @@ class OpenAICompatibleProvider(Provider):
         )
 
 
+#: The credentials `claude` itself authenticates with, by exact name. Enumerated, not globbed:
+#: `ANTHROPIC_*` / `CLAUDE_*` would also pass whatever else a host happens to name that way,
+#: and a grant nobody can read off the source is not a grant anybody reviewed.
+CLAUDE_CLI_CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+#: Not a credential, but it moves where `claude` looks for one, and for its settings. Dropping
+#: it would not fail -- it would silently authenticate as whatever `~/.claude` holds instead.
+CLAUDE_CLI_CONFIG_ENV = ("CLAUDE_CONFIG_DIR",)
+#: Where the credential above is SENT. These travel with it or not at all: passing
+#: `ANTHROPIC_AUTH_TOKEN` while dropping `ANTHROPIC_BASE_URL` would send a gateway's token to
+#: the default endpoint instead of the gateway, and dropping the proxy or its CA bundle would
+#: stop a proxied host producing summaries at all. A proxy URL can carry its own credentials;
+#: it is passed because `claude` cannot reach anything without it, not because it is safe.
+#: Both spellings of the proxy names, because both are honoured.
+CLAUDE_CLI_ROUTING_ENV = (
+    "ANTHROPIC_BASE_URL",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "NODE_EXTRA_CA_CERTS",
+)
+
+
 class ClaudeCliProvider(Provider):
     """`claude -p` as a subprocess. No API key; already proven on forge.
 
@@ -143,6 +169,12 @@ class ClaudeCliProvider(Provider):
     the response is schema-validated by the caller rather than trusted because the process
     returned zero. This class reports transport-level failure; the contract check is the
     schema's job.
+
+    **The child gets a named environment, not the sweep's** (vikunja#961, SC-06). The sweep
+    holds every other provider's key, and `claude` has no use for any of them. It gets
+    `childenv.BASE_ENV`, its own credential names, `CLAUDE_CONFIG_DIR`, the settings that
+    decide where the credential is sent (endpoint, proxy, CA bundle), and the provider's
+    `api_key_env` if the config names one -- see `child_env`.
     """
 
     name = "claude-cli"
@@ -152,6 +184,19 @@ class ClaudeCliProvider(Provider):
         self.name = cfg.name
         self.model = model or cfg.model
         self.binary = binary
+
+    def child_env(self) -> dict[str, str]:
+        """The environment `claude -p` runs with. Read at call time, as credentials are."""
+        extra = (self.cfg.api_key_env,) if self.cfg.api_key_env else ()
+        return allowlisted_env(
+            (
+                *BASE_ENV,
+                *CLAUDE_CLI_CREDENTIAL_ENV,
+                *CLAUDE_CLI_CONFIG_ENV,
+                *CLAUDE_CLI_ROUTING_ENV,
+                *extra,
+            )
+        )
 
     def complete(self, system: str, user: str, *, timeout: float = 300.0) -> Completion:
         exe = shutil.which(self.binary)
@@ -169,6 +214,7 @@ class ClaudeCliProvider(Provider):
                 text=True,
                 timeout=timeout,
                 check=False,
+                env=self.child_env(),
             )
         except subprocess.TimeoutExpired as exc:
             raise ProviderError(f"{self.name}: timed out after {timeout}s", retryable=True) from exc

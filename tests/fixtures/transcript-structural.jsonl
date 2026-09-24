@@ -5,4 +5,4 @@
 { this line is not valid json
 {"type": "user", "uuid": "sr1", "timestamp": "2026-09-13T11:00:04Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "s_t1", "is_error": false, "content": "Switched to a new branch"}, {"type": "tool_result", "tool_use_id": "s_t2", "is_error": true, "content": "EACCES: permission denied"}, {"type": "tool_result", "tool_use_id": "NO_SUCH_ID", "is_error": false, "content": "orphan"}]}}
 {"type": "user", "uuid": "s2", "timestamp": "2026-09-13T11:05:00Z", "message": {"role": "user", "content": "Second real question"}}
-{"type": "assistant", "uuid": "sa2", "timestamp": "2026-09-13T11:05:01Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Done. See https://vikunja.helmforge.me/tasks/926 for detail."}]}}
+{"type": "assistant", "uuid": "sa2", "timestamp": "2026-09-13T11:05:01Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Done. See https://vikunja.example.com/tasks/926 for detail."}]}}

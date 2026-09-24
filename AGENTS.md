@@ -190,6 +190,21 @@ comparison. Every path that changes a block must also append a line for it — `
 via the pipeline, and `recover`'s anchor stamping. A writer that skips this turns `--check` red
 on correct data. `sha256` hashes the **block**: a file hash goes stale on every later append.
 
+**18. Event logs are kept indefinitely. That is a decision, not a missing feature.**
+Decided by the operator on 2026-09-24 (vikunja#954). Claude Code deletes a transcript 30 days
+after its last write, and after that the event log is the **only** source a digest can be
+re-summarized from (vikunja#873). `recover` exits `3`, needs a human, for exactly the session
+that has lost both. A retention setting that pruned event logs would turn a recoverable loss
+into that one, silently, on a timer.
+
+Growth is watched outside scribe: the operator's recover-check detector owns the size alert
+(vikunja#965). scribe does not warn on it, because a warning in a batch job's output is not
+an alert anyone receives.
+
+If a retention knob is ever added, it **defaults off**, and every log it deletes is counted in
+the run totals and printed on the human surface (invariant 13). A pruning pass that reports
+nothing is indistinguishable from one that pruned nothing.
+
 ## Porting notes
 
 `_INJECTED_PREFIXES` and the `isMeta` guard are ported verbatim from

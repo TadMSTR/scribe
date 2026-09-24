@@ -4,8 +4,8 @@ NE-05 in the fleet's security-patterns knowledge base, recurrence 13 — the sin
 repeated finding across forge audits. This build's specific version: Claude Code transcripts
 are mode 0600, and scribe emits derived content. At the default umask that content lands
 0644, which takes owner-only material and publishes it to the seven `agent-*` accounts on
-this host, none of which are in group `ted`. The world-read bit is exactly the bit that
-grants them access.
+this host, none of which are in the operator's group. The world-read bit is exactly
+the bit that grants them access.
 """
 
 from __future__ import annotations

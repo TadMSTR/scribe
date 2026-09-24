@@ -247,11 +247,11 @@ def test_a_non_positive_limit_is_refused(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("project_dir", "expected"),
     [
-        ("/home/ted/.claude/projects/developer", "developer"),
-        ("/home/ted/.claude/projects/developer/", "developer"),
-        ("/home/ted/.claude/projects/-home-ted--claude-projects-sysadmin", "sysadmin"),
-        ("/home/ted/repos/personal/scribe", ""),
-        ("/home/ted/.claude/projects", ""),
+        ("/home/user/.claude/projects/developer", "developer"),
+        ("/home/user/.claude/projects/developer/", "developer"),
+        ("/home/user/.claude/projects/-home-user--claude-projects-sysadmin", "sysadmin"),
+        ("/home/user/repos/personal/scribe", ""),
+        ("/home/user/.claude/projects", ""),
         ("", ""),
     ],
 )
@@ -392,7 +392,7 @@ def test_the_real_hook_resolves_the_agent_from_the_environment(tmp_path) -> None
     proc = run_hook(
         "--digests",
         str(tmp_path),
-        env={"CLAUDE_PROJECT_DIR": "/home/ted/.claude/projects/developer"},
+        env={"CLAUDE_PROJECT_DIR": "/home/user/.claude/projects/developer"},
     )
     assert proc.returncode == 0, proc.stderr
     assert "- Listed the runs" in json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
@@ -458,14 +458,14 @@ def test_cli_defaults_the_digest_root_to_the_configured_output_dir(tmp_path, cap
 
 def test_cli_resolves_the_agent_from_the_environment(tmp_path, capsys, monkeypatch) -> None:
     write_digest(tmp_path, "sysadmin", datetime(2026, 9, 15, 14, 2))
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/home/ted/.claude/projects/sysadmin")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/home/user/.claude/projects/sysadmin")
     assert journal_main(["--digests", str(tmp_path)]) == 0
     assert "- Listed the runs" in capsys.readouterr().out
 
 
 def test_cli_prefers_an_explicit_agent_over_the_environment(tmp_path, capsys, monkeypatch) -> None:
     write_digest(tmp_path, "developer", datetime(2026, 9, 15, 14, 2))
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/home/ted/.claude/projects/sysadmin")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/home/user/.claude/projects/sysadmin")
     assert journal_main(["--digests", str(tmp_path), "--agent", "developer"]) == 0
     assert "developer" in json.loads(capsys.readouterr().out)["systemMessage"]
 
@@ -567,7 +567,7 @@ def test_a_traversing_project_directory_yields_no_agent() -> None:
     """`~/.claude/projects/..` satisfies every structural test — it really is a directory
     under `projects` whose parent's parent is `.claude` — and `Path(...).name` really is
     `".."`. The environment form reaches the path join as readily as the flag does."""
-    assert agent_for_project("/home/ted/.claude/projects/..") == ""
+    assert agent_for_project("/home/user/.claude/projects/..") == ""
 
 
 def test_the_cli_refuses_a_traversing_agent_and_emits_nothing(tmp_path, capsys) -> None:
@@ -587,7 +587,7 @@ def test_the_real_hook_refuses_a_traversing_project_directory(tmp_path) -> None:
     proc = run_hook(
         "--digests",
         str(tmp_path / "digests"),
-        env={"CLAUDE_PROJECT_DIR": "/home/ted/.claude/projects/.."},
+        env={"CLAUDE_PROJECT_DIR": "/home/user/.claude/projects/.."},
     )
     assert proc.returncode == 0, proc.stderr
     doc = json.loads(proc.stdout)
@@ -653,7 +653,7 @@ def test_reader_and_writer_agree_on_the_agent_name(agent, monkeypatch, tmp_path)
     hyphenated agents on forge because that is the set the old behaviour renamed."""
     projects = Path(os.path.expanduser("~/.claude/projects"))
     (projects / agent).mkdir(parents=True)
-    flattened = f"-home-ted--claude-projects-{agent}"
+    flattened = f"-home-user--claude-projects-{agent}"
     (projects / flattened).mkdir()
 
     writer_side = agent_for_path(flattened)
@@ -665,7 +665,7 @@ def test_reader_and_writer_agree_on_the_agent_name(agent, monkeypatch, tmp_path)
 def test_cwd_resolves_a_hyphenated_agent_exactly(agent) -> None:
     """A session's `cwd` keeps its separators, so there is nothing to disambiguate. The
     parser already captured this field; it simply was not used to name the agent."""
-    assert agent_from_cwd(f"/home/ted/.claude/projects/{agent}") == agent
+    assert agent_from_cwd(f"/home/user/.claude/projects/{agent}") == agent
 
 
 @pytest.mark.parametrize("agent", HYPHENATED)
@@ -675,20 +675,20 @@ def test_the_flattened_form_resolves_against_the_directory_the_names_live_in(age
     The longest candidate that exists on disk wins."""
     projects = Path(os.path.expanduser("~/.claude/projects"))
     (projects / agent).mkdir(parents=True)
-    assert agent_for_path(f"-home-ted--claude-projects-{agent}") == agent
+    assert agent_for_path(f"-home-user--claude-projects-{agent}") == agent
 
 
 def test_the_flattened_form_falls_back_to_the_first_segment(tmp_path) -> None:
     """With nothing on disk to resolve against there is no better answer than the old one,
     and inventing one would be worse than the documented ambiguity."""
-    assert agent_for_path("-home-ted--claude-projects-doc-health") == "doc"
+    assert agent_for_path("-home-user--claude-projects-doc-health") == "doc"
 
 
 def test_a_flattened_directory_inside_projects_is_not_read_as_an_agent_name() -> None:
     """Flattened transcript directories really do live under `~/.claude/projects`, so they
     satisfy the working-directory shape exactly. Resolving `cwd` first would answer
-    `-home-ted--claude-projects-sysadmin` — well-formed, and wrong."""
-    path = "/home/ted/.claude/projects/-home-ted--claude-projects-sysadmin"
+    `-home-user--claude-projects-sysadmin` — well-formed, and wrong."""
+    path = "/home/user/.claude/projects/-home-user--claude-projects-sysadmin"
     assert agent_for_path(path) == "sysadmin"
 
 
@@ -697,7 +697,7 @@ def test_the_digest_lands_where_the_hook_looks_for_it(tmp_path) -> None:
     pipeline path, read through the real hook path, and require the file to be found."""
     projects = Path(os.path.expanduser("~/.claude/projects"))
     (projects / "doc-health").mkdir(parents=True)
-    agent = agent_for_path("-home-ted--claude-projects-doc-health")
+    agent = agent_for_path("-home-user--claude-projects-doc-health")
 
     digests = tmp_path / "digests"
     write_digest(digests, agent, datetime(2026, 9, 15, 14, 2))

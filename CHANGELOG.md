@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-24
+
+**Minor.** Readiness for a public repository, and one subprocess behaviour change. The
+`claude-cli` provider now runs `claude -p` with a named environment instead of inheriting
+the sweep's (vikunja#961), which can change what a `claude-cli` deployment sees. Nothing else
+behaves differently: no schema change (`SCHEMA_VERSION` stays at 2), no exit code moves, no
+config key added or removed.
+
+### Changed
+
+- **`claude -p` no longer inherits the sweep's environment** (vikunja#961, SC-06). It gets
+  `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `TMPDIR`; the
+  credentials `claude` authenticates with (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, by exact name); `CLAUDE_CONFIG_DIR`; the settings that decide
+  where that credential is sent (`ANTHROPIC_BASE_URL`, `HTTPS_PROXY` / `HTTP_PROXY` /
+  `NO_PROXY` in both spellings, `NODE_EXTRA_CA_CERTS`); and the provider's `api_key_env` if
+  the config names one. Before, every other provider's key in the sweep (`MISTRAL_API_KEY`,
+  say) reached it too. `HOME` is kept because `claude` reads its credentials file and its
+  settings from under it. The endpoint travels with the credential deliberately: passing a
+  gateway's `ANTHROPIC_AUTH_TOKEN` without its `ANTHROPIC_BASE_URL` would present that token
+  to the default endpoint. **If a `claude-cli` deployment relied on any other inherited
+  variable**, `claude -p` no longer sees it, and there is no config key to add one yet.
+- The post-write hook and `claude -p` share one base set, now in `scribe.childenv`.
+  `pipeline.HOOK_BASE_ENV` is kept as an alias for it.
+- **Vikunja task URLs are recognised on any host whose first label is `vikunja`**, not on
+  one deployment's hostname. The old pattern extracted no ticket from a URL anywhere else.
+  `try.vikunja.io`, `my.vikunja.example` and `x-vikunja.example` do not match, and neither
+  does any other host's `/tasks/N`. Another instance whose host starts `vikunja.` does match;
+  naming the host in config would close that and is not done here.
+- Package licence metadata uses the SPDX form, `license = "MIT"` plus `license-files`
+  (vikunja#964). The `{ text = "MIT" }` table is deprecated in setuptools with a removal date
+  of 2027-02-18, and a deploy that builds with isolation always gets the newest setuptools,
+  so it would have broken on that date. The wheel now carries `License-Expression: MIT`.
+- Dependabot groups: `dev-tools` (ruff, pytest, pytest-cov) and one group for all GitHub
+  Actions. The previous `dev-dependencies` group matches only uv's own development
+  dependencies and the build floor, not the `dev` extra, so ruff was arriving alone while
+  the comment said it batched. The Actions group keeps codeql-action's matched subpaths in
+  one PR.
+
+### Documentation
+
+- README *Status* is an example deployment with generic paths, not a snapshot of one host.
+  The stale version row and the file counts are gone (vikunja#952).
+- AGENTS.md invariant 18: event logs are kept indefinitely, by decision (vikunja#954). After
+  Claude Code's 30-day transcript expiry, the event log is the only source a digest can be
+  re-summarized from. Any future retention setting must default off and count what it
+  deletes.
+- `.github/CODEOWNERS`.
+
+### Removed
+
+- Deployment-specific values from the tracked tree: home paths, hostnames, a service data
+  path, and a username, in source docstrings, docs, tests and fixtures. They are replaced
+  consistently, so no test changed what it asserts, and the test IDs before and after map
+  one-to-one. The one test that read a real transcript by literal path now builds the path
+  from the real home, so it still runs on the host that has the file.
+
 ## [0.10.0] — 2026-09-24
 
 **Minor.** scribe was indexer-agnostic only for indexers that glob a directory. This release
@@ -325,7 +382,7 @@ Two Low findings from the pre-merge audit, both fixed in the same PR rather than
 
 - **`deps-drift` no longer follows symlinked `dist-info/METADATA`.** It walks a tree and
   head-reads every `METADATA` under the venv it is pointed at, which is the shape that has
-  surfaced `~/.secrets` elsewhere on this fleet. Measured against the unguarded build: a
+  surfaced a secrets directory elsewhere on this fleet. Measured against the unguarded build: a
   `METADATA` symlinked at a secrets file whose first lines parse as RFC822 headers was
   reported as `{'mistral-api-key': 'NOTREAL-abcdef123456'}` — the target's content rendered as
   a package name and version.
@@ -892,7 +949,7 @@ Audit `scribe-release-readiness-2026-09`: **one Low, two Info, nothing at Medium
 
 **The writer and the reader disagreed about where a hyphenated agent's digests live.**
 `_agent_from_project_dir` split Claude Code's flattened directory name at the first hyphen,
-so `-home-ted--claude-projects-doc-health` resolved to `doc`. Three of forge's ten agents are
+so `-home-user--claude-projects-doc-health` resolved to `doc`. Three of forge's ten agents are
 affected: `doc-health`, `helm-build`, `memory-sync`.
 
 Raised as Low by the scribe-journal-feed audit, on the grounds that no colliding `doc/`
@@ -916,9 +973,9 @@ for them without ever erroring.
   thing that can say which.
 - **The flattened form is checked first, and that is a form discriminator rather than a
   ranking.** A flattened transcript directory really does live at
-  `~/.claude/projects/-home-ted--claude-projects-sysadmin`, so it satisfies the
+  `~/.claude/projects/-home-user--claude-projects-sysadmin`, so it satisfies the
   working-directory shape exactly; resolving `cwd` first would answer
-  `-home-ted--claude-projects-sysadmin` — well-formed, and wrong. An existing test caught it.
+  `-home-user--claude-projects-sysadmin` — well-formed, and wrong. An existing test caught it.
 
 No migration: no digests had been written for any affected agent.
 
@@ -1004,7 +1061,7 @@ re-checked afterwards because `scribe qc` needs the log and nothing kept it.
 opened it with `tmp.open("w")` — 0644 at the usual 0022 — and tightened it only afterwards, so
 the payload sat world-readable for the whole write. That payload is the least redacted thing
 scribe keeps: every tool argument, target and result digest of a session, derived from a 0600
-transcript. Seven `agent-*` local accounts exist on this host, none in group `ted`, and the
+transcript. Seven `agent-*` local accounts exist on this host, none in the operator's group, and the
 world-read bit is precisely the bit that grants them access. FW-03 in the fleet pattern
 knowledge base, whose rule also names the half that outlives the window — `rename` preserves
 the *source's* permissions, so a 0644 temp file downgrades an already-0600 destination once it

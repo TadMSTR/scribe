@@ -82,20 +82,20 @@ def corpus(tmp_path):
 
     one = _log(
         "aaaaaaaa",
-        "cloned into /home/ted/repos/personal/alpha",
+        "cloned into /home/user/repos/personal/alpha",
         "the test is tests/unit/test_one.py",
     )
     two = _log(
         "bbbbbbbb",
-        "cloned into /home/ted/repos/personal/beta",
+        "cloned into /home/user/repos/personal/beta",
         "the test is tests/unit/test_two.py",
     )
     for log in (one, two):
         write_eventlog(events, log)
 
     (digests.parent / "developer" / "2026-09-01.md").write_text(
-        _block(one, "- touched /home/ted/repos/personal/alpha/tests/unit/test_one.py")
-        + _block(two, "- touched /home/ted/repos/personal/beta/tests/unit/test_two.py"),
+        _block(one, "- touched /home/user/repos/personal/alpha/tests/unit/test_one.py")
+        + _block(two, "- touched /home/user/repos/personal/beta/tests/unit/test_two.py"),
         encoding="utf-8",
     )
     return tmp_path / "digests", events
@@ -196,16 +196,17 @@ def test_buckets_are_disjoint_and_ordered() -> None:
     """A claim that is both a composition and a suffix match is counted once, as the stronger
     of the two. Without a fixed order the shares depend on evaluation order and two runs of the
     same classifier disagree — which is how this build started."""
-    corpus_text = "/home/ted/repos/personal/alpha and tests/unit/test_one.py"
+    corpus_text = "/home/user/repos/personal/alpha and tests/unit/test_one.py"
     bucket, _, split = classify_path_claim(
-        "/home/ted/repos/personal/alpha/tests/unit/test_one.py",
+        "/home/user/repos/personal/alpha/tests/unit/test_one.py",
         set(),
         corpus_text,
-        home="/home/ted",
+        home="/home/user",
     )
-    assert bucket == COMPOSED and split[0] == "/home/ted/repos/personal/alpha"
+    assert bucket == COMPOSED and split[0] == "/home/user/repos/personal/alpha"
     assert (
-        classify_path_claim("/nowhere/at/all.md", set(), corpus_text, home="/home/ted")[0] == ABSENT
+        classify_path_claim("/nowhere/at/all.md", set(), corpus_text, home="/home/user")[0]
+        == ABSENT
     )
     assert BUCKETS.index(COMPOSED) < BUCKETS.index(SUFFIX) < BUCKETS.index(ABSENT)
 
@@ -214,8 +215,8 @@ def test_longest_present_suffix_counts_from_the_deep_end() -> None:
     """The floor is chosen against this number, so it has to be the *most* of the claim the
     corpus accounts for, not the first run that happens to match."""
     corpus_text = "unit/test_one.py appears, and so does tests/unit/test_one.py"
-    assert longest_present_suffix("/home/ted/alpha/tests/unit/test_one.py", corpus_text) == 3
-    assert longest_present_suffix("/home/ted/alpha/nothing.py", corpus_text) == 0
+    assert longest_present_suffix("/home/user/alpha/tests/unit/test_one.py", corpus_text) == 3
+    assert longest_present_suffix("/home/user/alpha/nothing.py", corpus_text) == 0
 
 
 def test_the_probe_prices_every_floor_it_is_given(corpus) -> None:
@@ -295,9 +296,9 @@ def test_json_output_carries_the_rule_it_was_produced_under(corpus, capsys) -> N
 def test_home_forms_swaps_in_both_directions() -> None:
     """The survey's home bucket is a diagnostic, not the shipped rule — but it has to report
     both directions or it will attribute a tilde-written claim to the wrong bucket."""
-    assert home_forms("~/repos/x.md", "/home/ted") == ["/home/ted/repos/x.md"]
-    assert home_forms("/home/ted/repos/x.md", "/home/ted") == ["~/repos/x.md"]
-    assert home_forms("/etc/example/x.yml", "/home/ted") == []
+    assert home_forms("~/repos/x.md", "/home/user") == ["/home/user/repos/x.md"]
+    assert home_forms("/home/user/repos/x.md", "/home/user") == ["~/repos/x.md"]
+    assert home_forms("/etc/example/x.yml", "/home/user") == []
     assert home_forms("~/repos/x.md", "") == []
 
 

@@ -79,7 +79,7 @@ class Exploding(Provider):
 @pytest.fixture
 def env(tmp_path):
     projects = tmp_path / "projects"
-    d = projects / "-home-ted--claude-projects-research"
+    d = projects / "-home-user--claude-projects-research"
     d.mkdir(parents=True)
     target = d / "sess.jsonl"
     target.write_bytes((FIXTURES / "transcript-structural.jsonl").read_bytes())
@@ -326,7 +326,7 @@ def test_an_unreadable_transcript_is_recorded_not_fatal(env, monkeypatch) -> Non
 def test_a_transcript_with_no_real_turns_is_settled_not_retried(env, tmp_path) -> None:
     """A quiet session is a real outcome. Leaving it unmarked would re-offer it forever."""
     cfg, store, _t = env
-    empty_dir = Path(cfg.project_globs[0].rstrip("/*")) / "-home-ted--claude-projects-writer"
+    empty_dir = Path(cfg.project_globs[0].rstrip("/*")) / "-home-user--claude-projects-writer"
     empty_dir.mkdir(parents=True, exist_ok=True)
     blank = empty_dir / "blank.jsonl"
     blank.write_text("")
@@ -1093,7 +1093,7 @@ def _row_state(store, target):
 
 def _env_for(tmp_path, fixture_name):
     projects = tmp_path / "projects"
-    d = projects / "-home-ted--claude-projects-research"
+    d = projects / "-home-user--claude-projects-research"
     d.mkdir(parents=True)
     target = d / "sess.jsonl"
     target.write_bytes((FIXTURES / fixture_name).read_bytes())

@@ -133,17 +133,23 @@ def test_result_fits_the_declared_size(budget: int) -> None:
     assert log.stats.token_estimate == (log.stats.extracted_chars + 3) // 4
 
 
-def test_real_session_degrades_at_most_one_level_at_default_budget() -> None:
+def test_real_session_degrades_at_most_one_level_at_default_budget(real_home) -> None:
     """Regression guard on the default. Measured across 429 real transcripts: 74% need no
     degradation at all and the busiest reaches level 4. The reference session sits at 1, and
-    a change that pushes it further has changed the extractor's size profile."""
-    path = (
-        "/home/ted/.claude/projects/-home-ted--claude-projects-research/"
-        "2dcbe653-0a16-4675-8004-34f628047a15.jsonl"
-    )
-    import os
+    a change that pushes it further has changed the extractor's size profile.
 
-    if not os.path.exists(path):
+    The path is built from the real home rather than written out, so the host that holds the
+    reference transcript still runs this and no username is committed to reach it. Claude Code
+    names a project directory after its absolute path with `/` flattened to `-`."""
+    flattened = str(real_home).replace("/", "-") + "--claude-projects-research"
+    path = (
+        real_home
+        / ".claude"
+        / "projects"
+        / flattened
+        / "2dcbe653-0a16-4675-8004-34f628047a15.jsonl"
+    )
+    if not path.exists():
         pytest.skip("reference transcript not present on this host")
     log = extract(path)
     assert log.stats.degradation_level <= 1

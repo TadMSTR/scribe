@@ -120,6 +120,23 @@ def test_ticket_refs_come_from_both_shapes(structural) -> None:
     assert "#926" in structural.turns[1].rollup.tickets
 
 
+def test_a_task_url_is_a_ticket_on_any_vikunja_host_and_no_other() -> None:
+    """The URL form is matched by shape, not by one deployment's hostname -- and the shape is
+    what stops it reading every `/tasks/N` on the web as a ticket."""
+    from scribe.extract.parser import _collect_refs
+
+    assert _collect_refs("see https://vikunja.example.com/tasks/926")[0] == ["#926"]
+    assert _collect_refs("see https://vikunja.tracker.example/tasks/17")[0] == ["#17"]
+    assert _collect_refs("see https://tracker.example/tasks/926")[0] == []
+    assert _collect_refs("see https://notvikunja.example.com/tasks/926")[0] == []
+    # `vikunja` as a later label, or after a hyphen, is not the first label. A `\b` anchor
+    # matched all three of these.
+    assert _collect_refs("see https://try.vikunja.io/tasks/5")[0] == []
+    assert _collect_refs("see https://my.vikunja.example/tasks/7")[0] == []
+    assert _collect_refs("see https://x-vikunja.example/tasks/3")[0] == []
+    assert _collect_refs("(vikunja.example.com/tasks/12)")[0] == ["#12"]
+
+
 def test_git_refs_exclude_non_git_hashes() -> None:
     """A bare 7-40 hex scan also matches image digests. A rollup claiming `18cfe3ef` is a
     git ref hands the groundedness gate a fact that is false about the world."""
@@ -139,8 +156,8 @@ def test_session_metadata_is_captured(bearer) -> None:
 def test_agent_is_recovered_from_project_dir() -> None:
     from scribe.extract.parser import _agent_from_project_dir
 
-    assert _agent_from_project_dir("-home-ted--claude-projects-research") == "research"
-    assert _agent_from_project_dir("-home-ted--claude-projects-developer") == "developer"
+    assert _agent_from_project_dir("-home-user--claude-projects-research") == "research"
+    assert _agent_from_project_dir("-home-user--claude-projects-developer") == "developer"
     assert _agent_from_project_dir("something-else") == ""
 
 
@@ -211,8 +228,8 @@ def test_a_hyphenated_agent_is_attributed_from_cwd(tmp_path) -> None:
     built from it, the digests land in a directory the SessionStart hook never looks in.
     """
     p = _transcript(
-        "-home-ted--claude-projects-doc-health",
-        cwd="/home/ted/.claude/projects/doc-health",
+        "-home-user--claude-projects-doc-health",
+        cwd="/home/user/.claude/projects/doc-health",
         tmp_path=tmp_path,
     )
     assert extract(p).agent == "doc-health"
@@ -220,7 +237,7 @@ def test_a_hyphenated_agent_is_attributed_from_cwd(tmp_path) -> None:
 
 def test_attribution_falls_back_to_the_directory_name_without_a_cwd(tmp_path) -> None:
     """A transcript carrying no `cwd` record still has to be attributed to something."""
-    d = tmp_path / "-home-ted--claude-projects-research"
+    d = tmp_path / "-home-user--claude-projects-research"
     d.mkdir(parents=True)
     p = d / "s.jsonl"
     p.write_text(
@@ -237,8 +254,8 @@ def test_a_cwd_outside_the_projects_tree_does_not_override_attribution(tmp_path)
     """A session started in a repo checkout has a `cwd` that names no agent. Letting it win
     would replace a correct name with an empty one."""
     p = _transcript(
-        "-home-ted--claude-projects-research",
-        cwd="/home/ted/repos/personal/scribe",
+        "-home-user--claude-projects-research",
+        cwd="/home/user/repos/personal/scribe",
         tmp_path=tmp_path,
     )
     assert extract(p).agent == "research"
