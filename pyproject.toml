@@ -1,9 +1,13 @@
 [project]
 name = "scribe"
-version = "0.10.0"
+version = "0.11.0"
 description = "Deterministic Claude Code transcript extractor and session summarizer"
 readme = "README.md"
-license = { text = "MIT" }
+# SPDX string, not the `{ text = ... }` table: setuptools deprecated the table with a removal
+# date of 2027-02-18, and the deploy builds with isolation, so it always gets the newest
+# setuptools (vikunja#964). The string form needs setuptools>=77; the build floor is above it.
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 # `scribe.extract` is stdlib-only and must stay that way — it is the one component that is
 # provably offline, and it is the one that reads raw transcripts. That invariant is enforced
@@ -47,8 +51,9 @@ dev = [
     "pytest-cov>=5.0",
     # Pinned exactly, not >=. `ruff format --check` is a CI gate and two patch releases can
     # disagree about whitespace, which turns an unrelated PR red for a reason nobody
-    # changed. Taking a bump is a decision, not a default. 0.16.6 matches the pin already
-    # in use across the fleet (ollama-queue-proxy), so a shared bump moves together.
+    # changed. Taking a bump is a decision, not a default. Keep it on the same version as
+    # the other repos in the fleet, so a shared bump moves together; the version is not
+    # restated here because a comment naming it goes stale on the first bump.
     "ruff==0.16.8",
 ]
 
