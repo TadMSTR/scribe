@@ -6,7 +6,7 @@ import sys
 
 USAGE = (
     "usage: python -m scribe "
-    "{cap-survey|deps-drift|extract|events|journal|qc|qc-survey|recover|run} ..."
+    "{cap-survey|deps-drift|extract|events|index|journal|qc|qc-survey|recover|run} ..."
 )
 
 
@@ -28,6 +28,10 @@ def main(argv: list[str] | None = None) -> int:
         from .events_cli import main as events_main
 
         return events_main(args[1:])
+    if args and args[0] == "index":
+        from .index_cli import main as index_main
+
+        return index_main(args[1:])
     if args and args[0] == "journal":
         from .journal_cli import main as journal_main
 

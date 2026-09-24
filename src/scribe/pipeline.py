@@ -11,7 +11,12 @@ time.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+import os
+import signal
+import subprocess
+import tempfile
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +33,7 @@ from .eventlog import (
 from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
+from .manifest import append_turn
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
 from .state import STATUS_FAILED, SessionRow, Store
 from .summarize.providers import Provider, build
@@ -37,6 +43,7 @@ from .writeback import (
     PROVISIONAL_PLACEHOLDER,
     PROVISIONAL_SUPPRESSED,
     append_block,
+    apply_frontmatter,
     daily_path,
 )
 
@@ -122,6 +129,19 @@ class SessionResult:
     #: its log and no better, and an operator reading a run report should be able to see which
     #: sessions were reconstructed rather than read.
     replayed: bool = False
+    #: Whether this session's block reached `index.jsonl`. False with `manifest_error` set is
+    #: a manifest that is now behind the corpus -- non-fatal, since the manifest observes the
+    #: run and must not take it down, and repairable with `scribe index --rebuild`.
+    #:
+    #: **Not in `errors`, and not a term in `written == summarized + suppressed + placeholder`.**
+    #: The digest was written either way; this is about a side channel. Its own field and its
+    #: own total, per invariant 13, rather than a string an operator has to grep for.
+    manifest_appended: bool = False
+    manifest_error: str = ""
+    #: The `on_digest_written` hook: "" when none is configured or nothing was written, else
+    #: "ok" or "failed". Same reasoning as the manifest -- counted, never fatal, not an error.
+    hook: str = ""
+    hook_error: str = ""
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -153,6 +173,10 @@ class SessionResult:
             "post_render_cause": self.post_render_cause,
             "eventlog_path": self.eventlog_path,
             "replayed": self.replayed,
+            "manifest_appended": self.manifest_appended,
+            "manifest_error": self.manifest_error,
+            "hook": self.hook,
+            "hook_error": self.hook_error,
             "errors": self.errors,
         }
 
@@ -243,6 +267,119 @@ def classify_post_render(eventlog_path: str, values: list[str]) -> str:
     if any(v is False for v in verdicts):
         return CAUSE_MODEL
     return CAUSE_UNKNOWN
+
+
+#: How much of a failing hook's stderr is kept. Its last line is usually the reason; the rest
+#: is the hook's business, and an unbounded string does not belong in a run report.
+HOOK_STDERR_CHARS = 200
+#: How much of the stderr file is read to find that last line.
+HOOK_STDERR_TAIL_BYTES = 4096
+
+
+#: What every hook sees, whatever it is configured with: enough to find its binary and run in
+#: the operator's locale, and nothing that authenticates anything.
+HOOK_BASE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR")
+
+
+def hook_env(extra: Sequence[str] = ()) -> dict[str, str]:
+    """The hook's environment: `HOOK_BASE_ENV` plus the names the operator listed. Nothing else.
+
+    **Not the sweep's own environment.** A sweep runs with the summarizer's credential in it
+    (`MISTRAL_API_KEY` on forge), and an indexer has no use for that key. Inheriting by
+    default would hand it to whatever binary `on_digest_written` names -- SC-06 in the fleet's
+    pattern base, where the recurring form is exactly a new subprocess added without `env=`.
+    An indexer that genuinely needs a secret of its own names it in `on_digest_written_env`,
+    by exact name, so the grant is visible in the config that makes it.
+    """
+    return {k: os.environ[k] for k in (*HOOK_BASE_ENV, *extra) if k in os.environ}
+
+
+def run_hook(
+    argv: Sequence[str], digest: Path, timeout: float, env: dict[str, str] | None = None
+) -> str:
+    """Run `argv + [digest]`. Returns "" on success, else why it failed. Never raises.
+
+    `shell=False` with an argv list -- `config._hook_argv` refuses a string at load for the
+    injection reason given there. stdin is closed and stdout discarded, so a hook can neither
+    wait on the sweep's terminal nor write into the cron log.
+
+    **The outcome is the direct child's, and only the direct child is waited on.** stderr goes
+    to an unlinked temp file, not a pipe. Waiting on a pipe waits for *every* process holding
+    its write end, and an indexer hook that starts a background worker, or daemonises into its
+    own session, hands that end on. With a pipe, a hook that exited 0 leaving a worker behind
+    was reported as timed out, and one whose worker escaped the process group stalled the
+    sweep for the worker's whole lifetime -- the timeout bounded nothing. Both reproduced, and
+    CodeRabbit named them on PR #24. A file has no reader to block.
+
+    **Its own process group, killed as a group on timeout**, so a hung hook takes its children
+    with it. A child that has left the group (`setsid`) survives; it no longer delays the
+    sweep, and killing processes outside the hook's group is not scribe's business.
+    """
+    try:
+        errf = tempfile.TemporaryFile()  # noqa: SIM115 -- entered by `with errf:` below
+    except OSError as exc:
+        # The digest is already on disk; a full /tmp must cost the hook, not the sweep.
+        return f"could not start: no temp file for stderr ({exc})"
+    with errf:
+        try:
+            proc = subprocess.Popen(  # noqa: S603 -- argv list from validated config, no shell
+                # Absolute, so the appended path can never begin with `-` and be read as an
+                # option by the hook -- a relative `output_dir` would pass one through as-is.
+                [*argv, str(Path(digest).absolute())],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=errf,
+                start_new_session=True,
+                env=hook_env() if env is None else env,
+            )
+        except OSError as exc:
+            return f"could not start: {exc}"
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            return f"timed out after {timeout:g}s"
+        if not proc.returncode:
+            return ""
+        # Only the tail: the last line is usually the reason, and a hook's stderr is otherwise
+        # unbounded -- a worker left behind may still be appending to it.
+        size = errf.seek(0, os.SEEK_END)
+        errf.seek(max(0, size - HOOK_STDERR_TAIL_BYTES))
+        err = errf.read(HOOK_STDERR_TAIL_BYTES).decode("utf-8", "replace")
+    lines = [ln for ln in err.splitlines() if ln.strip()]
+    tail = lines[-1].strip()[:HOOK_STDERR_CHARS] if lines else ""
+    return f"exit {proc.returncode}" + (f": {tail}" if tail else "")
+
+
+def _after_write(cfg: Config, result: SessionResult, path: Path, turn_uuid: str) -> None:
+    """Everything that follows a block reaching disk. None of it can unwrite the block.
+
+    Order is load-bearing. Frontmatter first, because it rewrites the file and a hook must be
+    handed the finished file. The manifest before the hook, because the hook is the
+    notification and the manifest is the payload it points at -- a consumer woken by the hook
+    must find its line already there. The manifest hashes the BLOCK, which frontmatter does
+    not touch, so the two do not interact.
+    """
+    if cfg.emit_frontmatter:
+        try:
+            apply_frontmatter(path)
+        except OSError as exc:
+            result.errors.append(f"frontmatter: {exc}")
+    try:
+        append_turn(cfg, path, turn_uuid)
+        result.manifest_appended = True
+    except (OSError, LookupError, ValueError) as exc:
+        result.manifest_error = str(exc)
+    if cfg.on_digest_written:
+        result.hook_error = run_hook(
+            cfg.on_digest_written,
+            path,
+            cfg.on_digest_written_timeout_seconds,
+            env=hook_env(cfg.on_digest_written_env),
+        )
+        result.hook = "failed" if result.hook_error else "ok"
 
 
 def _load_session(row: SessionRow, cfg: Config) -> tuple[EventLog, bool]:
@@ -499,6 +636,8 @@ def process_session(
         result.errors.append(
             "digest produced but not written: the turn already holds a final block"
         )
+    if result.written:
+        _after_write(cfg, result, path, _last_turn_uuid(log))
 
     if outcome.ok:
         store.mark_summarized(
@@ -602,6 +741,12 @@ def summarize_run(results: list[SessionResult]) -> dict:
         #: written without its event log is a digest that can never be re-checked, and that
         #: is the state this build exists to end.
         "eventlogs_written": sum(1 for r in results if r.eventlog_path),
+        #: Blocks recorded in `index.jsonl`, and blocks written that were NOT. The second is
+        #: the one to watch: it means the manifest is behind the corpus until a rebuild.
+        "manifest_appended": sum(1 for r in results if r.manifest_appended),
+        "manifest_errors": sum(1 for r in results if r.manifest_error),
+        "hook_ok": sum(1 for r in results if r.hook == "ok"),
+        "hook_failed": sum(1 for r in results if r.hook == "failed"),
         "input_tokens": sum(r.input_tokens for r in results),
         "output_tokens": sum(r.output_tokens for r in results),
         "degraded": sum(1 for r in results if r.degradation_level),

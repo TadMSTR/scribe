@@ -1179,3 +1179,267 @@ def test_a_dry_run_still_records_what_it_observed(turnless_env) -> None:
     assert row is not None, "a dry run must still record that it saw the transcript"
     assert row.size_bytes == target.stat().st_size
     assert row.mtime_ns == target.stat().st_mtime_ns
+
+
+# --------------------------------------------------------------------------------------
+# Manifest, hook and frontmatter on the live path (vikunja#891)
+# --------------------------------------------------------------------------------------
+
+
+def _manifest(cfg) -> list[dict]:
+    path = cfg.manifest_file()
+    return [json.loads(ln) for ln in path.read_text().splitlines()] if path.exists() else []
+
+
+def _identity_holds(results) -> bool:
+    t = summarize_run(results)
+    return t["written"] == t["summarized"] + t["suppressed"] + t["placeholders"]
+
+
+def _second_session(target: Path) -> Path:
+    """The fixture again under a new session id and new record uuids: same agent, same day."""
+    other = target.with_name("sess-two.jsonl")
+    text = target.read_text().replace("sess-struct", "sess-two").replace('"uuid": "', '"uuid": "b-')
+    other.write_text(text)
+    os.utime(other, (1_000_000.0 - 3600, 1_000_000.0 - 3600))
+    return other
+
+
+def test_a_live_run_records_its_block_in_the_manifest(env) -> None:
+    cfg, store, _t = env
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.manifest_appended is True and r.manifest_error == ""
+    (line,) = _manifest(cfg)
+    assert line["path"] == "research/2026-09-13.md"
+    assert line["session_id"] == "sess-struct"
+    assert line["provisional"] == ""
+    assert line["eventlog_path"] == Path(r.eventlog_path).name
+    assert summarize_run([r])["manifest_appended"] == 1
+
+
+def test_a_dry_run_writes_no_manifest(env) -> None:
+    cfg, store, _t = env
+    run_once(cfg, store, dry_run=True, now=1_000_000.0, provider_factory=lambda: Exploding())
+    assert not cfg.manifest_file().exists()
+
+
+def test_a_placeholder_then_its_digest_give_two_lines_for_one_key(env) -> None:
+    """Verification step 3, first shape, through the real sweep: the provisional block is
+    replaced in place, so the second line has the SAME key and a different hash."""
+    from scribe.manifest import check
+
+    cfg, store, _t = env
+    err = ProviderError("bad request", retryable=False)
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(err))
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    first, second = _manifest(cfg)
+    assert (first["path"], first["turn_uuid"]) == (second["path"], second["turn_uuid"])
+    assert (first["provisional"], second["provisional"]) == ("placeholder", "")
+    assert first["sha256"] != second["sha256"]
+    assert check(cfg).clean
+
+
+def test_two_sessions_on_one_day_give_one_path_and_two_keys(env) -> None:
+    """Verification step 3, second shape."""
+    from scribe.manifest import check
+
+    cfg, store, target = env
+    _second_session(target)
+    results = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert len(results) == 2
+    a, b = _manifest(cfg)
+    assert a["path"] == b["path"]
+    assert a["turn_uuid"] != b["turn_uuid"]
+    assert check(cfg).clean
+
+
+def test_a_manifest_that_cannot_be_written_does_not_lose_the_digest(env, tmp_path) -> None:
+    cfg, store, _t = env
+    blocker = tmp_path / "manifest-is-a-directory"
+    blocker.mkdir()
+    cfg.manifest_path = str(blocker)
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.written is True and r.summarized is True
+    assert r.manifest_appended is False and r.manifest_error
+    assert r.errors == []  # its own counter, not an error string (invariant 13)
+    totals = summarize_run([r])
+    assert totals["manifest_errors"] == 1
+    assert _identity_holds([r])
+
+
+def _hook(tmp_path: Path, body: str) -> Path:
+    script = tmp_path / "hook.sh"
+    script.write_text("#!/bin/sh\n" + body)
+    script.chmod(0o700)
+    return script
+
+
+def test_the_hook_is_handed_the_digest_after_its_manifest_line(env, tmp_path) -> None:
+    """Exactly once, with the finished file, and with the payload already in place.
+
+    The hook APPENDS what it sees, so a second invocation -- or one that ran before the
+    manifest line existed -- shows up as extra or missing lines rather than being overwritten
+    by a later, correct call.
+    """
+    cfg, store, _t = env
+    seen = tmp_path / "seen"
+    cfg.on_digest_written = (
+        str(_hook(tmp_path, f'echo "$1" >> {seen}\ncat {cfg.manifest_file()} >> {seen}\n')),
+    )
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "ok" and r.hook_error == ""
+    arg, manifest_line = seen.read_text().splitlines()
+    assert Path(arg) == output_root(cfg) / "research" / "2026-09-13.md"
+    assert json.loads(manifest_line)["path"] == "research/2026-09-13.md"
+    assert summarize_run([r])["hook_ok"] == 1
+
+
+def test_a_failing_hook_is_counted_and_cannot_break_the_run(env, tmp_path) -> None:
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(_hook(tmp_path, 'echo "indexer said no" >&2\nexit 1\n')),)
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.written is True and r.summarized is True
+    assert r.hook == "failed"
+    assert r.hook_error == "exit 1: indexer said no"
+    assert r.errors == []
+    assert summarize_run([r])["hook_failed"] == 1
+    assert _identity_holds([r])
+
+
+def test_a_hung_hook_is_killed_with_its_children_at_the_timeout(env, tmp_path) -> None:
+    """A grandchild holding stderr would stall `subprocess.run(timeout=)` past its timeout."""
+    import time
+
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(_hook(tmp_path, "sleep 30 &\nsleep 30\n")),)
+    cfg.on_digest_written_timeout_seconds = 0.5
+    start = time.monotonic()
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert time.monotonic() - start < 10
+    assert r.hook == "failed" and "timed out" in r.hook_error
+    assert r.written is True
+    assert _identity_holds([r])
+
+
+def test_a_hook_that_does_not_exist_is_a_failure_not_a_crash(env, tmp_path) -> None:
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(tmp_path / "no-such-indexer"),)
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "failed" and "could not start" in r.hook_error
+    assert r.written is True
+
+
+def test_no_hook_configured_spawns_nothing(env, monkeypatch) -> None:
+    import subprocess
+
+    cfg, store, _t = env
+
+    def boom(*a, **k):
+        raise AssertionError("no hook is configured; nothing may be spawned")
+
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == ""
+    assert summarize_run([r])["hook_ok"] == summarize_run([r])["hook_failed"] == 0
+
+
+def test_the_hook_runs_without_a_shell(env, tmp_path) -> None:
+    """An argv element full of shell syntax is passed through literally, never interpreted."""
+    cfg, store, _t = env
+    seen = tmp_path / "seen"
+    canary = tmp_path / "canary"
+    cfg.on_digest_written = (
+        str(_hook(tmp_path, f'printf "%s\\n" "$1" > {seen}\n')),
+        f"; touch {canary}",
+    )
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "ok"
+    assert seen.read_text() == f"; touch {canary}\n"
+    assert not canary.exists()
+
+
+def test_emit_frontmatter_on_the_live_path(env) -> None:
+    from scribe.manifest import check
+
+    cfg, store, _t = env
+    cfg.emit_frontmatter = True
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    (written,) = list(output_root(cfg).rglob("*.md"))
+    text = written.read_text()
+    assert text.startswith("---\n")
+    assert 'session_ids: ["sess-struct"]' in text
+    assert r.errors == []
+    assert check(cfg).clean
+
+
+def test_frontmatter_is_off_by_default(env) -> None:
+    cfg, store, _t = env
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    (written,) = list(output_root(cfg).rglob("*.md"))
+    assert written.read_text().startswith("# 2026-09-13")
+
+
+def test_the_hook_does_not_inherit_the_summarizers_credential(env, tmp_path, monkeypatch):
+    """SC-06: a new subprocess without `env=` inherits every secret the sweep holds."""
+    cfg, store, _t = env
+    monkeypatch.setenv("MISTRAL_API_KEY", "NOTREAL-summarizer-key")
+    monkeypatch.setenv("MY_INDEXER_TOKEN", "NOTREAL-indexer-token")
+    seen = tmp_path / "env"
+    cfg.on_digest_written = (str(_hook(tmp_path, f"env > {seen}\n")),)
+    cfg.on_digest_written_env = ("MY_INDEXER_TOKEN",)
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "ok"
+    names = {ln.split("=", 1)[0] for ln in seen.read_text().splitlines() if "=" in ln}
+    assert "MISTRAL_API_KEY" not in names
+    assert "MY_INDEXER_TOKEN" in names
+    assert "PATH" in names
+
+
+def test_a_hook_that_leaves_a_worker_behind_succeeds_on_time(env, tmp_path) -> None:
+    """The hook's outcome is its own exit status. A background worker holding stderr must not
+    turn a clean exit into a reported timeout (CodeRabbit, PR #24)."""
+    import time
+
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(_hook(tmp_path, "sleep 20 &\nexit 0\n")),)
+    cfg.on_digest_written_timeout_seconds = 5
+    start = time.monotonic()
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "ok", r.hook_error
+    assert time.monotonic() - start < 4
+
+
+def test_a_hook_whose_worker_escapes_the_group_cannot_stall_the_sweep(env, tmp_path) -> None:
+    """`setsid` puts the worker outside the process group, so `killpg` cannot reach it. With a
+    stderr pipe, the sweep then waited out the worker's whole lifetime. The timeout must bound
+    the sweep regardless of what the hook leaves behind."""
+    import shutil
+    import time
+
+    if shutil.which("setsid") is None:
+        pytest.skip("setsid not installed")
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(_hook(tmp_path, "setsid sleep 20 &\nsleep 20\n")),)
+    cfg.on_digest_written_timeout_seconds = 1
+    start = time.monotonic()
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.hook == "failed" and "timed out" in r.hook_error
+    assert time.monotonic() - start < 6
+
+
+def test_no_temp_storage_for_the_hook_is_a_hook_failure_not_a_crash(env, tmp_path, monkeypatch):
+    """`run_hook` never raises. With /tmp full, the digest is already written; the sweep must
+    carry on and report the hook as failed (CodeRabbit, PR #24, second pass)."""
+    import tempfile
+
+    cfg, store, _t = env
+    cfg.on_digest_written = (str(_hook(tmp_path, "exit 0\n")),)
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(tempfile, "TemporaryFile", full)
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub())
+    assert r.written is True
+    assert r.hook == "failed" and "No space left" in r.hook_error
+    assert _identity_holds([r])

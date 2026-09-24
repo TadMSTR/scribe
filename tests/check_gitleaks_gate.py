@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -104,6 +105,49 @@ def scan(directory: Path) -> tuple[int, set[str]]:
     return proc.returncode, rules
 
 
+def repo_snapshot(dest: Path) -> int:
+    """Copy the files git would commit into `dest`, and return how many were copied.
+
+    Tracked files plus untracked-but-not-ignored ones (`--exclude-standard`), taken from the
+    WORKING TREE so uncommitted edits are scanned too. What is left out is what `.gitignore`
+    excludes -- `.venv/`, caches, local data -- which is content no commit carries and which
+    the CI gate never sees, because CI scans a clean checkout.
+
+    Scanning `REPO_ROOT` itself with `--no-git` walked all of it (vikunja#899). With the
+    distro gitleaks on forge that reported 202 findings in `.venv` and failed the gate for a
+    reason that was not the repository; with the pinned version it happened to be 0. A gate
+    whose verdict depends on what a developer has pip-installed is measuring the developer.
+
+    A path deleted in the working tree but still in the index is skipped: there is nothing
+    to scan.
+    """
+    # S603/S607: `git` by name, like `gitleaks` above; no element of the argv is external.
+    listing = subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout.decode("utf-8", "surrogateescape")
+    copied = 0
+    for rel in sorted(set(filter(None, listing.split("\0")))):
+        src = REPO_ROOT / rel
+        if not src.is_file() or src.is_symlink():
+            continue
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, target)
+        copied += 1
+    return copied
+
+
 def main() -> int:
     if shutil.which("gitleaks") is None:
         print("FAIL gitleaks is not installed — the gate cannot be verified")
@@ -119,11 +163,13 @@ def main() -> int:
         check=False,
     ).stdout.strip()
     print(f"gitleaks gate checks (installed: {installed or 'unknown'}, CI pins {GITLEAKS_PINNED})")
-    if installed != GITLEAKS_PINNED:
-        print(
-            f"  NOTE  local gitleaks is {installed or 'unknown'}, not {GITLEAKS_PINNED}. "
-            "Rulesets differ between versions — a pass here is not a pass in CI."
-        )
+    # Loud, and repeated beside the verdict at the end. This used to be one `NOTE` line above
+    # seven `ok`s, and it is the single fact that decides whether the run means anything:
+    # forge's distro binary prints no version at all and fails this gate on content the
+    # pinned one allowlists. A caveat that is easy to read past is not a caveat.
+    skew = installed != GITLEAKS_PINNED
+    if skew:
+        print(_skew_banner(installed))
 
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
@@ -166,15 +212,45 @@ def main() -> int:
         code, _ = scan(d)
         check(code == 0, "clean tree reports no leaks")
 
-    # The repository itself, with its allowlisted synthetic fixtures, must be clean.
-    code, rules = scan(REPO_ROOT)
-    check(code == 0, f"this repository is clean (rules fired: {sorted(rules) or 'none'})")
+    # The repository itself, with its allowlisted synthetic fixtures, must be clean. Scanned
+    # as the set of files a commit could carry, not as a directory -- see `repo_snapshot`.
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        try:
+            copied = repo_snapshot(d)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            # Not skippable, per the module docstring: a repository check that could not run
+            # must not read as one that passed.
+            check(False, f"could not list the repository's files ({exc})")
+        else:
+            check(copied > 0, f"repository snapshot is non-empty ({copied} files)")
+            code, rules = scan(d)
+            check(code == 0, f"this repository is clean (rules fired: {sorted(rules) or 'none'})")
 
+    suffix = " -- NOT against the gitleaks version CI pins" if skew else ""
     if FAILURES:
-        print(f"\n{len(FAILURES)} gate check(s) failed")
+        print(f"\n{len(FAILURES)} gate check(s) failed{suffix}")
+        if skew:
+            print(_skew_banner(installed))
         return 1
-    print("\nall gate checks passed")
+    print(f"\nall gate checks passed{suffix}")
+    if skew:
+        print(_skew_banner(installed))
     return 0
+
+
+def _skew_banner(installed: str) -> str:
+    # The Debian build answers `gitleaks version` with "version is set by build process",
+    # which reads as nonsense spliced into a sentence. Say what it means instead.
+    what = installed if re.fullmatch(r"v?\d+(\.\d+)*", installed) else "an unversioned build"
+    rule = "!" * 78
+    return (
+        f"{rule}\n"
+        f"!! gitleaks on PATH is {what}; CI pins {GITLEAKS_PINNED}.\n"
+        "!! Rulesets differ between versions: this result says NOTHING about CI, in either\n"
+        "!! direction. Fetch the pinned binary (see AGENTS.md, Testing) and re-run.\n"
+        f"{rule}"
+    )
 
 
 if __name__ == "__main__":

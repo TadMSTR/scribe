@@ -317,3 +317,31 @@ def test_the_command_a_placeholder_recommends_actually_runs(workspace, capsys, m
         except SystemExit as exc:  # argparse rejects unknown flags this way
             code = exc.code
         assert code != 2, f"`scribe {' '.join(argv)}` is not runnable -- exited 2"
+
+
+# --- vikunja#891: the manifest and the hook report on the surface the cron reads ----------
+
+
+def test_a_manifest_append_failure_is_printed_with_its_remedy(workspace, capsys, monkeypatch):
+    cfg, _tmp = workspace
+    _with_placeholder(monkeypatch, manifest_error="Permission denied")
+    run_main(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert "1 digest(s) written but NOT recorded in index.jsonl" in out
+    assert "`scribe index --rebuild`" in out
+    assert "sess.jsonl: manifest: Permission denied" in out
+
+
+def test_hook_outcomes_are_printed(workspace, capsys, monkeypatch) -> None:
+    cfg, _tmp = workspace
+    _with_placeholder(monkeypatch, hook="failed", hook_error="exit 1: nope")
+    run_main(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert "on_digest_written: 0 ok, 1 failed" in out
+    assert "sess.jsonl: hook: exit 1: nope" in out
+
+
+def test_a_run_without_a_hook_prints_no_hook_line(workspace, capsys) -> None:
+    cfg, _tmp = workspace
+    run_main(["--config", str(cfg)])
+    assert "on_digest_written" not in capsys.readouterr().out

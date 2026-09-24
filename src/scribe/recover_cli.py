@@ -89,6 +89,7 @@ from pathlib import Path
 
 from .config import Config, ConfigError, load
 from .eventlog import EventLogError, load_eventlog, session_eventlog
+from .manifest import append_turn
 from .state import SchemaTooNewError, Store
 from .summarize.contamination import SUPPRESSION_MARKER
 from .summarize.render import PLACEHOLDER_MARKER
@@ -305,9 +306,23 @@ def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
     stamped = 0
     reset: list[str] = []
     missing: list[str] = []
+    manifest_errors: list[str] = []
     for path, blocks in by_file.items():
         if apply:
-            stamped += stamp(path, blocks)
+            n = stamp(path, blocks)
+            stamped += n
+            if n:
+                # Stamping rewrites the anchor, which changes the block's hash and its
+                # `provisional` field. Without a line here, `scribe index --check` would
+                # report drift after a legitimate recovery -- a check that goes red on correct
+                # data is one an operator learns to ignore.
+                for b in blocks:
+                    if b.stamped:
+                        continue
+                    try:
+                        append_turn(cfg, path, b.turn_uuid)
+                    except (OSError, LookupError, ValueError) as exc:
+                        manifest_errors.append(f"{path}: {exc}")
         else:
             stamped += sum(1 for b in blocks if not b.stamped)
 
@@ -342,6 +357,9 @@ def recover(cfg: Config, store: Store, *, apply: bool) -> dict:
         "reset": sorted(reset),
         "missing": sorted(missing),
         "applied": apply,
+        #: Stamped blocks whose manifest line could not be appended. Non-fatal; the manifest
+        #: is then behind the corpus until `scribe index --rebuild`.
+        "manifest_errors": manifest_errors,
     }
 
 
@@ -415,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     for tpath in report["missing"]:
         print(f"  !! no transcript or state row: {tpath}")
+    for err in report["manifest_errors"]:
+        print(f"  !! manifest line not appended ({err}) -- run `scribe index --rebuild`")
 
     # `--apply` is the REPAIR, and a repair that worked exits 0. Reporting the blocks it just
     # stamped as a failure would page an operator every time the thing succeeded (vikunja#398).

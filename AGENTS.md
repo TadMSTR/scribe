@@ -173,6 +173,23 @@ figure in every snapshot taken so far, and 120 is still right: the step from 80 
 true claims for 5 false, and 80 only wins the pool by averaging in the cheap first 80
 characters where evidence is densest. Compare the increment, not the average.
 
+**17. Nothing but digests lives under `output_dir`, and the manifest is derived, never authoritative.**
+`eventlog_dir` and `index.jsonl` are both **siblings** of the digest root, never children. The
+indexer contract is "index `output_dir`, never index `eventlog_dir`" (README, *Using a
+different indexer*), and forge's qmd collection globs `<output_dir>/**/*.md`. Anything nested
+under that root is one glob change away from being indexed as if it were a digest, so the
+exclusion is kept structural rather than left to a pattern somebody has to maintain.
+`config.load` refuses a `manifest_path` inside either tree, and checks the *effective* path,
+so a default swallowed by an odd `eventlog_dir` is caught too.
+
+Every `index.jsonl` field except `written_at` is re-derivable from the digests, and
+`scribe index --check` is the proof: if you add a field, `manifest._record` must be able to
+compute it from what is on disk, or `--check` fails on every line forever. That is the
+failure `written_at` would have caused, and it is why `written_at` is excluded from the
+comparison. Every path that changes a block must also append a line for it — `append_block`
+via the pipeline, and `recover`'s anchor stamping. A writer that skips this turns `--check` red
+on correct data. `sha256` hashes the **block**: a file hash goes stale on every later append.
+
 ## Porting notes
 
 `_INJECTED_PREFIXES` and the `isMeta` guard are ported verbatim from
@@ -199,6 +216,13 @@ academic: gitleaks 8.28.0 allowlists AWS's documented example key `AKIAIOSFODNN7
 older versions do not, so a probe built on it passed locally and failed in CI. The prover
 prints both versions and warns on a mismatch. Get the pinned one with the same commands the
 workflow uses.
+
+The prover's repository check scans **the files a commit could carry**: tracked plus
+untracked-but-not-ignored, copied from the working tree (`git ls-files --cached --others
+--exclude-standard`). It used to walk `REPO_ROOT` with `--no-git`, which included `.venv/`.
+The distro binary found 202 hits there, so the gate's verdict depended on what the
+developer had pip-installed (vikunja#899). The four planted probes still use `--no-git`,
+because they scan temp directories that are not git repositories.
 
 **Prove a new gate red before trusting it green.** The pattern used here: copy the tree to a
 temporary directory, neuter the function body while keeping its signature, and confirm the
