@@ -76,11 +76,11 @@
       "ended_at": "2026-09-13T11:05:01Z",
       "user_text": "Second real question",
       "assistant_text": [
-        "Done. See https://vikunja.helmforge.me/tasks/926 for detail."
+        "Done. See https://vikunja.example.com/tasks/926 for detail."
       ],
       "rollup": {
         "urls": [
-          "https://vikunja.helmforge.me/tasks/926"
+          "https://vikunja.example.com/tasks/926"
         ],
         "tickets": [
           "#926"
@@ -99,7 +99,7 @@
       "mcp__scoped-mcp__vikunja-mcp_task_get"
     ],
     "urls": [
-      "https://vikunja.helmforge.me/tasks/926"
+      "https://vikunja.example.com/tasks/926"
     ],
     "tickets": [
       "#843",

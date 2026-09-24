@@ -66,7 +66,7 @@ from .writeback import paired_blocks
 #: contradiction — the gate rejected something its own rule accepts — so it is carried as an
 #: invariant rather than an expected outcome.
 VERBATIM = "verbatim"
-#: `~/x` where the log holds `/home/ted/x`, or the reverse. One substitution, no composition.
+#: `~/x` where the log holds `/home/user/x`, or the reverse. One substitution, no composition.
 HOME_EXPANSION = "home-expansion"
 #: A directory the log names, joined to a relative tail the log also names. Both halves are
 #: separately present; only their concatenation is not. This is vikunja#876's stated defect.

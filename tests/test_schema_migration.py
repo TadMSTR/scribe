@@ -48,9 +48,9 @@ from regenerate_schema_v1 import (
 #: Legacy rows as schema 1 left them: `session_id` empty, because nothing supplied it after
 #: extraction until vikunja#872. The stems are real-shaped session ids.
 LEGACY_ROWS = [
-    ("/home/ted/.claude/projects/dev/3f2a9c81-4b7e-4d1a-9c22-8e5f0a1b2c3d.jsonl", "summarized"),
-    ("/home/ted/.claude/projects/ops/7c4e1d92-5a8f-4e2b-8d33-9f6a1b2c3d4e.jsonl", "summarized"),
-    ("/home/ted/.claude/projects/dev/not a bare id.jsonl", "complete"),
+    ("/home/user/.claude/projects/dev/3f2a9c81-4b7e-4d1a-9c22-8e5f0a1b2c3d.jsonl", "summarized"),
+    ("/home/user/.claude/projects/ops/7c4e1d92-5a8f-4e2b-8d33-9f6a1b2c3d4e.jsonl", "summarized"),
+    ("/home/user/.claude/projects/dev/not a bare id.jsonl", "complete"),
 ]
 
 

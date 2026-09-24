@@ -45,7 +45,7 @@ api_key  = {{ env = "SCRIBE_ABSENT_KEY" }}
 
 @pytest.fixture
 def config(tmp_path):
-    projects = tmp_path / "projects" / "-home-ted--claude-projects-research"
+    projects = tmp_path / "projects" / "-home-user--claude-projects-research"
     projects.mkdir(parents=True)
     target = projects / "sess.jsonl"
     target.write_bytes((FIXTURES / "transcript-structural.jsonl").read_bytes())

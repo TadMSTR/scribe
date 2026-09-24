@@ -56,7 +56,7 @@ def _default_config(tmp_path: Path) -> Config:
     path is left on its default so that a missing guard shows up as a write to the real home.
     """
     projects = tmp_path / "projects"
-    d = projects / "-home-ted--claude-projects-research"
+    d = projects / "-home-user--claude-projects-research"
     d.mkdir(parents=True)
     target = d / "sess.jsonl"
     target.write_bytes((FIXTURES / "transcript-structural.jsonl").read_bytes())

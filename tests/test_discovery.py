@@ -24,8 +24,8 @@ QUIET_S = QUIET * 60
 @pytest.fixture
 def env(tmp_path):
     projects = tmp_path / "projects"
-    (projects / "-home-ted--claude-projects-research").mkdir(parents=True)
-    (projects / "-home-ted--claude-projects-writer").mkdir(parents=True)
+    (projects / "-home-user--claude-projects-research").mkdir(parents=True)
+    (projects / "-home-user--claude-projects-writer").mkdir(parents=True)
     cfg = Config(
         quiet_period_minutes=QUIET,
         project_globs=(str(projects / "*") + "/",),
@@ -44,35 +44,35 @@ def _touch(path, *, content: str = "{}\n", age_seconds: float = 0.0, now: float 
 
 def test_finds_transcripts_across_project_dirs(env) -> None:
     cfg, _store, projects = env
-    _touch(projects / "-home-ted--claude-projects-research" / "a.jsonl")
-    _touch(projects / "-home-ted--claude-projects-writer" / "b.jsonl")
+    _touch(projects / "-home-user--claude-projects-research" / "a.jsonl")
+    _touch(projects / "-home-user--claude-projects-writer" / "b.jsonl")
     found = sorted(d.path.name for d in iter_transcripts(cfg.project_globs, now=1_000_000.0))
     assert found == ["a.jsonl", "b.jsonl"]
 
 
 def test_agent_is_recovered_from_the_project_dir(env) -> None:
     cfg, _store, projects = env
-    _touch(projects / "-home-ted--claude-projects-research" / "a.jsonl")
+    _touch(projects / "-home-user--claude-projects-research" / "a.jsonl")
     (found,) = list(iter_transcripts(cfg.project_globs, now=1_000_000.0))
     assert found.agent == "research"
 
 
 def test_non_jsonl_files_are_ignored(env) -> None:
     cfg, _store, projects = env
-    _touch(projects / "-home-ted--claude-projects-research" / "notes.md")
+    _touch(projects / "-home-user--claude-projects-research" / "notes.md")
     assert list(iter_transcripts(cfg.project_globs, now=1_000_000.0)) == []
 
 
 def test_excluded_path_components_are_skipped(env) -> None:
     cfg, _store, projects = env
-    _touch(projects / "-home-ted--claude-projects-research" / ".memsearch" / "c.jsonl")
+    _touch(projects / "-home-user--claude-projects-research" / ".memsearch" / "c.jsonl")
     cfg.project_globs = (str(projects / "*" / "*") + "/",)
     assert list(iter_transcripts(cfg.project_globs, cfg.exclude, now=1_000_000.0)) == []
 
 
 def test_idle_seconds_is_measured_from_mtime(env) -> None:
     cfg, _store, projects = env
-    _touch(projects / "-home-ted--claude-projects-research" / "a.jsonl", age_seconds=300)
+    _touch(projects / "-home-user--claude-projects-research" / "a.jsonl", age_seconds=300)
     (found,) = list(iter_transcripts(cfg.project_globs, now=1_000_000.0))
     assert 299 <= found.idle_seconds <= 301
 
@@ -80,16 +80,16 @@ def test_idle_seconds_is_measured_from_mtime(env) -> None:
 def test_a_file_newer_than_now_reports_zero_idle_not_negative(env) -> None:
     """Clock skew, or a copy that reset the timestamp, must not produce a negative age."""
     cfg, _store, projects = env
-    _touch(projects / "-home-ted--claude-projects-research" / "a.jsonl", age_seconds=-500)
+    _touch(projects / "-home-user--claude-projects-research" / "a.jsonl", age_seconds=-500)
     (found,) = list(iter_transcripts(cfg.project_globs, now=1_000_000.0))
     assert found.idle_seconds == 0.0
 
 
 def test_active_session_is_not_ready(env) -> None:
     cfg, store, projects = env
-    _touch(projects / "-home-ted--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S - 60)
+    _touch(projects / "-home-user--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S - 60)
     assert scan(cfg, store, now=1_000_000.0) == []
-    assert store.get(str(projects / "-home-ted--claude-projects-research" / "a.jsonl")).status == (
+    assert store.get(str(projects / "-home-user--claude-projects-research" / "a.jsonl")).status == (
         STATUS_ACTIVE
     )
 
@@ -97,7 +97,7 @@ def test_active_session_is_not_ready(env) -> None:
 def test_idle_session_becomes_ready(env) -> None:
     cfg, store, projects = env
     p = _touch(
-        projects / "-home-ted--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S + 60
+        projects / "-home-user--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S + 60
     )
     ready = scan(cfg, store, now=1_000_000.0)
     assert [r.transcript_path for r in ready] == [str(p)]
@@ -106,7 +106,7 @@ def test_idle_session_becomes_ready(env) -> None:
 
 def test_the_quiet_period_boundary(env) -> None:
     cfg, store, projects = env
-    p = projects / "-home-ted--claude-projects-research" / "a.jsonl"
+    p = projects / "-home-user--claude-projects-research" / "a.jsonl"
     _touch(p, age_seconds=QUIET_S - 1)
     assert scan(cfg, store, now=1_000_000.0) == []
     _touch(p, age_seconds=QUIET_S)
@@ -118,7 +118,7 @@ def test_a_summarized_session_is_not_offered_again(env) -> None:
     every transcript that will never be touched again — which is most of them."""
     cfg, store, projects = env
     p = _touch(
-        projects / "-home-ted--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S + 60
+        projects / "-home-user--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S + 60
     )
     (row,) = scan(cfg, store, now=1_000_000.0)
     store.mark_summarized(str(p), offset=row.size_bytes, last_turn_uuid="u1", turn_uuids=["u1"])
@@ -130,7 +130,7 @@ def test_a_resumed_session_is_offered_again(env) -> None:
     """The case the idle heuristic gets wrong, and how it recovers."""
     cfg, store, projects = env
     p = _touch(
-        projects / "-home-ted--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S + 60
+        projects / "-home-user--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S + 60
     )
     (row,) = scan(cfg, store, now=1_000_000.0)
     store.mark_summarized(str(p), offset=row.size_bytes, last_turn_uuid="u1", turn_uuids=["u1"])
@@ -144,7 +144,7 @@ def test_a_resumed_session_is_offered_again(env) -> None:
 def test_a_session_that_becomes_active_again_reverts_status(env) -> None:
     cfg, store, projects = env
     p = _touch(
-        projects / "-home-ted--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S + 60
+        projects / "-home-user--claude-projects-research" / "a.jsonl", age_seconds=QUIET_S + 60
     )
     scan(cfg, store, now=1_000_000.0)
     assert store.get(str(p)).status == STATUS_COMPLETE
@@ -155,7 +155,7 @@ def test_a_session_that_becomes_active_again_reverts_status(env) -> None:
 
 def test_a_vanished_file_is_skipped_not_fatal(env, monkeypatch) -> None:
     cfg, _store, projects = env
-    _touch(projects / "-home-ted--claude-projects-research" / "a.jsonl")
+    _touch(projects / "-home-user--claude-projects-research" / "a.jsonl")
     real_stat = os.stat
 
     def boom(path, *a, **k):
@@ -169,7 +169,9 @@ def test_a_vanished_file_is_skipped_not_fatal(env, monkeypatch) -> None:
 
 def test_scan_records_the_agent(env) -> None:
     cfg, store, projects = env
-    p = _touch(projects / "-home-ted--claude-projects-writer" / "a.jsonl", age_seconds=QUIET_S + 60)
+    p = _touch(
+        projects / "-home-user--claude-projects-writer" / "a.jsonl", age_seconds=QUIET_S + 60
+    )
     scan(cfg, store, now=1_000_000.0)
     assert store.get(str(p)).agent == "writer"
 
@@ -191,7 +193,7 @@ def orphan_env(tmp_path):
         eventlog_dir=str(tmp_path / "eventlogs"),
     )
     store = Store(tmp_path / "s.sqlite3")
-    tpath = str(tmp_path / "projects" / "-home-ted--claude-projects-research" / "sess-a.jsonl")
+    tpath = str(tmp_path / "projects" / "-home-user--claude-projects-research" / "sess-a.jsonl")
     store.upsert_observed(tpath, size_bytes=4096, mtime_ns=1, agent="research", session_id="sess-a")
     write_eventlog(cfg.eventlog_dir, EventLog(session_id="sess-a", transcript_path=tpath))
     return cfg, store, tpath

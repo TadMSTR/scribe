@@ -5,10 +5,10 @@ mode `0600`; scribe reads them and writes digests, session state and spend recor
 those at the default `0644` would take owner-only content and make it world-readable — a
 downgrade introduced by this component, not inherited from anywhere.
 
-That is not abstract on forge. Seven `agent-*` local accounts exist, **none of them in group
-`ted`**, so the world-read bit is precisely the bit that grants them access. And the session
-state store holds `session_id` values, which are functionally credentials when paired with
-`claude -p --resume` — the same shape as the matrix-dispatcher `sessions.db` finding.
+That is not abstract on forge. Seven `agent-*` local accounts exist, **none of them in the
+operator's group**, so the world-read bit is precisely the bit that grants them access. And the
+session state store holds `session_id` values, which are functionally credentials when paired
+with `claude -p --resume` — the same shape as the matrix-dispatcher `sessions.db` finding.
 
 Two layers, because they fail differently:
 

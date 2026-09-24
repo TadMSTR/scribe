@@ -130,7 +130,7 @@ def installed_versions(venv: str | Path) -> dict[str, str]:
 
     **Symlinked metadata is skipped, not followed** (audit finding, 2026-09-18). This walks a
     directory tree and head-reads every `METADATA` it finds, which is the shape that has
-    surfaced `~/.secrets` elsewhere on this fleet: a `METADATA` symlinked at another file
+    surfaced a secrets directory elsewhere on this fleet: a `METADATA` symlinked at another file
     would have that file's header lines reported as a package name and version. Exploiting it
     needs write access to the target's site-packages, which is already a compromise, and the
     read is bounded to the header block — so this is defence in depth rather than a fix for a

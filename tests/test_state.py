@@ -211,11 +211,11 @@ def test_opening_a_legacy_store_backfills_the_empty_ids(tmp_path) -> None:
     """The repair. A 6%-populated column is worse than an empty one: a query keyed on it
     returns rows and looks like it works while omitting the other 94%."""
     db = _legacy_db(
-        tmp_path, [("/p/-home-ted--x/sess-aaa.jsonl", ""), ("/p/-y/sess-bbb.jsonl", "")]
+        tmp_path, [("/p/-home-user--x/sess-aaa.jsonl", ""), ("/p/-y/sess-bbb.jsonl", "")]
     )
     store = Store(db)
     assert _ids(db) == {
-        "/p/-home-ted--x/sess-aaa.jsonl": "sess-aaa",
+        "/p/-home-user--x/sess-aaa.jsonl": "sess-aaa",
         "/p/-y/sess-bbb.jsonl": "sess-bbb",
     }
     assert store.schema_version == 2
@@ -263,7 +263,7 @@ def test_a_fresh_store_is_created_at_the_current_schema(tmp_path) -> None:
 def test_the_backfill_matches_what_the_event_log_lookup_expects(tmp_path) -> None:
     """The backfilled id is not decorative -- it is what `session_eventlog` resolves a row to.
     If the two rules ever disagreed, a replay would look for the wrong file."""
-    tpath = "/p/-home-ted--claude-projects-developer/sess-ccc.jsonl"
+    tpath = "/p/-home-user--claude-projects-developer/sess-ccc.jsonl"
     db = _legacy_db(tmp_path, [(tpath, "")])
     Store(db)
     backfilled = _ids(db)[tpath]

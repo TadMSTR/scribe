@@ -239,7 +239,7 @@ def test_a_symlinked_metadata_file_is_not_followed(tmp_path, capsys) -> None:
     """Audit finding, 2026-09-18 (Low).
 
     This function walks a tree and head-reads every `METADATA` it finds — the shape that has
-    surfaced `~/.secrets` elsewhere on this fleet. The discriminating part is not that the
+    surfaced a secrets directory elsewhere on this fleet. The discriminating part is not that the
     package is skipped, it is that the TARGET FILE'S CONTENT never appears in the result: a
     secrets file whose first lines happen to parse as RFC822 headers would otherwise be
     reported as a package name and version.

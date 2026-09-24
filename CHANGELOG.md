@@ -325,7 +325,7 @@ Two Low findings from the pre-merge audit, both fixed in the same PR rather than
 
 - **`deps-drift` no longer follows symlinked `dist-info/METADATA`.** It walks a tree and
   head-reads every `METADATA` under the venv it is pointed at, which is the shape that has
-  surfaced `~/.secrets` elsewhere on this fleet. Measured against the unguarded build: a
+  surfaced a secrets directory elsewhere on this fleet. Measured against the unguarded build: a
   `METADATA` symlinked at a secrets file whose first lines parse as RFC822 headers was
   reported as `{'mistral-api-key': 'NOTREAL-abcdef123456'}` — the target's content rendered as
   a package name and version.
@@ -892,7 +892,7 @@ Audit `scribe-release-readiness-2026-09`: **one Low, two Info, nothing at Medium
 
 **The writer and the reader disagreed about where a hyphenated agent's digests live.**
 `_agent_from_project_dir` split Claude Code's flattened directory name at the first hyphen,
-so `-home-ted--claude-projects-doc-health` resolved to `doc`. Three of forge's ten agents are
+so `-home-user--claude-projects-doc-health` resolved to `doc`. Three of forge's ten agents are
 affected: `doc-health`, `helm-build`, `memory-sync`.
 
 Raised as Low by the scribe-journal-feed audit, on the grounds that no colliding `doc/`
@@ -916,9 +916,9 @@ for them without ever erroring.
   thing that can say which.
 - **The flattened form is checked first, and that is a form discriminator rather than a
   ranking.** A flattened transcript directory really does live at
-  `~/.claude/projects/-home-ted--claude-projects-sysadmin`, so it satisfies the
+  `~/.claude/projects/-home-user--claude-projects-sysadmin`, so it satisfies the
   working-directory shape exactly; resolving `cwd` first would answer
-  `-home-ted--claude-projects-sysadmin` — well-formed, and wrong. An existing test caught it.
+  `-home-user--claude-projects-sysadmin` — well-formed, and wrong. An existing test caught it.
 
 No migration: no digests had been written for any affected agent.
 
@@ -1004,7 +1004,7 @@ re-checked afterwards because `scribe qc` needs the log and nothing kept it.
 opened it with `tmp.open("w")` — 0644 at the usual 0022 — and tightened it only afterwards, so
 the payload sat world-readable for the whole write. That payload is the least redacted thing
 scribe keeps: every tool argument, target and result digest of a session, derived from a 0600
-transcript. Seven `agent-*` local accounts exist on this host, none in group `ted`, and the
+transcript. Seven `agent-*` local accounts exist on this host, none in the operator's group, and the
 world-read bit is precisely the bit that grants them access. FW-03 in the fleet pattern
 knowledge base, whose rule also names the half that outlives the window — `rename` preserves
 the *source's* permissions, so a 0644 temp file downgrades an already-0600 destination once it

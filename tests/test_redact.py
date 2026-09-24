@@ -158,12 +158,12 @@ def test_bare_auth_is_redacted_in_every_assignment_shape(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "AUTHENTIK_HOST=auth.helmforge.me",
+        "AUTHENTIK_HOST=auth.example.com",
         "authentik: enabled",
         "authorized_users: 5",
         "The user is authorized to authenticate",
         '{"authentik_version": "2026.1"}',
-        "auth.helmforge.me is the SSO host",
+        "auth.example.com is the SSO host",
     ],
 )
 def test_adding_bare_auth_did_not_clobber_authentik_or_authorized(text: str) -> None:

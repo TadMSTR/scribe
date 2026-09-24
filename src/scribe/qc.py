@@ -590,7 +590,7 @@ def _tilde_anchored(claim: str, allowed_paths: set[str], corpus: str) -> bool:
 
     The log writes home-relative paths as `~/repos/gitea/...` because that is how the commands
     and file references in a session are written; a digest routinely expands the same path to
-    `/home/ted/repos/gitea/...`. Neither composes, because the claim's own directory prefix is
+    `/home/user/repos/gitea/...`. Neither composes, because the claim's own directory prefix is
     absolute and appears nowhere.
 
     **`~` is read as a literal in the corpus, never as `$HOME`.** That is the whole reason this
