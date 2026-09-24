@@ -64,7 +64,13 @@ _INJECTED_PREFIXES = (
 # hostname. A Vikunja instance is self-hosted, so the domain is the operator's, and a pattern
 # naming one of them extracts nothing anywhere else. Any other host's `/tasks/N` is not a
 # ticket: a tracker scribe has not been told about is not one it can ground against.
-_VIKUNJA_URL_RE = re.compile(r"\bvikunja\.[a-z0-9.-]+/tasks/(\d+)", re.I)
+#
+# "First label" is enforced by the lookbehind, not by `\b`. A word boundary also sits after a
+# `.` or `-`, so `\bvikunja\.` matched `try.vikunja.io` and `x-vikunja.example` too -- a
+# claim this comment made and the regex did not keep (CodeRabbit, TadMSTR/scribe#25). Any
+# other instance whose host starts `vikunja.` still matches; naming the host in config would
+# close that, and is not done here.
+_VIKUNJA_URL_RE = re.compile(r"(?<![\w.-])vikunja\.[a-z0-9.-]+/tasks/(\d+)", re.I)
 _PR_QUALIFIED_RE = re.compile(r"\b((?:[\w.-]+/)?[a-z][\w.-]*[a-z0-9])#(\d{1,6})\b", re.I)
 _PR_WORD_RE = re.compile(r"\b(?:PRs?|pull(?:\s+request)?s?|issues?)\s+\[?#(\d{1,6})\b", re.I)
 # `(#7)` trailing a commit subject is GitHub's squash-merge convention, and `[#7](url)`

@@ -20,17 +20,22 @@ config key added or removed.
 - **`claude -p` no longer inherits the sweep's environment** (vikunja#961, SC-06). It gets
   `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` and `TMPDIR`; the
   credentials `claude` authenticates with (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
-  `CLAUDE_CODE_OAUTH_TOKEN`, by exact name); `CLAUDE_CONFIG_DIR`; and the provider's
-  `api_key_env` if the config names one. Before, every other provider's key in the sweep
-  (`MISTRAL_API_KEY`, say) reached it too. `HOME` is kept because `claude` reads its
-  credentials file and its settings from under it. **If a `claude-cli` deployment relied on
-  another inherited variable** (a proxy setting, for example), `claude -p` no longer sees it,
-  and there is no config key to add one yet.
+  `CLAUDE_CODE_OAUTH_TOKEN`, by exact name); `CLAUDE_CONFIG_DIR`; the settings that decide
+  where that credential is sent (`ANTHROPIC_BASE_URL`, `HTTPS_PROXY` / `HTTP_PROXY` /
+  `NO_PROXY` in both spellings, `NODE_EXTRA_CA_CERTS`); and the provider's `api_key_env` if
+  the config names one. Before, every other provider's key in the sweep (`MISTRAL_API_KEY`,
+  say) reached it too. `HOME` is kept because `claude` reads its credentials file and its
+  settings from under it. The endpoint travels with the credential deliberately: passing a
+  gateway's `ANTHROPIC_AUTH_TOKEN` without its `ANTHROPIC_BASE_URL` would present that token
+  to the default endpoint. **If a `claude-cli` deployment relied on any other inherited
+  variable**, `claude -p` no longer sees it, and there is no config key to add one yet.
 - The post-write hook and `claude -p` share one base set, now in `scribe.childenv`.
   `pipeline.HOOK_BASE_ENV` is kept as an alias for it.
-- **Vikunja task URLs are recognised on any `vikunja.<host>`**, not on one deployment's
-  hostname. The old pattern extracted no ticket from a URL anywhere else. Any other host's
-  `/tasks/N` is still not a ticket.
+- **Vikunja task URLs are recognised on any host whose first label is `vikunja`**, not on
+  one deployment's hostname. The old pattern extracted no ticket from a URL anywhere else.
+  `try.vikunja.io`, `my.vikunja.example` and `x-vikunja.example` do not match, and neither
+  does any other host's `/tasks/N`. Another instance whose host starts `vikunja.` does match;
+  naming the host in config would close that and is not done here.
 - Package licence metadata uses the SPDX form, `license = "MIT"` plus `license-files`
   (vikunja#964). The `{ text = "MIT" }` table is deprecated in setuptools with a removal date
   of 2027-02-18, and a deploy that builds with isolation always gets the newest setuptools,

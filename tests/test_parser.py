@@ -129,6 +129,12 @@ def test_a_task_url_is_a_ticket_on_any_vikunja_host_and_no_other() -> None:
     assert _collect_refs("see https://vikunja.tracker.example/tasks/17")[0] == ["#17"]
     assert _collect_refs("see https://tracker.example/tasks/926")[0] == []
     assert _collect_refs("see https://notvikunja.example.com/tasks/926")[0] == []
+    # `vikunja` as a later label, or after a hyphen, is not the first label. A `\b` anchor
+    # matched all three of these.
+    assert _collect_refs("see https://try.vikunja.io/tasks/5")[0] == []
+    assert _collect_refs("see https://my.vikunja.example/tasks/7")[0] == []
+    assert _collect_refs("see https://x-vikunja.example/tasks/3")[0] == []
+    assert _collect_refs("(vikunja.example.com/tasks/12)")[0] == ["#12"]
 
 
 def test_git_refs_exclude_non_git_hashes() -> None:
