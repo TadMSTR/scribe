@@ -43,7 +43,7 @@ dependencies = [
 # forge today; the `<2` ceiling is because the 1.x span API is what these call sites use.
 telemetry = [
     "opentelemetry-api>=1.42,<2",
-    "opentelemetry-sdk>=1.42,<2",
+    "opentelemetry-sdk>=1.45.0,<2",
     "opentelemetry-exporter-otlp-proto-grpc>=1.42,<2",
 ]
 dev = [
