@@ -1,0 +1,68 @@
+# CodeQL static analysis.
+#
+# Free because the repository is public. On a private repository, uploading SARIF needs
+# GitHub Code Security, so this workflow was added in a draft PR and merged only after the
+# visibility flip. Its checks were expected to fail before then, and no `if: !private` guard
+# was added to hide that: a gate that skips reads as green, and the guard would have outlived
+# its purpose the moment the repo flipped.
+#
+# TWO languages, and the second is the less obvious one:
+#   python   src/ and tests/
+#   actions  the workflow files themselves. release.yml holds `contents: write`, and
+#            scorecard.yml an OIDC token; adding CI without scanning CI is how injection
+#            into a workflow `run:` block goes unnoticed.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly. Not redundant with push/PR: CodeQL ships new queries, so code that was clean
+    # when it landed can become a finding without anyone touching it. An off-peak minute,
+    # offset from the other repos in the fleet so their runs do not contend.
+    - cron: "23 4 * * 0"
+
+# Least privilege at the top level; the analyse job adds only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload the SARIF results to the Security tab.
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, actions]
+
+    steps:
+      # SHA-pinned, like every other workflow here. `init` and `analyze` (and scorecard.yml's
+      # `upload-sarif`) must share one SHA: codeql-action refuses a mismatched pair, and
+      # dependabot.yml groups all actions so they cannot be bumped apart.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          # A superset of the default suite. The codebase is small and the extra queries are
+          # worth the runtime.
+          queries: security-and-quality
+
+      # No build step: CodeQL analyses Python from source.
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}
