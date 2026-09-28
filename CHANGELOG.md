@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependabot `github-actions`: a narrow codeql-action group on both update channels, and an
+  explicit limit** (repo-standards `F10`). 0.11.0's single `*` group kept codeql-action's
+  subpaths together, but it held every action bump behind any one bad one. It also covered
+  version updates only, because a group without `applies-to` does, so the security channel
+  could still split `init`/`analyze`/`upload-sarif`. Now: `github/codeql-action*` grouped
+  for version and security updates, and `open-pull-requests-limit: 7`, one per distinct
+  action.
+- CodeQL and OSSF Scorecard workflows (`.github/workflows/codeql.yml`, `scorecard.yml`),
+  added once the repository went public (#26).
+
 ## [0.11.0] — 2026-09-24
 
 **Minor.** Readiness for a public repository, and one subprocess behaviour change. The
