@@ -216,6 +216,10 @@ class Block:
     transcript_path: str
     digest: str
     body: str
+    #: The anchor's turn uuid -- with `session_id`, the block's identity on disk.
+    turn_uuid: str = ""
+    #: The anchor's `provisional:` value: "" for a real digest, else what kind of stand-in.
+    provisional: str = ""
 
 
 def iter_blocks(digest_root: str | Path) -> Iterator[Block]:
@@ -234,6 +238,8 @@ def iter_blocks(digest_root: str | Path) -> Iterator[Block]:
                 transcript_path=anchor.group(3),
                 digest=str(path.relative_to(root)),
                 body=text[anchor.end() : close.start()],
+                turn_uuid=anchor.group(2),
+                provisional=anchor.group(4) or "",
             )
 
 
@@ -315,6 +321,32 @@ def classify_claim(
     if kind == CLAIM_TOOL:
         return ABSENT, 0, ("", "")
     return classify_span_claim(claim, corpus, desynced=desynced), 0, ("", "")
+
+
+def attribute(
+    report: Report, body: str, log: EventLog, *, home: str = ""
+) -> list[tuple[str, str, str]]:
+    """`(kind, bucket, claim)` for every groundedness finding in one report.
+
+    The run record's view of the same classification `survey` performs, for one block at a
+    time. Every kind is read off the findings with `rejected_claims`, including paths: `survey`
+    recomputes the path set only so it can grade under a rule other than the shipped one and
+    count disagreements, and the run record grades under the shipped rule by definition. Under
+    `RULE_CURRENT` the two sets are identical, which `gate_disagreements == 0` asserts on every
+    survey run.
+    """
+    home = home or str(Path.home())
+    allowed = grounding_terms(log)["paths"]
+    corpus = log.grounding_text().lower()
+    desynced = _desynced_spans(body)
+    out = []
+    for kind in CLAIM_KINDS:
+        for claim in rejected_claims(report, kind):
+            bucket, _n, _split = classify_claim(
+                claim, kind, allowed, corpus, home=home, desynced=desynced
+            )
+            out.append((kind, bucket, claim))
+    return out
 
 
 @dataclass

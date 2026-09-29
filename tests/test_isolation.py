@@ -19,6 +19,7 @@ from pathlib import Path
 from scribe.config import (
     DEFAULT_EVENTLOG_DIR,
     DEFAULT_OUTPUT_DIR,
+    DEFAULT_RUN_RECORD,
     Config,
     ProviderConfig,
     StageConfig,
@@ -130,3 +131,21 @@ def test_the_fixture_actually_moves_home(isolate_home, real_home) -> None:
     """The mechanism, asserted once so a silently no-op fixture is visible."""
     assert Path(os.path.expanduser("~")) == isolate_home
     assert isolate_home != real_home
+
+
+def test_a_live_run_on_defaults_writes_no_run_record_under_the_real_home(
+    tmp_path, real_home, isolate_home
+) -> None:
+    """The run record is a production file on the #851 pattern: a default under `~`, appended
+    by every live sweep. So the same pair of assertions -- the real one untouched, the
+    redirected one written -- and on a LIVE run, the only kind that writes it."""
+    real_record = real_home / Path(DEFAULT_RUN_RECORD).relative_to("~")
+    before = _snapshot(real_record)
+
+    cfg = _default_config(tmp_path)
+    (r,) = run_once(cfg, Store(cfg.state_path), now=1_000_000.0, provider_factory=Stub)
+
+    assert r.written and not r.run_record_error
+    assert _snapshot(real_record) == before
+    redirected = isolate_home / Path(DEFAULT_RUN_RECORD).relative_to("~")
+    assert len(redirected.read_text().splitlines()) == 1

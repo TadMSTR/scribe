@@ -533,6 +533,66 @@ comparable: `ADJACENCY_WINDOW` shipped at 5.0 and the blanket composition rule w
 1.3. `--probe-spans` exists to record a rejection at 1.2 — the tolerance is not in the gate,
 and the measurement that kept it out is re-runnable.
 
+#### Tracking it over time: the run record and `qc-report`
+
+Every session a `--live` sweep finishes appends one JSON line to the run record
+(`[qc] run_record`, default `~/.local/share/scribe/runs.jsonl`, mode `0600`). The line has the
+QC verdict, coverage, and findings counted by check, by claim kind and by `qc-survey` bucket.
+It also records up to 20 ungrounded claims, redacted, and the attribution that makes a trend
+explainable: `scribe_version`, `prompt_sha256` and `model_resolved`. A dry run never writes
+it. A failed write is counted (`run_record_errors`) and never fails the sweep.
+
+`prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
+cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.
+`model_resolved` is whatever the provider's response said, or `null`. Some providers, Mistral
+included, echo the requested alias, so it will not reveal a silent upstream re-point. The
+practical signal for that is `absent` findings per session moving while `scribe_version` and
+`prompt_sha256` stay put.
+
+```
+python -m scribe qc-report                          # last 7 days of live records
+python -m scribe qc-report --days 28 --compare      # ... against the 28 days before
+python -m scribe qc-report --by version --by model  # broken down; --by is repeatable
+python -m scribe qc-report --backfill               # grade the corpus on disk into the record
+python -m scribe qc-report --source backfill --days 1 --json   # read that baseline back
+```
+
+It reports two statistics, and **they are different numbers**:
+
+- **pass rate**: per session, every check including the coverage floor. This is what the
+  sweep's `QC n/m passed` line prints.
+- **groundedness failure rate**: per block, groundedness only. This is what `qc-survey` calls
+  `failure_rate`.
+
+Findings are broken out by kind and bucket and never only pooled. Most findings today are gate
+artefacts (the `suffix` path bucket, ticket `id-conflation`), so a pooled count moves whenever
+the gate is tuned. `absent` is the hallucination signal. Placeholders are counted but excluded
+from every quality rate: a placeholder is a lost summary, not a poor one.
+
+`--backfill` grades each block on disk against its own event log, using the same
+`check_digest` call a live sweep makes, and appends it as `source: backfill`. Attribution the
+digest does not carry is `null`. It is idempotent, keyed on the block's anchor, and skips
+blocks a live sweep has already recorded. The report reads `live` records unless given
+`--source backfill` or `--source all`. Records are windowed on when they were written, so read
+a backfill with a window covering the day it ran.
+
+Thresholds are unset by default, which makes the report informational only. Set them under
+`[qc]` or with the matching flags (`--min-pass-rate`, `--min-mean-coverage`,
+`--max-absent-per-session`, and relative to `--compare`: `--max-pass-rate-drop`,
+`--max-mean-coverage-drop`, `--max-absent-per-session-rise`). Rates are fractions, so a drop
+of `0.10` is ten points. The exit code is the contract a scheduler alerts on:
+
+| code | meaning |
+|---:|---|
+| `0` | no threshold breached, or none set |
+| `1` | a regression threshold was breached |
+| `2` | config or usage error |
+| `3` | **insufficient data**: fewer than `--min-sessions` (default 20) graded sessions, so no verdict. Not a pass. Also returned when a relative threshold is set and the previous window is too thin to check it |
+| `4` | **tool failure**: the record is unreadable or more than 1% of its lines are corrupt. Says nothing about quality |
+
+No success path returns `1`. A missing record file is `3`: a fresh install has no data yet,
+which is not the same as a broken tool.
+
 ## Dependencies
 
 `uv.lock` is committed, and CI gates on it three ways: `uv lock --check` for currency, then
@@ -623,7 +683,7 @@ is why renaming it is a migration rather than a rename:
 
 | span | when |
 |---|---|
-| `memsearch.summarize` | each summarization call |
+| `memsearch.summarize` | each summarization call; carries `scribe.qc.ok`, `scribe.qc.coverage`, `scribe.qc.findings` and `scribe.qc.findings.absent` |
 | `memsearch.summarize_rejected` | each contamination rejection (`signal`, `attempt`, `fallback`) |
 | `memsearch.summarize_extract` | each transcript extraction |
 

@@ -44,6 +44,12 @@ class Completion:
     output_tokens: int = 0
     model: str = ""
     provider: str = ""
+    #: The model the RESPONSE named, verbatim, or "" when it named none. Kept apart from
+    #: `model`, which falls back to the requested name so the spend meter always has one: a
+    #: run record that filled this from the request would report an alias as a resolution
+    #: nobody observed. On Mistral it is the alias echoed back (`mistral-small-latest`), so it
+    #: records what was answered, not which dated model answered it.
+    model_resolved: str = ""
 
 
 class Provider:
@@ -133,6 +139,7 @@ class OpenAICompatibleProvider(Provider):
             output_tokens=int(usage.get("completion_tokens") or 0),
             model=str(data.get("model") or self.model),
             provider=self.name,
+            model_resolved=str(data.get("model") or ""),
         )
 
 

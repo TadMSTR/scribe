@@ -315,3 +315,61 @@ def test_endpoint_set_but_packages_missing_is_loud(clean_provider, monkeypatch, 
     err = capsys.readouterr().err
     assert "OTEL_EXPORTER_OTLP_ENDPOINT is set" in err
     assert "scribe[telemetry]" in err
+
+
+def test_the_qc_verdict_reaches_an_exporter_on_the_summarize_span(
+    clean_provider, tmp_path, monkeypatch
+) -> None:
+    """The four `scribe.qc.*` attributes, from a real sweep, read back off a real exporter.
+
+    On `memsearch.summarize` -- the existing name, kept for dashboard continuity -- and set
+    while the span is still open. An attribute set after the span ends is dropped by the SDK
+    without error, which is the same silent shape as #320.
+    """
+    import os
+    from pathlib import Path
+
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from scribe.config import Config, ProviderConfig, StageConfig
+    from scribe.pipeline import run_once
+    from scribe.state import Store
+    from scribe.summarize.providers import Completion, Provider
+
+    exporter = InMemorySpanExporter()
+    assert telemetry.setup_tracing(exporter=exporter) is True
+
+    projects = tmp_path / "projects"
+    d = projects / "-home-user--claude-projects-research"
+    d.mkdir(parents=True)
+    target = d / "sess.jsonl"
+    fixtures = Path(__file__).parent / "fixtures"
+    target.write_bytes((fixtures / "transcript-structural.jsonl").read_bytes())
+    os.utime(target, (1_000_000.0 - 3600, 1_000_000.0 - 3600))
+    cfg = Config(
+        project_globs=(str(projects / "*") + "/",),
+        output_dir=str(tmp_path / "out"),
+        eventlog_dir=str(tmp_path / "ev"),
+        state_path=str(tmp_path / "s.sqlite3"),
+        qc_run_record=str(tmp_path / "runs.jsonl"),
+        providers={"stub": ProviderConfig(name="stub", type="openai-compatible", model="m")},
+        stages={"session": StageConfig(provider="stub", model="m")},
+    )
+
+    class _Stub(Provider):
+        name = "stub"
+
+        def complete(self, system, user, *, timeout=120.0) -> Completion:
+            # One path the log never mentions: a guaranteed `absent` finding.
+            body = {"asked": "q", "done": ["Edited /nowhere/invented/zzqx_ghost.py"]}
+            return Completion(text=json.dumps(body), model="m", provider="stub")
+
+    (r,) = run_once(cfg, Store(cfg.state_path), now=1_000_000.0, provider_factory=_Stub)
+    telemetry.shutdown_tracing()
+
+    (sp,) = [s for s in exporter.get_finished_spans() if s.name == "memsearch.summarize"]
+    attrs = sp.attributes
+    assert attrs["scribe.qc.ok"] is False and r.qc_ok is False
+    assert attrs["scribe.qc.coverage"] == round(r.qc_coverage, 4)
+    assert attrs["scribe.qc.findings"] == len(r.qc_findings) >= 1
+    assert attrs["scribe.qc.findings.absent"] >= 1

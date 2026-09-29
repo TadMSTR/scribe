@@ -31,6 +31,24 @@ DEFAULT_EVENTLOG_DIR = "~/.local/share/scribe/eventlogs"
 #: per written digest, so a sweep's worst case is this times the sessions it writes.
 DEFAULT_HOOK_TIMEOUT_SECONDS = 30.0
 MANIFEST_NAME = "index.jsonl"
+#: One JSON line per session a live sweep finished -- see `runrecord`. Beside the digests and
+#: event logs rather than with the state DB, because it is history to keep, not state to
+#: rebuild, and on a host that backs up `~/.local/share/scribe` it goes with them.
+DEFAULT_RUN_RECORD = "~/.local/share/scribe/runs.jsonl"
+#: Below this many graded sessions `qc-report` gives no verdict (exit 3). Not tuned to any
+#: host: it is the size under which one bad session moves a pass rate by 5 points.
+DEFAULT_QC_MIN_SESSIONS = 20
+#: The thresholds `qc-report` understands. **None has a default.** Unset is report-only, so a
+#: fresh install never alerts on a number somebody else's corpus produced. Rates and coverage
+#: are fractions in [0, 1]; a `_drop` is in the same units (0.10 = ten points).
+QC_THRESHOLD_KEYS = (
+    "min_pass_rate",
+    "min_mean_coverage",
+    "max_absent_per_session",
+    "max_pass_rate_drop",
+    "max_mean_coverage_drop",
+    "max_absent_per_session_rise",
+)
 #: An environment variable NAME, as the hook's passthrough list accepts it. Names only: a
 #: pattern or prefix here would be SC-06's glob passthrough by another route.
 ENV_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -98,6 +116,11 @@ class Config:
     on_digest_written_timeout_seconds: float = DEFAULT_HOOK_TIMEOUT_SECONDS
     #: Extra environment variables the hook may see, by exact name. See `pipeline.hook_env`.
     on_digest_written_env: tuple[str, ...] = ()
+    #: Where a live sweep appends its per-session QC record. "" turns the record off.
+    qc_run_record: str = DEFAULT_RUN_RECORD
+    qc_min_sessions: int = DEFAULT_QC_MIN_SESSIONS
+    #: Only the keys the operator set -- see `QC_THRESHOLD_KEYS`.
+    qc_thresholds: dict[str, float] = field(default_factory=dict)
 
     def manifest_file(self) -> Path:
         """The digest manifest: `manifest_path` if set, else `<output_dir>/../index.jsonl`.
@@ -181,6 +204,37 @@ def _inside(child: Path, root: Path) -> bool:
     return c == r or r in c.parents
 
 
+def _load_qc(cfg: Config, qc: object) -> None:
+    """The `[qc]` table. Unknown keys are refused: a misspelt threshold would otherwise load
+    as report-only and never fire, which is the silent kind of wrong."""
+    if not isinstance(qc, dict):
+        raise ConfigError("qc: expected a table")
+    unknown = set(qc) - {"run_record", "min_sessions", *QC_THRESHOLD_KEYS}
+    if unknown:
+        raise ConfigError(f"qc: unknown key(s) {', '.join(sorted(unknown))}")
+    if "run_record" in qc:
+        if not isinstance(qc["run_record"], str):
+            raise ConfigError('qc.run_record must be a path string ("" disables it)')
+        cfg.qc_run_record = qc["run_record"]
+    if "min_sessions" in qc:
+        n = qc["min_sessions"]
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise ConfigError("qc.min_sessions must be a positive integer")
+        cfg.qc_min_sessions = n
+    for key in QC_THRESHOLD_KEYS:
+        if key in qc:
+            cfg.qc_thresholds[key] = check_threshold(key, qc[key], where="qc.")
+
+
+def check_threshold(key: str, value: object, *, where: str = "") -> float:
+    """One threshold, validated. Shared with the CLI flags so both refuse the same values."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        raise ConfigError(f"{where}{key} must be a non-negative number")
+    if key != "max_absent_per_session" and not key.endswith("_rise") and value > 1:
+        raise ConfigError(f"{where}{key} is a fraction in [0, 1], got {value}")
+    return float(value)
+
+
 def load(path: str | os.PathLike[str] | None = None) -> Config:
     """Load `scribe.toml`. With no path, return defaults."""
     cfg = Config()
@@ -246,6 +300,8 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
                 f"index.manifest_path resolves to {effective}, inside {key}; keep it outside "
                 "both the digest tree and the event-log tree"
             )
+
+    _load_qc(cfg, data.get("qc", {}))
 
     service = data.get("service", {})
     cfg.host = str(service.get("host", cfg.host))

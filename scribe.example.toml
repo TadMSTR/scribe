@@ -42,6 +42,23 @@ eventlog_dir  = "~/.local/share/scribe/eventlogs"
 # gets PATH, HOME, USER, LOGNAME, LANG, LC_ALL, LC_CTYPE, TZ, TMPDIR, plus exact names here.
 # on_digest_written_env = ["MY_INDEXER_TOKEN"]
 
+# The per-session QC record and `scribe qc-report`. See README, "Tracking it over time".
+[qc]
+# One JSON line per session a live sweep finishes. "" turns it off.
+run_record = "~/.local/share/scribe/runs.jsonl"
+# Fewer graded sessions than this in a window: no verdict (exit 3).
+# min_sessions = 20
+# Thresholds are UNSET by default, so the report is informational only. Derive yours from
+# your own baseline (`qc-report --backfill`, then a week of live records), not from someone
+# else's corpus. Rates are fractions: 0.10 is ten points.
+# min_pass_rate = 0.0
+# min_mean_coverage = 0.0
+# max_absent_per_session = 0.0
+# Relative to the previous window of equal length:
+# max_pass_rate_drop = 0.0
+# max_mean_coverage_drop = 0.0
+# max_absent_per_session_rise = 0.0
+
 [summarize.session]
 # Post-extraction the task is formatting a structured log, not inference, so `small` is
 # sufficient and ~10x cheaper than `medium`. It also keeps the GPU free.

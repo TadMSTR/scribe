@@ -287,6 +287,34 @@ def field_caps() -> dict[str, int]:
     return {f.name: f.cap for f in _LIST_FIELDS}
 
 
+def contract_spec() -> dict:
+    """Everything in this module that decides the SHAPE of a digest, as plain data.
+
+    One input to `prompt.prompt_sha256`. Per-session caps cannot be the identity -- `caps_for`
+    derives them from each log, so hashing them would give every session its own "prompt" --
+    so this hashes the rule that derives them instead: each field's floor, whether it is
+    bounded, its headroom and which denominator it reads, plus the clamp and the item length.
+    A change to any of those changes what the model is asked for, and has to read as a new
+    prompt in the run record rather than as the model drifting.
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "fields": [
+            {
+                "name": f.name,
+                "required": f.required,
+                "cap": f.cap,
+                "bounded": f.bounded,
+                "derive": f.derive.__name__ if f.derive else None,
+                "headroom": f.headroom,
+            }
+            for f in _LIST_FIELDS
+        ],
+        "max_derived_multiple": MAX_DERIVED_MULTIPLE,
+        "max_item_chars": MAX_ITEM_CHARS,
+    }
+
+
 def caps_for(log: EventLog | None) -> dict[str, int]:
     """This session's caps: derived from its own event log where that is possible.
 
