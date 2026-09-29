@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-28
+
+**Minor.** QC results are now persisted and reported as a trend. There is a new `qc-report`
+subcommand with its own exit-code contract, and a new `[qc]` config table. Nothing existing
+changes behaviour: no schema change (`SCHEMA_VERSION` stays at 2), no existing exit code
+moves, and no existing config key changes. The sweep writes one extra file,
+`~/.local/share/scribe/runs.jsonl` by default. Set `[qc] run_record = ""` to turn it off.
+
 ### Added
 
 - **The run record.** Each session a `--live` sweep finishes appends one JSON line to
@@ -33,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scribe.qc.findings`, `scribe.qc.findings.absent`. Span names are unchanged.
 - `Completion.model_resolved` and `Outcome.model_resolved`: the model the provider response
   named, or `""`. Unlike `model`, it never falls back to the requested name.
+
+### Security
+
+- **Appended files are created 0600 from the start** (scribe-qc-monitoring audit F-01 /
+  CodeRabbit CR-01, Medium). The run record, the daily digest files
+  (`writeback.append_block`) and the spend log (`telemetry.record_spend`) were opened with
+  `open("a")`. That creates a new file with the process umask's mode (typically 0644), and it
+  was chmod'd to 0600 only after the first write, so other local users could read it in the
+  meantime. All three now open through `paths.secure_append`, which the kernel creates 0600
+  at `O_CREAT`. The chmod afterwards is kept for files an older build created. The digest and
+  spend-log cases predate this release; the audit found them while verifying the first.
+  `secure_append`'s docstring, which said `append_block` already used it, is corrected.
 
 ### Changed
 

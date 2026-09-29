@@ -37,7 +37,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .paths import secure_dir, secure_file
+from .paths import secure_append, secure_dir, secure_file
 
 #: Span names match the ones the existing SigNoz dashboards query, so those keep working
 #: across the shadow run and the cutover.
@@ -76,7 +76,9 @@ def record_spend(
     }
     try:
         secure_dir(path.parent)
-        with path.open("a", encoding="utf-8") as fh:
+        # Created 0600 at `O_CREAT`, not chmod'd after the first write (FW-03). `secure_file`
+        # still runs for a log an older build created at the umask's mode.
+        with secure_append(path) as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         secure_file(path)
     except OSError:

@@ -41,7 +41,7 @@ from pathlib import Path
 from . import __version__
 from .extract.models import EventLog
 from .extract.redact import Redactor
-from .paths import secure_dir, secure_file
+from .paths import secure_append, secure_dir, secure_file
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
 from .qc_survey import ABSENT, _load, attribute, iter_blocks
 from .writeback import PROVISIONAL_PLACEHOLDER, PROVISIONAL_SUPPRESSED
@@ -100,14 +100,15 @@ def absent_count(record: dict) -> int:
 def append(path: str | os.PathLike[str], record: dict) -> str:
     """Append one record. Returns "" on success, else why not. Never raises.
 
-    Owner-only, like the spend log and every other file scribe writes: a claim is text lifted
-    from a digest.
+    Owner-only from the moment it exists: `secure_append` creates it 0600 at `O_CREAT`, so there
+    is no window at the umask's mode in which a claim lifted from a digest is readable by other
+    local users. `secure_file` afterwards covers a file created by an older build.
     """
     try:
         line = json.dumps(record, ensure_ascii=False, sort_keys=False) + "\n"
         p = Path(os.path.expanduser(str(path)))
         secure_dir(p.parent)
-        with p.open("a", encoding="utf-8") as fh:
+        with secure_append(p) as fh:
             fh.write(line)
         secure_file(p)
     except (OSError, TypeError, ValueError) as exc:
