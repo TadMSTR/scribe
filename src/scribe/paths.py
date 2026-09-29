@@ -137,8 +137,9 @@ def secure_append(path: str | os.PathLike[str]) -> IO[str]:
 
     `secure_create`'s argument, for a file that is added to rather than replaced: `O_APPEND`
     instead of `O_TRUNC`, the mode still applied by the kernel at `O_CREAT`. A file that
-    already exists keeps its mode, so this is also tightened after the fact by the caller's
-    `secure_file` -- the pair that `writeback.append_block` already uses.
+    already exists keeps its mode, so callers still follow it with `secure_file`, which tightens
+    a file an older build created at the umask's mode. Every append in scribe goes through here:
+    `writeback.append_block`, `manifest`, `runrecord.append` and `telemetry.record_spend`.
     """
     p = Path(path).expanduser()
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, FILE_MODE)

@@ -6,7 +6,7 @@ import sys
 
 USAGE = (
     "usage: python -m scribe "
-    "{cap-survey|deps-drift|extract|events|index|journal|qc|qc-survey|recover|run} ..."
+    "{cap-survey|deps-drift|extract|events|index|journal|qc|qc-report|qc-survey|recover|run} ..."
 )
 
 
@@ -40,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
         from .qc_cli import main as qc_main
 
         return qc_main(args[1:])
+    if args and args[0] == "qc-report":
+        from .qc_report_cli import main as qc_report_main
+
+        return qc_report_main(args[1:])
     if args and args[0] == "qc-survey":
         from .qc_survey_cli import main as qc_survey_main
 

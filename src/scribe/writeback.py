@@ -37,7 +37,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from .paths import contained, secure_create, secure_dir, secure_file, valid_agent
+from .paths import contained, secure_append, secure_create, secure_dir, secure_file, valid_agent
 
 #: An anchor, **alone on its line**. The line anchoring is the load-bearing part, not
 #: punctuation: a digest body can contain this syntax, because sessions about scribe's own
@@ -346,7 +346,10 @@ def append_block(
     # per append". Its own analysis pointed at the better option -- the harm was never the
     # tear itself but that neither guard could SEE it, so the session was lost permanently.
     # Detection costs one line per block; atomicity would cost O(file) on every append.
-    with path.open("a", encoding="utf-8") as fh:
+    #
+    # `secure_append`, so a NEW daily file -- the digest body itself -- is 0600 from `O_CREAT`
+    # rather than readable at the umask's mode until the `secure_file` below (FW-03).
+    with secure_append(path) as fh:
         fh.write("".join(parts))
         fh.flush()
         os.fsync(fh.fileno())

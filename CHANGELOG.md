@@ -7,7 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-09-28
+
+**Minor.** QC results are now persisted and reported as a trend. There is a new `qc-report`
+subcommand with its own exit-code contract, and a new `[qc]` config table. Nothing existing
+changes behaviour: no schema change (`SCHEMA_VERSION` stays at 2), no existing exit code
+moves, and no existing config key changes. The sweep writes one extra file,
+`~/.local/share/scribe/runs.jsonl` by default. Set `[qc] run_record = ""` to turn it off.
+
+### Added
+
+- **The run record.** Each session a `--live` sweep finishes appends one JSON line to
+  `[qc] run_record` (default `~/.local/share/scribe/runs.jsonl`, mode `0600`, `""` turns it
+  off). The line has the QC verdict, coverage, and findings by check, claim kind and
+  `qc-survey` bucket, plus up to 20 redacted ungrounded claims. It is attributed by
+  `scribe_version`, `prompt_sha256` and `model_resolved`. Until now scribe graded every digest
+  and discarded the verdict. A dry run never writes it. A failed write is counted in the new
+  `run_record_errors` total and printed in the sweep summary; it is not an error and does not
+  change the exit code.
+- **`scribe qc-report`**, the trend over that record. It reports the pass rate (per session,
+  all checks) and the groundedness failure rate (per block, `qc-survey`'s statistic) as
+  separate figures. Findings are broken out by kind and bucket, with `absent` as the
+  hallucination signal. It also reports truncation split by read type, lag p50/p95, tokens and
+  every `model_resolved` value seen. Options: `--compare`, repeatable `--by
+  agent|version|prompt|model`, and thresholds with no defaults. New exit-code contract: `0` ok,
+  `1` regression, `2` usage, `3` insufficient data, `4` tool failure.
+- **`scribe qc-report --backfill`** grades every digest block on disk into the record as
+  `source: backfill`, as a baseline. It is idempotent per block anchor. Attribution it cannot
+  observe is `null`.
+- **`[qc]` config table**: `run_record`, `min_sessions` and six thresholds. Unknown keys are
+  refused, so a misspelt threshold cannot load as report-only.
+- **QC span attributes** on `memsearch.summarize`: `scribe.qc.ok`, `scribe.qc.coverage`,
+  `scribe.qc.findings`, `scribe.qc.findings.absent`. Span names are unchanged.
+- `Completion.model_resolved` and `Outcome.model_resolved`: the model the provider response
+  named, or `""`. Unlike `model`, it never falls back to the requested name.
+
+### Security
+
+- **Appended files are created 0600 from the start** (scribe-qc-monitoring audit F-01 /
+  CodeRabbit CR-01, Medium). The run record, the daily digest files
+  (`writeback.append_block`) and the spend log (`telemetry.record_spend`) were opened with
+  `open("a")`. That creates a new file with the process umask's mode (typically 0644), and it
+  was chmod'd to 0600 only after the first write, so other local users could read it in the
+  meantime. All three now open through `paths.secure_append`, which the kernel creates 0600
+  at `O_CREAT`. The chmod afterwards is kept for files an older build created. The digest and
+  spend-log cases predate this release; the audit found them while verifying the first.
+  `secure_append`'s docstring, which said `append_block` already used it, is corrected.
+
 ### Changed
+
+- The post-render scrub and the QC gate now run inside the `memsearch.summarize` span, so the
+  QC attributes are set while the span is open. The span's duration therefore includes them.
 
 - **Dependabot `github-actions`: a narrow codeql-action group on both update channels, and an
   explicit limit** (repo-standards `F10`). 0.11.0's single `*` group kept codeql-action's

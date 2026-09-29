@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import __version__, runrecord
 from .childenv import BASE_ENV, allowlisted_env
 from .config import Config
 from .discovery import orphaned, scan
@@ -37,6 +38,7 @@ from .extract.redact import Redactor
 from .manifest import append_turn
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
 from .state import STATUS_FAILED, SessionRow, Store
+from .summarize.prompt import prompt_sha256
 from .summarize.providers import Provider, build
 from .summarize.runner import Outcome, summarize_log
 from .telemetry import SPAN_EXTRACT, SPAN_SUMMARIZE, record_spend, set_span_attributes, span
@@ -143,6 +145,11 @@ class SessionResult:
     #: "ok" or "failed". Same reasoning as the manifest -- counted, never fatal, not an error.
     hook: str = ""
     hook_error: str = ""
+    #: Why this session's run record was not written, or "" if it was (or none was due).
+    #: **Not in `errors`.** The digest is on disk either way and the record observes it; a
+    #: failed observation is counted in `run_record_errors`, per invariant 13, and must not
+    #: turn a good sweep into a failed one.
+    run_record_error: str = ""
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -178,6 +185,7 @@ class SessionResult:
             "manifest_error": self.manifest_error,
             "hook": self.hook,
             "hook_error": self.hook_error,
+            "run_record_error": self.run_record_error,
             "errors": self.errors,
         }
 
@@ -543,68 +551,88 @@ def process_session(
             full_read=result.full_read,
         )
 
-    result.input_tokens, result.output_tokens = outcome.input_tokens, outcome.output_tokens
-    result.summarized = outcome.ok
-    result.suppressed = outcome.suppressed
-    # The third state, and the one that was invisible: neither a digest nor a deliberate
-    # suppression note, but `render_failure`'s marked placeholder. The session's summary is
-    # gone. Recorded here so the run totals can say so out loud -- inferring it from
-    # `written - summarized` is how 13 lost sessions would have read as a clean backfill.
-    result.placeholder = not outcome.ok and not outcome.suppressed
-    result.errors.extend(outcome.errors)
-    if outcome.input_tokens or outcome.output_tokens:
-        record_spend(
-            model=outcome.model,
-            input_tokens=outcome.input_tokens,
-            output_tokens=outcome.output_tokens,
-            session_id=log.session_id,
-            provider=outcome.provider,
-            log_path=spend_log,
-        )
+        result.input_tokens, result.output_tokens = outcome.input_tokens, outcome.output_tokens
+        result.summarized = outcome.ok
+        result.suppressed = outcome.suppressed
+        # The third state, and the one that was invisible: neither a digest nor a deliberate
+        # suppression note, but `render_failure`'s marked placeholder. The session's summary is
+        # gone. Recorded here so the run totals can say so out loud -- inferring it from
+        # `written - summarized` is how 13 lost sessions would have read as a clean backfill.
+        result.placeholder = not outcome.ok and not outcome.suppressed
+        result.errors.extend(outcome.errors)
+        if outcome.input_tokens or outcome.output_tokens:
+            record_spend(
+                model=outcome.model,
+                input_tokens=outcome.input_tokens,
+                output_tokens=outcome.output_tokens,
+                session_id=log.session_id,
+                provider=outcome.provider,
+                log_path=spend_log,
+            )
 
-    # Defence in depth on the way to disk. The audit observed that nothing re-redacts the
-    # summarizer's RENDERED output, so the whole redaction model rested on extraction-time
-    # completeness -- and the two Medium findings in that layer showed the assumption was not
-    # free. This re-scrub is deliberately NOT a substitute for fixing extraction: the outbound
-    # call happens earlier, so it protects the on-disk digest only.
-    #
-    # It is also a DETECTOR, and a fire here has TWO possible causes (vikunja#856):
-    #
-    #   * extraction missed it — the value was in the event log and went to the model, or
-    #   * the model emitted it — a secret-shaped string that was never in its input.
-    #
-    # This comment used to say a fire "can only mean extraction missed something", and the
-    # error told the reader to investigate `redact.py`. That was unfalsifiable before #852
-    # persisted the event log, and measurement since says it was often wrong: two `--live
-    # --limit 3` runs over the SAME three sessions gave `post_render_redactions` of 1 then 0,
-    # which an input-side cause cannot produce. Separately, all three persisted logs scrubbed
-    # field-by-field fired 0 times across 1,797 string leaves.
-    #
-    # So ask the log rather than asserting. `capture=True` is used ONLY here and the captured
-    # plaintext never leaves this block — in particular it is never put in `result.errors`,
-    # which is an unredacted sink that reaches the JSON report and the CLI.
-    guard = Redactor(capture=True)
-    markdown = guard.scrub(outcome.markdown)
-    if guard.count:
-        result.post_render_redactions = guard.count
-        result.post_render_cause = classify_post_render(result.eventlog_path, guard.captured)
-        # Explicit, not left to refcounting. The plaintext is provably unreachable after this
-        # point either way -- `guard` is function-local and nothing retains it -- but the
-        # retention window is a deliberate, bounded thing and it should look deliberate in the
-        # code rather than be implicit in scope rules. Info #1, scribe-release-readiness audit.
-        guard.captured.clear()
-        result.errors.append(
-            f"post-render redaction fired {guard.count}x — a secret was caught at write "
-            f"time; {_CAUSE_DETAIL[result.post_render_cause]}"
-        )
+        # Defence in depth on the way to disk. The audit observed that nothing re-redacts the
+        # summarizer's RENDERED output, so the whole redaction model rested on extraction-time
+        # completeness -- and the two Medium findings in that layer showed the assumption was not
+        # free. This re-scrub is deliberately NOT a substitute for fixing extraction: the outbound
+        # call happens earlier, so it protects the on-disk digest only.
+        #
+        # It is also a DETECTOR, and a fire here has TWO possible causes (vikunja#856):
+        #
+        #   * extraction missed it — the value was in the event log and went to the model, or
+        #   * the model emitted it — a secret-shaped string that was never in its input.
+        #
+        # This comment used to say a fire "can only mean extraction missed something", and the
+        # error told the reader to investigate `redact.py`. That was unfalsifiable before #852
+        # persisted the event log, and measurement since says it was often wrong: two `--live
+        # --limit 3` runs over the SAME three sessions gave `post_render_redactions` of 1 then 0,
+        # which an input-side cause cannot produce. Separately, all three persisted logs scrubbed
+        # field-by-field fired 0 times across 1,797 string leaves.
+        #
+        # So ask the log rather than asserting. `capture=True` is used ONLY here and the captured
+        # plaintext never leaves this block — in particular it is never put in `result.errors`,
+        # which is an unredacted sink that reaches the JSON report and the CLI.
+        guard = Redactor(capture=True)
+        markdown = guard.scrub(outcome.markdown)
+        if guard.count:
+            result.post_render_redactions = guard.count
+            result.post_render_cause = classify_post_render(result.eventlog_path, guard.captured)
+            # Explicit, not left to refcounting. The plaintext is provably unreachable after this
+            # point either way -- `guard` is function-local and nothing retains it -- but the
+            # retention window is a deliberate, bounded thing and it should look deliberate in the
+            # code rather than be implicit in scope rules. Info #1, scribe-release-readiness audit.
+            guard.captured.clear()
+            result.errors.append(
+                f"post-render redaction fired {guard.count}x — a secret was caught at write "
+                f"time; {_CAUSE_DETAIL[result.post_render_cause]}"
+            )
 
-    # The QC gate runs on whatever was produced, including a placeholder: a run report that
-    # silently omits the sessions that failed is the same shape of blind spot this component
-    # was built to remove.
-    report: Report = check_digest(markdown, log, floor=coverage_floor)
-    result.qc_ok = report.ok
-    result.qc_coverage = report.coverage
-    result.qc_findings = [f"{f.check}: {f.detail}" for f in report.findings]
+        # The QC gate runs on whatever was produced, including a placeholder: a run report that
+        # silently omits the sessions that failed is the same shape of blind spot this component
+        # was built to remove.
+        report: Report = check_digest(markdown, log, floor=coverage_floor)
+        result.qc_ok = report.ok
+        result.qc_coverage = report.coverage
+        result.qc_findings = [f"{f.check}: {f.detail}" for f in report.findings]
+
+        # Classified here, once, for both the span and the run record: kinds and buckets are
+        # the unit of the trend, and `absent` is the only bucket that says the MODEL invented
+        # something rather than the gate being strict about how it was written.
+        try:
+            qc = runrecord.qc_fields(report, markdown, log)
+        except Exception as exc:  # the record observes the sweep; it must never abort it
+            qc = None
+            result.run_record_error = f"classify: {type(exc).__name__}: {exc}"
+        # On the summarize span rather than a new one: the dashboards query these names, and
+        # a QC time series belongs on the span that produced the digest it grades.
+        set_span_attributes(
+            sp,
+            **{
+                "scribe.qc.ok": report.ok,
+                "scribe.qc.coverage": round(report.coverage, 4),
+                "scribe.qc.findings": len(report.findings),
+                "scribe.qc.findings.absent": runrecord.absent_count(qc) if qc else None,
+            },
+        )
 
     path = daily_path(cfg.output_dir, result.agent, when)
     # What kind of body is going to disk, recorded in the block's own anchor. Empty for a real
@@ -639,6 +667,11 @@ def process_session(
         )
     if result.written:
         _after_write(cfg, result, path, _last_turn_uuid(log))
+    if cfg.qc_run_record and qc is not None:
+        result.run_record_error = runrecord.append(
+            cfg.qc_run_record,
+            _run_record(result, row, log, outcome, provider, qc, digest=_relative(cfg, path)),
+        )
 
     if outcome.ok:
         store.mark_summarized(
@@ -663,6 +696,72 @@ def process_session(
         )
         result.errors.append(f"attempt {attempts}: {outcome.reason}")
     return result
+
+
+def _relative(cfg: Config, path: Path) -> str:
+    """The digest's path under the output root, as `qc_survey.iter_blocks` names it."""
+    try:
+        return str(path.expanduser().relative_to(output_root(cfg)))
+    except ValueError:
+        return str(path)
+
+
+def _run_record(
+    result: SessionResult,
+    row: SessionRow,
+    log: EventLog,
+    outcome: Outcome,
+    provider: Provider,
+    qc: dict,
+    *,
+    digest: str,
+) -> dict:
+    """One live record. Every value is one the pipeline already holds -- nothing is re-derived.
+
+    `lag_s` runs from the transcript's last write as discovery observed it (`row.mtime_ns`) to
+    now, which is within a second of the digest reaching disk. For a replayed session that is
+    the transcript's last write before it aged out, which is still the true lag.
+    """
+    lag = round(datetime.now(UTC).timestamp() - row.mtime_ns / 1e9, 1) if row.mtime_ns else None
+    return {
+        "record_version": runrecord.RECORD_VERSION,
+        "ts": runrecord._now(),
+        "source": runrecord.SOURCE_LIVE,
+        "graded_by": __version__,
+        "scribe_version": __version__,
+        "prompt_sha256": prompt_sha256(),
+        "provider": outcome.provider or provider.name,
+        "model_requested": getattr(provider, "model", "") or None,
+        # What the response said, or null. Never back-filled from the request: see
+        # `Completion.model_resolved`.
+        "model_resolved": outcome.model_resolved or None,
+        "agent": result.agent,
+        "session_id": result.session_id,
+        "turn_uuid": _last_turn_uuid(log),
+        "transcript_path": result.transcript_path,
+        "digest": digest,
+        "session_at": log.started_at or log.ended_at or None,
+        "full_read": result.full_read,
+        "replayed": result.replayed,
+        "turns": result.turns,
+        "events": result.events,
+        "extracted_chars": result.extracted_chars,
+        "token_estimate": result.token_estimate,
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+        "degradation_level": result.degradation_level,
+        "written": result.written,
+        "suppressed": result.suppressed,
+        "placeholder": result.placeholder,
+        "discarded": result.discarded,
+        "truncated_items": result.truncated_items,
+        "truncated_fields": result.truncated_fields,
+        "secrets_redacted": result.secrets_redacted,
+        "post_render_redactions": result.post_render_redactions,
+        "errors": len(result.errors),
+        **qc,
+        "lag_s": lag,
+    }
 
 
 def run_once(
@@ -748,6 +847,7 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "manifest_errors": sum(1 for r in results if r.manifest_error),
         "hook_ok": sum(1 for r in results if r.hook == "ok"),
         "hook_failed": sum(1 for r in results if r.hook == "failed"),
+        "run_record_errors": sum(1 for r in results if r.run_record_error),
         "input_tokens": sum(r.input_tokens for r in results),
         "output_tokens": sum(r.output_tokens for r in results),
         "degraded": sum(1 for r in results if r.degradation_level),

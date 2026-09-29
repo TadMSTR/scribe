@@ -104,6 +104,21 @@ def test_usage_and_model_are_reported(captured, monkeypatch) -> None:
     assert (c.input_tokens, c.output_tokens) == (100, 20)
     assert c.model == "small-latest-2026"
     assert c.provider == "mistral"
+    assert c.model_resolved == "small-latest-2026"
+
+
+def test_model_resolved_is_empty_when_the_response_names_no_model(monkeypatch) -> None:
+    """`model` falls back to the requested name so the spend meter always has one;
+    `model_resolved` must not, or the run record would report a resolution nobody observed."""
+    import httpx
+
+    payload = _ok_payload()
+    del payload["model"]
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: FakeResponse(200, payload))
+    monkeypatch.setenv("SCRIBE_TEST_KEY", "k")
+    c = OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
+    assert c.model == MISTRAL.model
+    assert c.model_resolved == ""
 
 
 def test_json_object_response_format_is_requested(captured, monkeypatch) -> None:

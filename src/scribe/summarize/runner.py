@@ -50,6 +50,8 @@ class Outcome:
     output_tokens: int = 0
     model: str = ""
     provider: str = ""
+    #: `Completion.model_resolved` of the last response -- "" when the provider named none.
+    model_resolved: str = ""
     errors: list[str] = field(default_factory=list)
 
 
@@ -99,6 +101,7 @@ def summarize_log(
         outcome.output_tokens += completion.output_tokens
         outcome.model = completion.model
         outcome.provider = completion.provider
+        outcome.model_resolved = completion.model_resolved
 
         try:
             digest = parse(completion.text, caps)

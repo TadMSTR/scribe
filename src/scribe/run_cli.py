@@ -142,6 +142,13 @@ def main(argv: list[str] | None = None) -> int:
             for r in results:
                 if r.hook_error:
                     print(f"    {Path(r.transcript_path).name}: hook: {r.hook_error}")
+        # Not `!!`: every digest this line is about is on disk. What is missing is the QC
+        # record of it, which `qc-report` will under-count until the cause is fixed.
+        if totals["run_record_errors"]:
+            print(f"  {totals['run_record_errors']} run record(s) not written")
+            for r in results:
+                if r.run_record_error:
+                    print(f"    {Path(r.transcript_path).name}: run record: {r.run_record_error}")
         if totals["errors"]:
             print(f"  {totals['errors']} error(s)")
             for r in results:

@@ -13,10 +13,13 @@ why a small model is sufficient.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from functools import cache
 
 from ..extract.models import EventLog
-from .schema import field_caps, json_schema
+from .contamination import RETRY_REMINDER
+from .schema import contract_spec, field_caps, json_schema
 
 
 def _caps_clause(caps: dict[str, int] | None = None) -> str:
@@ -85,6 +88,31 @@ def build_system_prompt(caps: dict[str, int] | None = None) -> str:
 #: The default-caps rendering. Still a module constant because it is what a caller with no
 #: log gets, but the live path goes through `build_system_prompt(caps_for(log))`.
 SYSTEM = build_system_prompt()
+
+
+@cache
+def prompt_sha256() -> str:
+    """The identity of what the model is asked to do, for attributing a digest after the fact.
+
+    Covers the system template, the user-prompt framing (rendered over an empty log, so the
+    wrapper and the embedded schema are hashed and no session content is), the retry reminder,
+    and `schema.contract_spec` -- the cap RULES, not any one session's caps.
+
+    A hash rather than a declared `PROMPT_VERSION` constant, deliberately. A constant is only
+    as good as the discipline of bumping it, and a missed bump is invisible: the run record
+    would attribute two different prompts to one version and the trend would call the change
+    model drift. A hash cannot be forgotten. The cost is that it also moves on a whitespace
+    edit, which is the right side to err on -- a spurious new identity is visible, a missing
+    one is not.
+    """
+    material = {
+        "system_template": _SYSTEM_TEMPLATE,
+        "user_framing": build_user_prompt(EventLog(session_id="", transcript_path="")),
+        "retry_reminder": RETRY_REMINDER,
+        "contract": contract_spec(),
+    }
+    blob = json.dumps(material, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
 
 
 def build_user_prompt(log: EventLog, caps: dict[str, int] | None = None) -> str:
