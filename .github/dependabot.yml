@@ -45,8 +45,13 @@ updates:
     # tools stay an extra: CI and the deploy install `.[dev,telemetry]`, and moving them is
     # a bigger change than a grouping fix. Add a new dev tool here when you add it there.
     #
-    # A dependency joins the first group that matches it; these two are disjoint.
+    # `opentelemetry` exists because the family moves as one: every per-package OTel PR
+    # carried the whole family in uv.lock, so N PRs were one change (vikunja#1031).
+    #
+    # A dependency joins the first group that matches it; these three are disjoint.
     groups:
+      opentelemetry:
+        patterns: ["opentelemetry-*"]
       dev-tools:
         patterns: ["ruff", "pytest", "pytest-cov"]
       dev-dependencies:
