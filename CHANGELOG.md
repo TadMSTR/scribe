@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dependabot `uv`: `opentelemetry` group.** Every per-package OTel PR already moved the
+  whole family in `uv.lock`, so they were one change filed several times (vikunja#1031).
+
 ## [0.12.0] — 2026-09-28
 
 **Minor.** QC results are now persisted and reported as a trend. There is a new `qc-report`
