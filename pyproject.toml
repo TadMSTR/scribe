@@ -54,7 +54,7 @@ dev = [
     # changed. Taking a bump is a decision, not a default. Keep it on the same version as
     # the other repos in the fleet, so a shared bump moves together; the version is not
     # restated here because a comment naming it goes stale on the first bump.
-    "ruff==0.16.8",
+    "ruff==0.16.10",
 ]
 
 [project.scripts]
