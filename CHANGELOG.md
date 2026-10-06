@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-10-06
+
+Dependency release. No application code changed.
+
 ### Changed
+- **OpenTelemetry 1.44.0 → 1.45.0** (semantic-conventions 0.65b0 → 0.66b0), one group PR
+  (#34). Adds `opentelemetry-exporter-otlp-common` 0.66b0 as a new transitive package.
+  ruff 0.16.8 → 0.16.10 (dev only).
 - **Dependabot `uv`: `opentelemetry` group.** Every per-package OTel PR already moved the
   whole family in `uv.lock`, so they were one change filed several times (vikunja#1031).
 
