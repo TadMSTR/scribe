@@ -257,6 +257,17 @@ def apply(cfg: Config, found: Scan, *, now: datetime | None = None) -> Applied:
             # stale and splicing them would land the edit somewhere arbitrary.
             done.skipped_changed.append(str(path.relative_to(root)))
             continue
+        text = found.texts[path]
+        # Reverse order, so each splice cannot shift the spans not yet applied.
+        for ch in sorted(changes, key=lambda c: c.span, reverse=True):
+            start, end = ch.span
+            text = text[:start] + ch.body + text[end:]
+        # The rename proves the write was whole, not that the content is right (FW-13). A
+        # splice must leave every block where it was: same turns, same order, same count.
+        before_turns = [a.group(2) for a, _c in paired_blocks(found.texts[path])]
+        if [a.group(2) for a, _c in paired_blocks(text)] != before_turns:
+            done.aborted = f"{path.relative_to(root)}: the splice moved a block, file not touched"
+            break
         try:
             if run_dir is None:
                 run_dir = _backup_run_dir(cfg, now or datetime.now(UTC))
@@ -265,11 +276,6 @@ def apply(cfg: Config, found: Scan, *, now: datetime | None = None) -> Applied:
         except (OSError, CorrectError) as exc:
             done.aborted = f"backup of {path.relative_to(root)} failed, file not touched: {exc}"
             break
-        text = found.texts[path]
-        # Reverse order, so each splice cannot shift the spans not yet applied.
-        for ch in sorted(changes, key=lambda c: c.span, reverse=True):
-            start, end = ch.span
-            text = text[:start] + ch.body + text[end:]
         atomic_replace(path, text)
         done.files += 1
         done.blocks += len(changes)

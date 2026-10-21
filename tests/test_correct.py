@@ -339,6 +339,19 @@ def test_a_failed_backup_leaves_the_file_untouched(cfg, tmp_path) -> None:
     assert check(cfg).clean
 
 
+def test_a_splice_that_would_move_a_block_is_refused(cfg) -> None:
+    """FW-13: the replace is whole either way; what is checked is that it is RIGHT."""
+    found = scan(cfg)
+    (ch,) = [c for c in found.changes if c.session_id == "s-conflated"]
+    ch.body += "<!-- session:x turn:y transcript:x -->\nz\n<!-- /scribe turn:y -->\n"
+    research = _research(cfg).read_bytes()
+    done = correct_cli.apply(cfg, found)
+    assert "moved a block" in done.aborted
+    # Files sort `developer/` first, so that one was corrected before the refusal.
+    assert _research(cfg).read_bytes() == research
+    assert not list(Path(done.backup_dir).rglob("research/*"))
+
+
 def test_a_file_changed_after_the_scan_is_left_alone(cfg, tmp_path) -> None:
     found = scan(cfg)
     md = _research(cfg)
