@@ -34,7 +34,6 @@ from .eventlog import EventLogError, eventlog_path, load_eventlog
 from .extract.models import EventLog
 from .qc import (
     _CMD_RE,
-    _ID_CONTEXT,
     _TOKEN_RE,
     ADJACENCY_WINDOW,
     CLAIM_CODE,
@@ -53,6 +52,7 @@ from .qc import (
     check_groundedness,
     composition_split,
     grounding_terms,
+    is_id_conflation,
     path_claims,
     path_grounded,
     path_literal,
@@ -283,7 +283,7 @@ def _desynced_spans(body: str) -> set[str]:
 def classify_ticket_claim(claim: str, corpus: str) -> str:
     """Why a `#N` was rejected. See `ID_CONFLATION` — most of this bucket is the gate working."""
     number = claim.lstrip("#")
-    if re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus):
+    if is_id_conflation(claim, corpus):
         return ID_CONFLATION
     if re.search(r"(?<!\d)" + re.escape(number) + r"(?!\d)", corpus):
         return COINCIDENTAL_NUMBER

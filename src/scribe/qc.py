@@ -767,6 +767,23 @@ def _ticket_in_corpus(claim: str, corpus: str) -> bool:
     return re.search(re.escape(claim) + r"\b", corpus) is not None
 
 
+def is_id_conflation(claim: str, corpus: str) -> bool:
+    """Whether the corpus holds `#N`'s bare number only in an id-shaped context.
+
+    The one statement of the rule. `_ticket_detail` uses it to pick a message,
+    `qc_survey.classify_ticket_claim` to pick a bucket, and `rewrite_id_conflations` to decide
+    what to rewrite -- three callers that used to be two copies of the same pattern. It lives
+    here rather than in the survey because `qc_survey` imports `qc`, and the gate must not
+    import its own instrument.
+
+    Only meaningful for a claim the gate already REJECTED: a `#N` that grounds as written is
+    not a conflation however its number also appears. The trailing `\b` is the same boundary
+    `_ticket_in_corpus` keeps, so `id 655` never makes `#65` a conflation.
+    """
+    number = claim.lstrip("#")
+    return re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus) is not None
+
+
 def _ticket_detail(claim: str, corpus: str) -> str:
     """The message for an ungrounded `#N`, naming the id-vs-identifier conflation by name.
 
@@ -778,7 +795,7 @@ def _ticket_detail(claim: str, corpus: str) -> str:
     context we say so.
     """
     number = claim.lstrip("#")
-    if re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus):
+    if is_id_conflation(claim, corpus):
         return (
             f"ticket {claim!r} is not in the event log, which contains {number!r} only as an "
             f"internal id -- a Vikunja id is not its #identifier, so this points at a "
@@ -841,6 +858,71 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
                     kind=kind,
                     claim=claim,
                 )
+
+
+#: Scribe's own markers, which `rewrite_id_conflations` must leave byte-for-byte alone. The same
+#: three `strip_scribe_markers` removes before grading, for the same reason: they are written by
+#: scribe, not asserted by the model, so nothing in them is a claim to correct.
+_MARKER_RES = (ANCHOR_RE, TERMINATOR_RE, TRUNCATION_RE)
+#: `#N (id N)` -- a conflated ref the model already annotated with the same number. Rewriting
+#: only the `#N` would leave `id N (id N)`, so the pair collapses to one `id N`.
+_SELF_ANNOTATED = r"[ \t]*\(id[ \t]+{n}\)"
+
+
+def rewrite_id_conflations(text: str, report: Report, log: EventLog) -> tuple[str, int]:
+    """Rewrite every `#N` the gate rejected as an id conflation to `id N`. Returns `(text, n)`.
+
+    **Call this AFTER grading, never before.** `report` is the verdict on the model's own output,
+    and the run record's `id-conflation` count is the measure of whether the prompt is teaching
+    the model the `#N (id M)` convention. Rewriting first would grade scribe's correction
+    instead, the bucket would read zero whatever the model did, and the prompt change could
+    never be evaluated.
+
+    Why rewrite at all, rather than only report: the gate already knows, from the event log
+    alone, that the number is a tracker's internal id and not its `#identifier`. A digest that
+    keeps `#1258` sends every agent's next session start a reference that names nothing, or
+    names an unrelated ticket once the tracker's per-project counter reaches it. `id 1258` is
+    what the log actually supports.
+
+    What is NOT touched, deliberately:
+
+      * a `#N` that grounds as written -- it is not in `report` at all, including the
+        `#N (id M)` form when the log holds `#N`;
+      * a rejected `#N` whose number appears only as a quantity (`coincidental-number`) or not
+        at all (`absent`). Neither is an id, so `id N` would be a fabrication of its own;
+      * anything inside scribe's anchor, terminator or truncation markers.
+
+    The match is `_TICKET_RE`, the pattern the gate extracted the claim with, so `#65` never
+    rewrites inside `#655` and a ref the gate never saw is never rewritten.
+    """
+    corpus = log.grounding_text().lower()
+    conflated = {
+        f.claim
+        for f in report.findings
+        if f.kind == CLAIM_TICKET and is_id_conflation(f.claim, corpus)
+    }
+    if not conflated:
+        return text, 0
+    protected = [m.span() for rx in _MARKER_RES for m in rx.finditer(text)]
+    out: list[str] = []
+    pos = 0
+    count = 0
+    for m in _TICKET_RE.finditer(text):
+        if f"#{m.group(1)}" not in conflated:
+            continue
+        if any(lo <= m.start() < hi for lo, hi in protected):
+            continue
+        number = m.group(1)
+        end = m.end()
+        dup = re.compile(_SELF_ANNOTATED.format(n=re.escape(number))).match(text, end)
+        if dup:
+            end = dup.end()
+        out.append(text[pos : m.start()])
+        out.append(f"id {number}")
+        pos = end
+        count += 1
+    out.append(text[pos:])
+    return "".join(out), count
 
 
 def check_event_coverage(

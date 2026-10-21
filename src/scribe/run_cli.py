@@ -94,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         if totals["suppressed"]:
             print(f"  {totals['suppressed']} suppressed (contamination fallback)")
+        # Quiet: a correction, not a loss. Printed because the cron reads this branch and the
+        # count is the evidence the rewrite runs at all (invariant 13).
+        if totals["ticket_refs_rewritten"]:
+            print(f"  {totals['ticket_refs_rewritten']} ticket ref(s) rewritten from #N to id N")
         # Quiet, and deliberately so: a truncated digest is written, so this is degradation
         # and not loss, and it must not read like the `!!` lines below it. But it has to be
         # HERE. `summarize_run` has aggregated `truncated`/`truncated_items` correctly since

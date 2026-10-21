@@ -57,6 +57,13 @@ _SYSTEM_TEMPLATE = (
     "step lists or <placeholder> tokens from the source. If a skill or template was loaded, "
     "say only that it was loaded and for what purpose, never its contents.\n"
     "\n"
+    # A tracker's internal id is not its #number. The log shows ids as `task_id=1258`,
+    # `"id": 1258` or `/tasks/1258`; writing `#1258` for one names a different ticket, or none.
+    "Ticket references: a ticket's #number and its internal id are different numbers. When "
+    "the log shows both, write them as #N (id M). When it shows only an id (task_id=..., "
+    '"id": ..., /tasks/...), write id M. Never put # in front of a number the log shows only '
+    "as an id.\n"
+    "\n"
     "Fields:\n"
     "  asked       - one sentence: what the user wanted.\n"
     "  done        - what was actually carried out. At least one entry.\n"

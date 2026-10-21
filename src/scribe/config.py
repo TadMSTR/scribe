@@ -121,6 +121,10 @@ class Config:
     qc_min_sessions: int = DEFAULT_QC_MIN_SESSIONS
     #: Only the keys the operator set -- see `QC_THRESHOLD_KEYS`.
     qc_thresholds: dict[str, float] = field(default_factory=dict)
+    #: Rewrite a `#N` the gate rejected as an id conflation to `id N` before the digest is
+    #: written -- see `qc.rewrite_id_conflations`. On by default; turn it off for a tracker
+    #: whose `#N` IS its id, where the conflation the gate names cannot happen.
+    qc_rewrite_id_conflations: bool = True
 
     def manifest_file(self) -> Path:
         """The digest manifest: `manifest_path` if set, else `<output_dir>/../index.jsonl`.
@@ -209,7 +213,7 @@ def _load_qc(cfg: Config, qc: object) -> None:
     as report-only and never fire, which is the silent kind of wrong."""
     if not isinstance(qc, dict):
         raise ConfigError("qc: expected a table")
-    unknown = set(qc) - {"run_record", "min_sessions", *QC_THRESHOLD_KEYS}
+    unknown = set(qc) - {"run_record", "min_sessions", "rewrite_id_conflations", *QC_THRESHOLD_KEYS}
     if unknown:
         raise ConfigError(f"qc: unknown key(s) {', '.join(sorted(unknown))}")
     if "run_record" in qc:
@@ -221,6 +225,10 @@ def _load_qc(cfg: Config, qc: object) -> None:
         if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             raise ConfigError("qc.min_sessions must be a positive integer")
         cfg.qc_min_sessions = n
+    if "rewrite_id_conflations" in qc:
+        if not isinstance(qc["rewrite_id_conflations"], bool):
+            raise ConfigError("qc.rewrite_id_conflations must be true or false")
+        cfg.qc_rewrite_id_conflations = qc["rewrite_id_conflations"]
     for key in QC_THRESHOLD_KEYS:
         if key in qc:
             cfg.qc_thresholds[key] = check_threshold(key, qc[key], where="qc.")

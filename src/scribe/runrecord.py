@@ -243,6 +243,9 @@ def iter_backfill(
             "post_render_redactions": None,
             "errors": None,
             **qc_fields(report, block.body, log, home=home),
+            # Unknown: a block on disk says nothing about what was rewritten before it got
+            # there. `null`, like every other field a backfill cannot observe.
+            "ticket_refs_rewritten": None,
             "lag_s": None,
         }
 

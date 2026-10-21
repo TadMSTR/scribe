@@ -36,7 +36,7 @@ from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
 from .manifest import append_turn
-from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
+from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest, rewrite_id_conflations
 from .state import STATUS_FAILED, SessionRow, Store
 from .summarize.prompt import prompt_sha256
 from .summarize.providers import Provider, build
@@ -150,6 +150,11 @@ class SessionResult:
     #: failed observation is counted in `run_record_errors`, per invariant 13, and must not
     #: turn a good sweep into a failed one.
     run_record_error: str = ""
+    #: `#N` refs rewritten to `id N` after grading -- see `qc.rewrite_id_conflations`. Counted
+    #: so a falling `id-conflation` rate after a prompt change can be told apart from the
+    #: rewrite silently not running: the first moves this toward 0 too, the second leaves it
+    #: at 0 while the bucket stays full.
+    ticket_refs_rewritten: int = 0
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -186,6 +191,7 @@ class SessionResult:
             "hook": self.hook,
             "hook_error": self.hook_error,
             "run_record_error": self.run_record_error,
+            "ticket_refs_rewritten": self.ticket_refs_rewritten,
             "errors": self.errors,
         }
 
@@ -622,6 +628,13 @@ def process_session(
         except Exception as exc:  # the record observes the sweep; it must never abort it
             qc = None
             result.run_record_error = f"classify: {type(exc).__name__}: {exc}"
+
+        # Strictly AFTER both gradings above, and that order is the point: `report` and `qc`
+        # measure the model's own output, and the `id-conflation` count is how the prompt's
+        # `#N (id M)` rule gets evaluated. Rewriting first would grade scribe's correction and
+        # read zero whatever the model did. Only what reaches disk is corrected.
+        if cfg.qc_rewrite_id_conflations:
+            markdown, result.ticket_refs_rewritten = rewrite_id_conflations(markdown, report, log)
         # On the summarize span rather than a new one: the dashboards query these names, and
         # a QC time series belongs on the span that produced the digest it grades.
         set_span_attributes(
@@ -631,6 +644,7 @@ def process_session(
                 "scribe.qc.coverage": round(report.coverage, 4),
                 "scribe.qc.findings": len(report.findings),
                 "scribe.qc.findings.absent": runrecord.absent_count(qc) if qc else None,
+                "scribe.qc.ticket_refs_rewritten": result.ticket_refs_rewritten,
             },
         )
 
@@ -760,6 +774,7 @@ def _run_record(
         "post_render_redactions": result.post_render_redactions,
         "errors": len(result.errors),
         **qc,
+        "ticket_refs_rewritten": result.ticket_refs_rewritten,
         "lag_s": lag,
     }
 
@@ -848,6 +863,9 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "hook_ok": sum(1 for r in results if r.hook == "ok"),
         "hook_failed": sum(1 for r in results if r.hook == "failed"),
         "run_record_errors": sum(1 for r in results if r.run_record_error),
+        #: `#N` refs corrected to `id N` across the sweep. Not an outcome and not loss: every
+        #: digest it counts was written, with the wrong ref fixed.
+        "ticket_refs_rewritten": sum(r.ticket_refs_rewritten for r in results),
         "input_tokens": sum(r.input_tokens for r in results),
         "output_tokens": sum(r.output_tokens for r in results),
         "degraded": sum(1 for r in results if r.degradation_level),
