@@ -81,6 +81,7 @@ LIVE_FIELDS = {
     "findings_by_kind",
     "findings_by_bucket",
     "claims",
+    "ticket_refs_rewritten",
     "lag_s",
 }
 

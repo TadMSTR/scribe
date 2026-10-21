@@ -52,6 +52,10 @@ class Outcome:
     provider: str = ""
     #: `Completion.model_resolved` of the last response -- "" when the provider named none.
     model_resolved: str = ""
+    #: The run ended on a `ProviderError` that says the provider is down (`unavailable`), not
+    #: that this session's input is at fault. The pipeline leaves such a session pending and
+    #: spends none of its retry budget; see `pipeline.process_session`.
+    provider_unavailable: bool = False
     errors: list[str] = field(default_factory=list)
 
 
@@ -90,6 +94,9 @@ def summarize_log(
             outcome.errors.append(str(exc))
             if not exc.retryable or attempt == max_attempts:
                 outcome.reason = str(exc)
+                # Decided by how the run ENDED. Earlier attempts that failed otherwise do not
+                # matter: the last word was that the provider could not be reached.
+                outcome.provider_unavailable = exc.unavailable
                 break
             delay = base_backoff * attempt
             if exc.status == 429:

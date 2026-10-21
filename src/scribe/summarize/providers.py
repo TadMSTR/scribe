@@ -27,12 +27,28 @@ class ProviderError(RuntimeError):
     `retryable` distinguishes "try again" from "this will fail identically forever". A rate
     limit is retryable; a malformed request is not. Treating everything as retryable turns a
     permanent bug into a quota burn.
+
+    `unavailable` is narrower, and says the PROVIDER is down rather than that this call went
+    wrong: a transport error or timeout, a 429, a 5xx. It is what lets the pipeline leave a
+    session pending through an outage instead of spending its retry budget on one (#1188
+    (id 1271) item 4). Every unavailable error is retryable; the reverse does not hold. An
+    unparseable response envelope is retryable and NOT unavailable, because it can be a
+    property of the input -- treated as an outage, a session that reliably produces one would
+    be deferred on every sweep forever, which is the 12-attempt burn `state.py` documents.
     """
 
-    def __init__(self, message: str, *, retryable: bool = False, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        status: int | None = None,
+        unavailable: bool = False,
+    ) -> None:
         super().__init__(message)
-        self.retryable = retryable
+        self.retryable = retryable or unavailable
         self.status = status
+        self.unavailable = unavailable
 
 
 @dataclass
@@ -61,6 +77,13 @@ class Provider:
         raise NotImplementedError
 
 
+def _endpoint_down_errors() -> tuple[type[BaseException], ...]:
+    """The httpx errors that mean the endpoint did not answer at all."""
+    import httpx
+
+    return (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.RemoteProtocolError)
+
+
 class OpenAICompatibleProvider(Provider):
     """Chat-completions over HTTP. Covers Mistral and Ollama.
 
@@ -81,6 +104,7 @@ class OpenAICompatibleProvider(Provider):
     def complete(self, system: str, user: str, *, timeout: float = 120.0) -> Completion:
         import httpx
 
+        endpoint_down = _endpoint_down_errors()
         headers = {"Content-Type": "application/json"}
         # Resolved HERE, not at construction and not at config load.
         key = self.cfg.resolve_api_key()
@@ -104,16 +128,38 @@ class OpenAICompatibleProvider(Provider):
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         try:
             resp = httpx.post(url, json=payload, headers=headers, timeout=timeout)
-        except Exception as exc:  # httpx.TransportError and friends
-            raise ProviderError(f"{self.name}: transport error: {exc}", retryable=True) from exc
+        except endpoint_down as exc:
+            raise ProviderError(
+                f"{self.name}: endpoint unreachable: {type(exc).__name__}: {exc}",
+                retryable=True,
+                unavailable=True,
+            ) from exc
+        except httpx.TransportError as exc:
+            # Reached the endpoint, or might have, and then failed: a read/write timeout or a
+            # dropped stream. Worth retrying, and NOT an outage, because a slow answer can be a
+            # property of the input -- a session big enough that the model always needs more
+            # than `timeout` would otherwise be deferred forever (audit F-01).
+            raise ProviderError(
+                f"{self.name}: transport error: {type(exc).__name__}: {exc}", retryable=True
+            ) from exc
+        except Exception as exc:
+            # Raised before the request left: the payload could not be built or encoded. That
+            # is determined by the input, so retrying buys the same error (audit F-01).
+            raise ProviderError(
+                f"{self.name}: request could not be sent: {type(exc).__name__}: {exc}",
+                retryable=False,
+            ) from exc
 
         if resp.status_code == 429:
-            raise ProviderError(f"{self.name}: rate limited", retryable=True, status=429)
+            raise ProviderError(
+                f"{self.name}: rate limited", retryable=True, status=429, unavailable=True
+            )
         if resp.status_code >= 500:
             raise ProviderError(
                 f"{self.name}: server error {resp.status_code}",
                 retryable=True,
                 status=resp.status_code,
+                unavailable=True,
             )
         if resp.status_code >= 400:
             # 4xx other than 429 will fail identically on retry. The body is NOT included:
@@ -224,15 +270,18 @@ class ClaudeCliProvider(Provider):
                 env=self.child_env(),
             )
         except subprocess.TimeoutExpired as exc:
+            # Retryable, NOT an outage: `claude -p`'s run time scales with the input, so a
+            # session big enough to always exceed `timeout` would otherwise be deferred
+            # forever -- the shape audit F-01 removed from httpx's read timeout (audit R2-02).
             raise ProviderError(f"{self.name}: timed out after {timeout}s", retryable=True) from exc
         except OSError as exc:
             raise ProviderError(f"{self.name}: {exc}", retryable=False) from exc
 
         if proc.returncode != 0:
-            # 124/142 are the shell's timeout conventions and are worth retrying; anything
-            # else from the CLI is likely to repeat.
-            retryable = proc.returncode in (124, 142)
-            raise ProviderError(f"{self.name}: exited {proc.returncode}", retryable=retryable)
+            # 124/142 are the shell's timeout conventions: worth retrying, and like
+            # `TimeoutExpired` not an outage (audit R2-02). Anything else is likely to repeat.
+            timed_out = proc.returncode in (124, 142)
+            raise ProviderError(f"{self.name}: exited {proc.returncode}", retryable=timed_out)
         if not (proc.stdout or "").strip():
             raise ProviderError(f"{self.name}: produced no output", retryable=True)
         return Completion(text=proc.stdout, model=self.model, provider=self.name)

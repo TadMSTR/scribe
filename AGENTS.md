@@ -21,7 +21,7 @@ in `pipeline.py` rather than living inside the extractor.
 
 **2. Transcripts are read-only.**
 Never write to `~/.claude/projects/*/*.jsonl`. They are the only durable record of what
-happened and Claude Code already expires them after 30 days. `test_extract_never_writes_to_the_transcript`
+happened and Claude Code already deletes them `cleanupPeriodDays` after their last write (default 30, configurable). `test_extract_never_writes_to_the_transcript`
 asserts this on content *and* mtime; if it becomes inconvenient, the code is wrong.
 
 **3. Every string entering the event log goes through `Redactor`.**
@@ -191,8 +191,8 @@ via the pipeline, and `recover`'s anchor stamping. A writer that skips this turn
 on correct data. `sha256` hashes the **block**: a file hash goes stale on every later append.
 
 **18. Event logs are kept indefinitely. That is a decision, not a missing feature.**
-Decided by the operator on 2026-09-24 (vikunja#954). Claude Code deletes a transcript 30 days
-after its last write, and after that the event log is the **only** source a digest can be
+Decided by the operator on 2026-09-24 (vikunja#954). Claude Code deletes a transcript
+`cleanupPeriodDays` after its last write (default 30, configurable), and after that the event log is the **only** source a digest can be
 re-summarized from (vikunja#873). `recover` exits `3`, needs a human, for exactly the session
 that has lost both. A retention setting that pruned event logs would turn a recoverable loss
 into that one, silently, on a timer.
@@ -204,6 +204,39 @@ an alert anyone receives.
 If a retention knob is ever added, it **defaults off**, and every log it deletes is counted in
 the run totals and printed on the human surface (invariant 13). A pruning pass that reports
 nothing is indistinguishable from one that pruned nothing.
+
+**19. An outage is not a property of the session, so it spends nothing.**
+`MAX_PROVISIONAL_ATTEMPTS` bounds retries for failures that are *determined by the input*, and
+before 0.13.0 a provider outage was charged against it as if it were one. An outage of 2–3
+hours retired every pending session until someone ran `scribe recover --apply`, and
+`scribe run` exited `0` throughout (#1188 (id 1271) item 4). Now a run that ended on a
+`ProviderError` with `unavailable=True` returns from `process_session` **before** the block and
+before any store write. The offset does not move, so `scan` (or `orphaned`) re-offers the
+session at no cost. `unavailable` means the endpoint did not answer: httpx `ConnectError`,
+`ConnectTimeout`, `PoolTimeout` or `RemoteProtocolError`, a 429 or a 5xx. No timeout counts,
+including `claude-cli`'s (audit R2-02). `run_once` stops calling the provider after **two**
+consecutive deferrals, and `run_cli` returns `EXIT_PROVIDER_UNAVAILABLE` (`69`).
+
+**Why two, and why the classes are that narrow** (scribe-qc-integrity-2026-10 audit F-01). The
+first version marked *every* exception from `httpx.post` as unavailable and tripped on one
+deferral. A session whose own request could not be encoded (a lone surrogate) was then
+deferred on every sweep forever, and every session behind it was never attempted, while the
+run blamed the provider. A read timeout can be input-driven the same way. So a deferral is a
+suspicion until another session confirms it. A suspect is re-run with `allow_defer=False`,
+onto the provisional path, if the provider answered ANY session in the sweep, before it or
+after it (audit R2-01: a forward-only probe left the last, the only, and every orphaned
+suspect deferred forever). Widening `unavailable` again, or tripping on one deferral, re-opens
+that. One residual is accepted: two adjacent suspects with nothing answered before them still
+trip the breaker, because only a per-session deferral count in the state DB could tell them
+from an outage.
+
+`unavailable` is deliberately narrower than `retryable`. An unparseable envelope, a read or
+write timeout and a dropped stream are retryable and are **not** an outage, because each can be
+the input's fault. Widening `unavailable` to cover
+it would defer such a session on every sweep forever, which is the 12-attempt burn `state.py`
+documents, by another route. The exit code is a contract: `0` ok, `2` config, `69` outage.
+Do not reuse `1` (an uncaught crash) or `75` (the cron's `flock -E 75` skip, which forge's
+wrapper reports as ok).
 
 ## Porting notes
 

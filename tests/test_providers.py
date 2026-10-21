@@ -143,6 +143,8 @@ def test_status_codes_map_to_the_right_retryability(monkeypatch, status, retryab
         OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
     assert exc.value.retryable is retryable
     assert exc.value.status == status
+    # Every retryable status here is an outage (429, 5xx); no 4xx is (#1188 (id 1271) item 4).
+    assert exc.value.unavailable is retryable
 
 
 def test_a_rejected_request_body_is_not_echoed(monkeypatch) -> None:
@@ -171,6 +173,7 @@ def test_transport_error_is_retryable(monkeypatch) -> None:
     with pytest.raises(ProviderError) as exc:
         OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
     assert exc.value.retryable is True
+    assert exc.value.unavailable is True
 
 
 def test_unparseable_envelope_is_retryable(monkeypatch) -> None:
@@ -181,6 +184,9 @@ def test_unparseable_envelope_is_retryable(monkeypatch) -> None:
     with pytest.raises(ProviderError) as exc:
         OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
     assert exc.value.retryable is True
+    # Retryable but NOT an outage: the provider answered, and a bad envelope can be a property
+    # of the input. Deferring it would re-offer such a session every sweep forever.
+    assert exc.value.unavailable is False
 
 
 def test_provider_without_base_url_or_model_is_refused() -> None:
@@ -238,6 +244,7 @@ def test_claude_cli_empty_output_is_a_failure(monkeypatch) -> None:
     with pytest.raises(ProviderError, match="no output") as exc:
         ClaudeCliProvider(CLI).complete("sys", "user")
     assert exc.value.retryable is True
+    assert exc.value.unavailable is False
 
 
 @pytest.mark.parametrize("code,retryable", [(1, False), (2, False), (124, True), (142, True)])
@@ -246,6 +253,9 @@ def test_claude_cli_exit_codes(monkeypatch, code, retryable) -> None:
     with pytest.raises(ProviderError) as exc:
         ClaudeCliProvider(CLI).complete("sys", "user")
     assert exc.value.retryable is retryable
+    # 124/142 are timeouts: retryable, never an outage -- run time scales with the input
+    # (audit R2-02).
+    assert exc.value.unavailable is False
 
 
 def test_claude_cli_timeout_is_retryable(monkeypatch) -> None:
@@ -253,6 +263,7 @@ def test_claude_cli_timeout_is_retryable(monkeypatch) -> None:
     with pytest.raises(ProviderError, match="timed out") as exc:
         ClaudeCliProvider(CLI).complete("sys", "user", timeout=5)
     assert exc.value.retryable is True
+    assert exc.value.unavailable is False  # audit R2-02
 
 
 def test_claude_cli_passes_the_model_when_configured(monkeypatch) -> None:
@@ -374,3 +385,50 @@ def test_claude_cli_env_and_the_hook_share_one_base_set() -> None:
     from scribe import childenv, pipeline
 
     assert pipeline.HOOK_BASE_ENV is childenv.BASE_ENV
+
+
+# --- audit F-01: only an endpoint that did not answer is an outage -------------------------
+
+
+def _raising(monkeypatch, exc: BaseException) -> ProviderError:
+    import httpx
+
+    def boom(*a, **k):
+        raise exc
+
+    monkeypatch.setenv("SCRIBE_TEST_KEY", "k")
+    monkeypatch.setattr(httpx, "post", boom)
+    with pytest.raises(ProviderError) as raised:
+        OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
+    return raised.value
+
+
+@pytest.mark.parametrize(
+    "name", ["ConnectError", "ConnectTimeout", "PoolTimeout", "RemoteProtocolError"]
+)
+def test_an_endpoint_that_did_not_answer_is_an_outage(monkeypatch, name) -> None:
+    import httpx
+
+    err = _raising(monkeypatch, getattr(httpx, name)("x"))
+    assert (err.retryable, err.unavailable) == (True, True)
+
+
+@pytest.mark.parametrize("name", ["ReadTimeout", "WriteTimeout", "ReadError", "WriteError"])
+def test_a_slow_or_dropped_answer_is_retryable_but_not_an_outage(monkeypatch, name) -> None:
+    """A session big enough that the model always needs longer than `timeout` would be
+    deferred forever if a read timeout counted as an outage."""
+    import httpx
+
+    err = _raising(monkeypatch, getattr(httpx, name)("x"))
+    assert (err.retryable, err.unavailable) == (True, False)
+
+
+def test_a_request_that_cannot_be_encoded_is_not_retried(monkeypatch) -> None:
+    """Raised before the request leaves, and determined by the input: the lone-surrogate
+    reproduction in the audit. Retrying it buys the same error, and deferring it starved the
+    queue."""
+    err = _raising(
+        monkeypatch, UnicodeEncodeError("utf-8", "\ud83d", 0, 1, "surrogates not allowed")
+    )
+    assert (err.retryable, err.unavailable) == (False, False)
+    assert "could not be sent" in str(err)

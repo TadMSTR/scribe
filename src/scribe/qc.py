@@ -194,10 +194,11 @@ _BINARIES = frozenset(
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{2,}|\d{2,}")
 #: `417` written as an internal id rather than as a `#` identifier. See `_ticket_detail`.
 #:
-#: **This selects a MESSAGE, never a verdict.** Every branch of `_ticket_detail` returns a
-#: finding; the only question is whether it names the conflation or says "not in the event log".
-#: Widening it therefore cannot change the failure rate, and the rate was measured unchanged
-#: either side of this edit.
+#: **This selects a MESSAGE and a REWRITE, never a verdict.** Every branch of `_ticket_detail`
+#: returns a finding; the only question is whether it names the conflation or says "not in the
+#: event log". Widening it therefore cannot change the failure rate, and the rate was measured
+#: unchanged either side of this edit. Since 0.13.0 it also selects which rejected `#N` are
+#: rewritten to `id N` (`rewrite_id_conflations`), so it now decides what reaches disk.
 #:
 #: It was too narrow to earn its keep. `\bid` requires a word boundary before `id`, and the
 #: form the corpus actually holds is `task_id=541` -- where `id` is preceded by an underscore,
@@ -220,9 +221,21 @@ _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{2,}|\d{2,}")
 #:
 #: Note where this was found: the same module vikunja#889 had just capped a scan in. A pattern
 #: is as able to be quadratic as a loop, and only the loop had been looked at.
+#:
+#: **And a JSON object inside a STRING is escaped.** `grounding_text()` serializes the log, so a
+#: tool result that was itself JSON reaches the corpus as `{\"id\": 1079, ...}`. The first
+#: alternative required a bare `"` after `id` and never matched it. Measured 2026-10-21: all 7
+#: findings in the `coincidental-number` bucket were this shape, true conflations misfiled.
+#: Since 0.13.0 this also decides what `rewrite_id_conflations` corrects, so a miss here is a
+#: wrong ref left on disk, not just a vaguer message. `\\?` is a single optional character, so
+#: the alternative stays free of unbounded quantifiers.
 _ID_CONTEXT = (
-    r'(?:"\w{0,32}id"\s*:\s*"?'  # {"id": 417}, {"task_id": "417"}
-    r"|\bid\s*[:=]?\s*"  # id 417, id: 417, id=417
+    r'(?:\\?"\w{0,32}id\\?"\s*:\s*\\?"?'  # {"id": 417}, {"task_id": "417"}, {\"id\": 417}
+    # `(?:\s*[:=])?\s*`, never `\s*[:=]?\s*`: with the separator optional, two adjacent `\s*`
+    # can split one whitespace run n ways, so `id` + n spaces cost O(n^2) per search -- 1.8 s at
+    # 32k spaces, and a user message keeps such a run intact (scribe-qc-integrity-2026-10
+    # audit F-02). Grouping the separator with its leading space leaves one way to match.
+    r"|\bid(?:\s*[:=])?\s*"  # id 417, id: 417, id=417
     r'|_id\s*[:=]\s*"?'  # task_id=417  <- the commonest miss
     r'|"target"\s*:\s*"'  # {"target": "417"} in an MCP event's args digest
     r"|/)"  # .../tasks/417
@@ -287,6 +300,10 @@ class Finding:
     kind: str = ""
     #: The claim itself, exactly as the gate tested it -- already normalized and lowercased.
     claim: str = ""
+    #: For a `ticket` finding: the corpus holds the number only as an internal id. Decided
+    #: once, when the gate rejects the claim, so `rewrite_id_conflations` reads the verdict
+    #: instead of searching the corpus again (audit F-02).
+    id_conflation: bool = False
 
 
 @dataclass
@@ -304,8 +321,18 @@ class Report:
     def ok(self) -> bool:
         return not self.findings
 
-    def add(self, check: str, detail: str, *, kind: str = "", claim: str = "") -> None:
-        self.findings.append(Finding(check, detail, kind=kind, claim=claim))
+    def add(
+        self,
+        check: str,
+        detail: str,
+        *,
+        kind: str = "",
+        claim: str = "",
+        id_conflation: bool = False,
+    ) -> None:
+        self.findings.append(
+            Finding(check, detail, kind=kind, claim=claim, id_conflation=id_conflation)
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -751,10 +778,35 @@ def span_grounded(claim: str, kind: str, allowed: dict[str, set[str]], corpus: s
 
     What these routes actually needed was `_CMD_RE`: its delimiter mis-pairing was manufacturing
     22 of their 65 findings out of prose no model ever wrote.
+
+    **One narrowing, for a backticked PATH (#908 (id 991) option 2).** `_TOKEN_RE` drops `.`,
+    `~` and `/`, so `~/claude/comms/...` tokenizes exactly like `~/.claude/comms/...`. A
+    one-character difference that names a different directory was grounded by co-occurrence.
+    So a path-shaped span may not be grounded by co-occurrence unless its root (`_path_root`) is
+    in the log as written. Measured 2026-10-21 over 980 blocks: of 102 path-shaped spans grounded
+    only by co-occurrence, this fails 2, `~/claude/...` and `~/memory/...`. Both are wrong paths,
+    checked against the filesystem, and no true claim is lost. Rerouting these spans to
+    `path_grounded` instead, #908's option 1, is still net positive (8 findings removed, 11
+    added), so it is not done.
     """
     if kind == CLAIM_COMMAND and _in_category(claim, allowed["commands"]):
         return True
-    return claim in corpus or _tokens_co_occur(claim, corpus)
+    if claim in corpus:
+        return True
+    if _PATH_RE.fullmatch(claim) and _path_root(claim) not in corpus:
+        return False
+    return _tokens_co_occur(claim, corpus)
+
+
+def _path_root(claim: str) -> str:
+    """A path claim's first `MIN_PREFIX_SEGMENTS` segments, with its leading `/` if absolute.
+
+    `~/.claude` for `~/.claude/comms/x.md`, `/home/user` for `/home/user/repos/x`. It is the part
+    of a path that says WHICH tree it is in, and the part co-occurrence cannot check. The same
+    floor as composition's prefix, for the same reason: one segment (`/home`, `~`) says nothing.
+    """
+    lead = "/" if claim.startswith("/") else ""
+    return lead + "/".join(path_segments(claim)[:MIN_PREFIX_SEGMENTS])
 
 
 def _ticket_in_corpus(claim: str, corpus: str) -> bool:
@@ -767,7 +819,24 @@ def _ticket_in_corpus(claim: str, corpus: str) -> bool:
     return re.search(re.escape(claim) + r"\b", corpus) is not None
 
 
-def _ticket_detail(claim: str, corpus: str) -> str:
+def is_id_conflation(claim: str, corpus: str) -> bool:
+    """Whether the corpus holds `#N`'s bare number only in an id-shaped context.
+
+    The one statement of the rule. `_ticket_detail` uses it to pick a message,
+    `qc_survey.classify_ticket_claim` to pick a bucket, and `rewrite_id_conflations` to decide
+    what to rewrite -- three callers that used to be two copies of the same pattern. It lives
+    here rather than in the survey because `qc_survey` imports `qc`, and the gate must not
+    import its own instrument.
+
+    Only meaningful for a claim the gate already REJECTED: a `#N` that grounds as written is
+    not a conflation however its number also appears. The trailing `\b` is the same boundary
+    `_ticket_in_corpus` keeps, so `id 655` never makes `#65` a conflation.
+    """
+    number = claim.lstrip("#")
+    return re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus) is not None
+
+
+def _ticket_detail(claim: str, corpus: str, *, conflated: bool | None = None) -> str:
     """The message for an ungrounded `#N`, naming the id-vs-identifier conflation by name.
 
     This is the finding the whole gate earns its keep on. On the live run a digest wrote
@@ -778,7 +847,7 @@ def _ticket_detail(claim: str, corpus: str) -> str:
     context we say so.
     """
     number = claim.lstrip("#")
-    if re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus):
+    if is_id_conflation(claim, corpus) if conflated is None else conflated:
         return (
             f"ticket {claim!r} is not in the event log, which contains {number!r} only as an "
             f"internal id -- a Vikunja id is not its #identifier, so this points at a "
@@ -824,8 +893,13 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     # `#417` (written only as `id 417`, and false).
     for claim in sorted(claimed["tickets"]):
         if claim not in allowed["tickets"] and not _ticket_in_corpus(claim, corpus):
+            conflated = is_id_conflation(claim, corpus)
             report.add(
-                "groundedness", _ticket_detail(claim, corpus), kind=CLAIM_TICKET, claim=claim
+                "groundedness",
+                _ticket_detail(claim, corpus, conflated=conflated),
+                kind=CLAIM_TICKET,
+                claim=claim,
+                id_conflation=conflated,
             )
 
     # No category set exists for `code` or `identifier`, and none should be invented: there is
@@ -841,6 +915,71 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
                     kind=kind,
                     claim=claim,
                 )
+
+
+#: Scribe's own markers, which `rewrite_id_conflations` must leave byte-for-byte alone. The same
+#: three `strip_scribe_markers` removes before grading, for the same reason: they are written by
+#: scribe, not asserted by the model, so nothing in them is a claim to correct.
+_MARKER_RES = (ANCHOR_RE, TERMINATOR_RE, TRUNCATION_RE)
+#: `#N (id N)` -- a conflated ref the model already annotated with the same number. Rewriting
+#: only the `#N` would leave `id N (id N)`, so the pair collapses to one `id N`. Matched
+#: case-insensitively, so `(ID N)` collapses too (audit F-05).
+_SELF_ANNOTATED = r"[ \t]*\(id[ \t]+{n}\)"
+
+
+def rewrite_id_conflations(text: str, report: Report) -> tuple[str, int]:
+    """Rewrite every `#N` the gate rejected as an id conflation to `id N`. Returns `(text, n)`.
+
+    **Call this AFTER grading, never before.** `report` is the verdict on the model's own output,
+    and the run record's `id-conflation` count is the measure of whether the prompt is teaching
+    the model the `#N (id M)` convention. Rewriting first would grade scribe's correction
+    instead, the bucket would read zero whatever the model did, and the prompt change could
+    never be evaluated.
+
+    Why rewrite at all, rather than only report: the gate already knows, from the event log
+    alone, that the number is a tracker's internal id and not its `#identifier`. A digest that
+    keeps `#1258` sends every agent's next session start a reference that names nothing, or
+    names an unrelated ticket once the tracker's per-project counter reaches it. `id 1258` is
+    what the log actually supports.
+
+    What is NOT touched, deliberately:
+
+      * a `#N` that grounds as written -- it is not in `report` at all, including the
+        `#N (id M)` form when the log holds `#N`;
+      * a rejected `#N` whose number appears only as a quantity (`coincidental-number`) or not
+        at all (`absent`). Neither is an id, so `id N` would be a fabrication of its own;
+      * anything inside scribe's anchor, terminator or truncation markers.
+
+    The match is `_TICKET_RE`, the pattern the gate extracted the claim with, so `#65` never
+    rewrites inside `#655` and a ref the gate never saw is never rewritten.
+
+    It reads `Finding.id_conflation` and never searches the corpus itself: the verdict was
+    reached once, while grading, and a second search doubled the gate's worst-case regex cost
+    on a hostile session (audit F-02).
+    """
+    conflated = {f.claim for f in report.findings if f.kind == CLAIM_TICKET and f.id_conflation}
+    if not conflated:
+        return text, 0
+    protected = [m.span() for rx in _MARKER_RES for m in rx.finditer(text)]
+    out: list[str] = []
+    pos = 0
+    count = 0
+    for m in _TICKET_RE.finditer(text):
+        if f"#{m.group(1)}" not in conflated:
+            continue
+        if any(lo <= m.start() < hi for lo, hi in protected):
+            continue
+        number = m.group(1)
+        end = m.end()
+        dup = re.compile(_SELF_ANNOTATED.format(n=re.escape(number)), re.I).match(text, end)
+        if dup:
+            end = dup.end()
+        out.append(text[pos : m.start()])
+        out.append(f"id {number}")
+        pos = end
+        count += 1
+    out.append(text[pos:])
+    return "".join(out), count
 
 
 def check_event_coverage(

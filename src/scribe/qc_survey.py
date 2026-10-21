@@ -34,7 +34,6 @@ from .eventlog import EventLogError, eventlog_path, load_eventlog
 from .extract.models import EventLog
 from .qc import (
     _CMD_RE,
-    _ID_CONTEXT,
     _TOKEN_RE,
     ADJACENCY_WINDOW,
     CLAIM_CODE,
@@ -53,6 +52,7 @@ from .qc import (
     check_groundedness,
     composition_split,
     grounding_terms,
+    is_id_conflation,
     path_claims,
     path_grounded,
     path_literal,
@@ -73,6 +73,9 @@ HOME_EXPANSION = "home-expansion"
 COMPOSED = "composed"
 #: Some trailing run of segments is present, but no split of the claim has *both* halves
 #: present. Weaker evidence than `COMPOSED`, and the bucket where a floor has to do real work.
+#: **Mixed, measured.** 35 hand-graded on 2026-10-21: 26 true claims the gate cannot ground
+#: (mostly the directory and the filename both logged, but beyond `ADJACENCY_WINDOW`), and 9
+#: true positives (mostly a real filename under the wrong directory). Neither half is noise.
 SUFFIX = "suffix"
 #: Not even the basename appears anywhere in the corpus. **The control set.** Whatever
 #: tolerance lands, every member of this bucket must still fail — a gate that passes
@@ -283,7 +286,7 @@ def _desynced_spans(body: str) -> set[str]:
 def classify_ticket_claim(claim: str, corpus: str) -> str:
     """Why a `#N` was rejected. See `ID_CONFLATION` — most of this bucket is the gate working."""
     number = claim.lstrip("#")
-    if re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus):
+    if is_id_conflation(claim, corpus):
         return ID_CONFLATION
     if re.search(r"(?<!\d)" + re.escape(number) + r"(?!\d)", corpus):
         return COINCIDENTAL_NUMBER

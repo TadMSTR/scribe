@@ -1,9 +1,9 @@
 """Turn one Claude Code JSONL transcript into a structured event log.
 
 No LLM, no network, no writes to the transcript. `~/.claude/projects/*/*.jsonl` is the only
-durable record of what actually happened and Claude Code's unset `cleanupPeriodDays` already
-caps it at 30 days (vikunja#778), so this module opens transcripts read-only and never
-writes back to that tree under any code path.
+durable record of what actually happened and Claude Code's `cleanupPeriodDays` already
+caps it (default 30 days, configurable; vikunja#778), so this module opens transcripts
+read-only and never writes back to that tree under any code path.
 
 What the pipeline this replaces did, and why it is wrong: `parse-transcript.sh :: format_turn()`
 keeps `[User]:` text and assistant `text` blocks and skips `tool_use`, `tool_result` and
@@ -385,6 +385,9 @@ def extract(
             if not isinstance(obj, dict):
                 st.records_unparsable += 1
                 continue
+            # Only an escape can produce one, so the walk runs only when the line has one.
+            if "\\ud" in raw or "\\uD" in raw:
+                obj = _strip_surrogates(obj)
             st.records += 1
 
             if not log.session_id and obj.get("sessionId"):
@@ -591,6 +594,29 @@ def _build_rollups(log: EventLog) -> None:
         for url in _URL_RE.findall(blob):
             _push(r.urls, url.rstrip(".,);"))
         log.rollup.merge(r)
+
+
+#: A lone UTF-16 surrogate. Valid JSON can carry one (`"\\ud83d"` with no low half, e.g. a string
+#: truncated mid-pair), and `json.loads` hands it back as a `str` that no UTF-8 encoder accepts.
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _strip_surrogates(node: object) -> object:
+    """`node` with every lone surrogate replaced by U+FFFD, keys included.
+
+    Done once, where a record is decoded, so nothing downstream ever holds one. Before this,
+    one such character crashed `write_eventlog` with an uncaught `UnicodeEncodeError` on every
+    sweep (exit 1, every later session starved), and once that was caught, httpx raised the
+    same error building the provider request (scribe-qc-integrity-2026-10 audit F-01/F-03).
+    U+FFFD rather than dropping it: a replacement character says something was there.
+    """
+    if isinstance(node, str):
+        return _LONE_SURROGATE_RE.sub("\ufffd", node)
+    if isinstance(node, dict):
+        return {_strip_surrogates(k): _strip_surrogates(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_strip_surrogates(v) for v in node]
+    return node
 
 
 def _finalise(log: EventLog, red: Redactor, max_session_chars: int) -> None:

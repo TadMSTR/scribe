@@ -21,6 +21,17 @@ from .pipeline import run_once, summarize_run
 from .state import Store
 from .telemetry import setup_tracing, shutdown_tracing
 
+#: The sweep found the summarization provider down (transport error, timeout, 429 or 5xx) and
+#: left the affected sessions pending (#1188 (id 1271) item 4). Nothing was lost and no retry
+#: budget was spent; the next sweep picks them up. Non-zero so a cron wrapper reports it:
+#: forge's `hc-run --ok 0,75` turns any other code into a Healthchecks failure, which is the
+#: signal wanted, and needs no crontab change.
+#:
+#: 69 is sysexits' `EX_UNAVAILABLE`, "a service is unavailable". It is clear of the codes
+#: scribe and its wrapper already use: 0 ok, 1 an uncaught crash, 2 usage or config, 75 a
+#: sweep skipped by `flock -E 75` because the previous one is still running.
+EXIT_PROVIDER_UNAVAILABLE = 69
+
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
@@ -92,8 +103,20 @@ def main(argv: list[str] | None = None) -> int:
                 f"{'y' if totals['placeholders'] == 1 else 'ies'} not yet written"
                 f" (retryable: `scribe recover`)"
             )
+        # Loud: the cron's Healthchecks ping goes red on this sweep's exit code, and this is the
+        # line that says why. Nothing is lost -- every session named here is still pending.
+        if totals["deferred"]:
+            print(
+                f"  !! provider unavailable: {totals['deferred']} deferred, "
+                f"{totals['not_attempted']} not attempted -- left pending, no retry budget "
+                f"spent; the next sweep retries them"
+            )
         if totals["suppressed"]:
             print(f"  {totals['suppressed']} suppressed (contamination fallback)")
+        # Quiet: a correction, not a loss. Printed because the cron reads this branch and the
+        # count is the evidence the rewrite runs at all (invariant 13).
+        if totals["ticket_refs_rewritten"]:
+            print(f"  {totals['ticket_refs_rewritten']} ticket ref(s) rewritten from #N to id N")
         # Quiet, and deliberately so: a truncated digest is written, so this is degradation
         # and not loss, and it must not read like the `!!` lines below it. But it has to be
         # HERE. `summarize_run` has aggregated `truncated`/`truncated_items` correctly since
@@ -154,7 +177,8 @@ def main(argv: list[str] | None = None) -> int:
             for r in results:
                 for err in r.errors:
                     print(f"    {Path(r.transcript_path).name}: {err}")
-    return 0
+    # The same in `--json` and the human branch: the exit code is the contract, not the text.
+    return EXIT_PROVIDER_UNAVAILABLE if totals["deferred"] else 0
 
 
 if __name__ == "__main__":

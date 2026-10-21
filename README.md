@@ -97,7 +97,7 @@ The extractor has **no runtime dependencies** and makes no network calls. That i
 
 ## Design commitments
 
-**Read-only on transcripts.** Scribe never writes to `~/.claude/projects/*/*.jsonl`. Those are the only durable record of what happened, and Claude Code already expires them after 30 days. The test suite asserts this on both content and mtime rather than trusting code review.
+**Read-only on transcripts.** Scribe never writes to `~/.claude/projects/*/*.jsonl`. Those are the only durable record of what happened, and Claude Code already deletes them `cleanupPeriodDays` after their last write (default 30, configurable). The test suite asserts this on both content and mtime rather than trusting code review.
 
 **Redaction is counted, not just applied.** `secrets_redacted` is a number. "No secret appears in the output" is also true of an extractor that produced nothing, so absence alone proves nothing — the count is what shows the filter ran.
 
@@ -192,6 +192,53 @@ hook fires per *turn* and there is no session-end signal. That inference can be 
 direction — Claude Code appends to an existing transcript when a session resumes — so state
 records how far the file was *read*, and growth past that offset makes a session live again
 regardless of its status.
+
+### When the provider is down
+
+A provider outage delays digests; it does not lose them and it does not spend their retry
+budget. Each call is still tried 3 times with backoff. If the session's last attempt failed
+because the provider did not answer at all, scribe writes no block, touches no state, and leaves
+the session pending. "Did not answer" is narrow on purpose: a connection refused or timed out
+(`ConnectError`, `ConnectTimeout`, `PoolTimeout`), a connection closed mid-protocol
+(`RemoteProtocolError`), a 429 or a 5xx. Its read offset has not moved, so the next sweep
+offers it again. A timeout is not in that list, for httpx or for `claude-cli`: a slow answer can
+be the input's fault, so it spends retry budget like any other failure. An endpoint that
+accepts the connection and then never answers is therefore not deferred.
+
+**One deferral is a suspicion; two in a row is an outage.** The next session is the probe. If
+it also finds the provider down, the sweep stops calling the provider, and the remaining
+sessions are counted as *not attempted* and left pending. If the provider answers any session
+in the sweep, before or after the deferred one, that session's failure was its own: it is
+re-run onto the provisional path, and its retry budget bounds it. That holds when it is the last
+or only session too, as long as something else in the sweep got an answer.
+
+One case is not bounded, and it is accepted: two deferrals in a row with nothing answered
+before them read as an outage, so the sessions behind them wait. It takes two sessions whose own
+requests each make the endpoint refuse, drop or 5xx. Telling that apart from an outage would
+need a per-session deferral count in the state DB.
+
+```
+live: 8 session(s), ...
+  !! provider unavailable: 2 deferred, 6 not attempted -- left pending, no retry budget spent; the next sweep retries them
+```
+
+Everything else spends one of `state.MAX_PROVISIONAL_ATTEMPTS`, as before, because the
+failure can be a property of the input. That covers an unparseable response envelope, a 4xx
+other than 429, and a read or write timeout or dropped stream (the provider was reached and was
+slow or cut off). A request that could not even be built or encoded fails at once and is not
+retried.
+
+There is no fallback provider. A late digest is acceptable; a lost or silent one is not. That
+is why the exit code changes:
+
+| `scribe run` exit code | meaning |
+|---:|---|
+| `0` | the sweep ran; any failures are in the output and in the state DB |
+| `2` | config error |
+| `69` | the provider was unavailable. Sessions were left pending and nothing was lost (`EX_UNAVAILABLE`, `run_cli.EXIT_PROVIDER_UNAVAILABLE`) |
+
+`69` is meant to make a cron wrapper report the sweep as failed. A wrapper that treats only
+`0` (and its own lock-skip code) as success needs no change to raise it.
 
 ### Three tiers, and how to get between them
 
@@ -359,7 +406,7 @@ are marked as such in the block's own anchor:
 | body | anchor | meaning |
 |---|---|---|
 | a digest | no `provisional:` attribute | final; never overwritten |
-| `render_failure` placeholder | `provisional:placeholder` | the model call or the schema failed |
+| `render_failure` placeholder | `provisional:placeholder` | the model call or the schema failed (an outage writes nothing instead; see [When the provider is down](#when-the-provider-is-down)) |
 | suppression note | `provisional:suppressed` | the contamination guard fired |
 
 A provisional block is **replaced in place** by the first real digest that arrives for the
@@ -449,7 +496,7 @@ python -m scribe run --live           # then re-summarize
 It joins on `transcript_path`. A session whose transcript has been deleted is reopened from
 its **event log** instead: `load_eventlog` reads the persisted log back into the same
 `EventLog` the extractor would have produced, so a digest survives its source (vikunja#873).
-Transcripts age out at 30 days while `eventlogs/` has no cleanup policy, so the log is the
+Transcripts age out after `cleanupPeriodDays` (default 30) while `eventlogs/` has no cleanup policy, so the log is the
 durable copy. Only a session `recover` reopens is ever replayed — an orphaned log whose digest
 is already real is left alone. A session with neither input is still reported rather than
 reopened; there is genuinely nothing to summarize.

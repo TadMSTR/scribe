@@ -11,10 +11,11 @@ trend. Three properties matter more than the field list:
   * **Attributed.** `scribe_version`, `prompt_sha256` and `model_resolved` are what let a
     trend say *what* moved quality rather than only that it moved. A backfilled line cannot
     recover them and carries `null`, never a guess.
-  * **Classified by kind and bucket at write time.** Most findings on the live corpus are gate
-    artefacts (the `suffix` path bucket, ticket `id-conflation`), and a pooled count moves
-    whenever the gate is tuned. `absent` is the hallucination signal; it is recorded as its
-    own number so a gate fix cannot read as a model improvement.
+  * **Classified by kind and bucket at write time.** The buckets mean different things -- ticket
+    `id-conflation` is a true finding, the `suffix` path bucket is a measured mix of true claims
+    the gate cannot ground and wrong-directory true positives (see `qc_report`'s docstring) --
+    and a pooled count moves whenever the gate is tuned. `absent` is the hallucination signal;
+    it is recorded as its own number so a gate fix cannot read as a model improvement.
   * **Never raises.** Same contract as `telemetry.record_spend`: a failed write is counted
     (`run_record_errors`) and the sweep carries on. It is not an error and does not change the
     exit code -- invariant 13, own field and own total.
@@ -243,6 +244,9 @@ def iter_backfill(
             "post_render_redactions": None,
             "errors": None,
             **qc_fields(report, block.body, log, home=home),
+            # Unknown: a block on disk says nothing about what was rewritten before it got
+            # there. `null`, like every other field a backfill cannot observe.
+            "ticket_refs_rewritten": None,
             "lag_s": None,
         }
 

@@ -419,3 +419,19 @@ def test_a_json_syntax_error_may_still_be_reported(tmp_path) -> None:
         load_eventlog(bad)
     assert _CANARY not in str(caught.value)
     assert "line 1 column 1" in str(caught.value)
+
+
+def test_an_unencodable_log_raises_and_leaves_no_temp_file(tmp_path) -> None:
+    """Audit F-03. A lone surrogate made `write` raise `UnicodeEncodeError`, which the `OSError`
+    guard missed: the sweep died, and the 0600 partial temp file stayed behind, once per sweep.
+    Extraction now replaces surrogates before they get here; this pins the guard behind it."""
+    from scribe.extract.models import EventLog, Turn
+
+    log = EventLog(
+        session_id="s",
+        transcript_path="/x/s.jsonl",
+        turns=[Turn(turn_uuid="u", index=0, user_text="bad \ud83d")],
+    )
+    with pytest.raises(ValueError):
+        write_eventlog(tmp_path, log)
+    assert not list(tmp_path.rglob("*.tmp"))

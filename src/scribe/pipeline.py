@@ -36,7 +36,7 @@ from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
 from .manifest import append_turn
-from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
+from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest, rewrite_id_conflations
 from .state import STATUS_FAILED, SessionRow, Store
 from .summarize.prompt import prompt_sha256
 from .summarize.providers import Provider, build
@@ -150,6 +150,19 @@ class SessionResult:
     #: failed observation is counted in `run_record_errors`, per invariant 13, and must not
     #: turn a good sweep into a failed one.
     run_record_error: str = ""
+    #: `#N` refs rewritten to `id N` after grading -- see `qc.rewrite_id_conflations`. Counted
+    #: so a falling `id-conflation` rate after a prompt change can be told apart from the
+    #: rewrite silently not running: the first moves this toward 0 too, the second leaves it
+    #: at 0 while the bucket stays full.
+    ticket_refs_rewritten: int = 0
+    #: The provider was down (`Outcome.provider_unavailable`), so the session was left exactly
+    #: as it was: no block written, no state touched, no retry budget spent. The next sweep
+    #: re-offers it because its offset never moved (#1188 (id 1271) item 4). An outage is not
+    #: a property of the session, and `MAX_PROVISIONAL_ATTEMPTS` exists for failures that are.
+    deferred: bool = False
+    #: Never handed to the provider: an earlier session in this sweep was deferred, and the
+    #: sweep stopped calling a provider it had just found down. Untouched, like `deferred`.
+    not_attempted: bool = False
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -186,6 +199,9 @@ class SessionResult:
             "hook": self.hook,
             "hook_error": self.hook_error,
             "run_record_error": self.run_record_error,
+            "ticket_refs_rewritten": self.ticket_refs_rewritten,
+            "deferred": self.deferred,
+            "not_attempted": self.not_attempted,
             "errors": self.errors,
         }
 
@@ -426,8 +442,12 @@ def process_session(
     now: datetime | None = None,
     coverage_floor: float = DEFAULT_COVERAGE_FLOOR,
     spend_log: str | None = None,
+    allow_defer: bool = True,
 ) -> SessionResult:
     """Run one session all the way through. Never raises for an expected failure.
+
+    `allow_defer=False` takes the provisional path even when the provider looked down: the
+    re-run `run_once` makes for a deferral the next session showed was not an outage.
 
     An unexpected exception is caught and recorded against the session rather than allowed
     to abort the sweep: one malformed transcript must not stop the other fourteen.
@@ -529,7 +549,7 @@ def process_session(
     # worth more than no digest. The error is recorded rather than swallowed.
     try:
         result.eventlog_path = str(write_eventlog(cfg.eventlog_dir, log))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # ValueError: an unencodable string (audit F-03)
         result.errors.append(f"eventlog: {exc}")
 
     with span(
@@ -569,6 +589,20 @@ def process_session(
                 provider=outcome.provider,
                 log_path=spend_log,
             )
+
+        if outcome.provider_unavailable and allow_defer:
+            # Return BEFORE the block and before any store write. No placeholder: it would
+            # occupy the turn on disk for a session that is merely late. No `mark_provisional`:
+            # that spends one of `MAX_PROVISIONAL_ATTEMPTS` and advances the offset, so a few
+            # hours of outage would retire every pending session until a manual `recover`.
+            # Leaving the row alone is what makes the next sweep re-offer it for free.
+            set_span_attributes(sp, deferred=True)
+            result.deferred = True
+            result.placeholder = False
+            result.errors.append(
+                f"provider unavailable, session left pending for the next sweep: {outcome.reason}"
+            )
+            return result
 
         # Defence in depth on the way to disk. The audit observed that nothing re-redacts the
         # summarizer's RENDERED output, so the whole redaction model rested on extraction-time
@@ -622,6 +656,13 @@ def process_session(
         except Exception as exc:  # the record observes the sweep; it must never abort it
             qc = None
             result.run_record_error = f"classify: {type(exc).__name__}: {exc}"
+
+        # Strictly AFTER both gradings above, and that order is the point: `report` and `qc`
+        # measure the model's own output, and the `id-conflation` count is how the prompt's
+        # `#N (id M)` rule gets evaluated. Rewriting first would grade scribe's correction and
+        # read zero whatever the model did. Only what reaches disk is corrected.
+        if cfg.qc_rewrite_id_conflations:
+            markdown, result.ticket_refs_rewritten = rewrite_id_conflations(markdown, report)
         # On the summarize span rather than a new one: the dashboards query these names, and
         # a QC time series belongs on the span that produced the digest it grades.
         set_span_attributes(
@@ -631,6 +672,7 @@ def process_session(
                 "scribe.qc.coverage": round(report.coverage, 4),
                 "scribe.qc.findings": len(report.findings),
                 "scribe.qc.findings.absent": runrecord.absent_count(qc) if qc else None,
+                "scribe.qc.ticket_refs_rewritten": result.ticket_refs_rewritten,
             },
         )
 
@@ -760,6 +802,7 @@ def _run_record(
         "post_render_redactions": result.post_render_redactions,
         "errors": len(result.errors),
         **qc,
+        "ticket_refs_rewritten": result.ticket_refs_rewritten,
         "lag_s": lag,
     }
 
@@ -791,10 +834,87 @@ def run_once(
             provider_factory
             or (lambda: build(cfg.provider_for("session"), cfg.stages["session"].model))
         )()
-    return [
-        process_session(row, cfg, store, provider=provider, dry_run=dry_run, spend_log=spend_log)
-        for row in ready
-    ]
+
+    def run(row: SessionRow, *, allow_defer: bool = True) -> SessionResult:
+        return process_session(
+            row,
+            cfg,
+            store,
+            provider=provider,
+            dry_run=dry_run,
+            spend_log=spend_log,
+            allow_defer=allow_defer,
+        )
+
+    # The circuit breaker. Once the provider is down, every later session would make its own
+    # 3 calls to reach the same verdict, so they are left untouched and re-offered next sweep.
+    # It covers an endpoint that refuses or drops the connection, or answers 429/5xx. It does
+    # NOT cover one that accepts the connection and never answers: a read timeout is retryable
+    # but not `unavailable` (see `providers.py`), so each such session spends its 3 x timeout
+    # and then provisional budget (audit R2-03).
+    #
+    # **It trips on TWO deferrals in a row, not one** (audit F-01). One session deferring
+    # cannot tell an outage from a fault in that session's own request, and on one deferral a
+    # single poison session would stop every session behind it, sweep after sweep, while the
+    # run blamed the provider. So the next session is the probe: if it also finds the provider
+    # down, the outage is confirmed and both stay pending. If the provider answers it, the
+    # first deferral was not an outage, and that session is re-run with `allow_defer=False` --
+    # onto the provisional path, where `MAX_PROVISIONAL_ATTEMPTS` bounds it.
+    #
+    # **Evidence counts from either side of the suspect** (audit R2-01). A probe that only
+    # looked forward left a suspect with nothing after it -- the last or only ready session,
+    # and every orphan, which `orphaned()` appends last -- deferred on every sweep forever. So
+    # `provider_seen_up` remembers whether the provider answered ANY session this sweep, and a
+    # suspect still pending when the loop ends is re-run if it did. The cost, accepted: an
+    # outage that starts just before the last session spends one provisional attempt on it.
+    #
+    # SECURITY[accepted]: two adjacent suspects trip the breaker.
+    # Audit: 2026-10-21/scribe-qc-integrity-2026-10 R2-01.
+    # **Residual, accepted (Ted, 2026-10-21):** two suspects in a row with no answered session
+    # before them still trip the breaker. Telling that from an outage would need a per-session
+    # deferral count in the state DB. It takes two sessions whose own requests each make the
+    # endpoint refuse, drop or 5xx, which `unavailable`'s narrow definition makes speculative.
+    results: list[SessionResult] = []
+    tripped = False
+    provider_seen_up = False
+    suspect: tuple[int, SessionRow] | None = None
+    for row in ready:
+        if tripped:
+            results.append(
+                SessionResult(
+                    transcript_path=row.transcript_path,
+                    agent=row.agent,
+                    not_attempted=True,
+                    full_read=row.last_offset == 0,
+                )
+            )
+            continue
+        result = run(row)
+        results.append(result)
+        if result.deferred:
+            if suspect is None:
+                suspect = (len(results) - 1, row)
+            else:
+                tripped = True
+        elif _provider_answered(result):
+            provider_seen_up = True
+            if suspect is not None:
+                index, suspect_row = suspect
+                results[index] = run(suspect_row, allow_defer=False)
+                suspect = None
+    if suspect is not None and provider_seen_up and not tripped:
+        index, suspect_row = suspect
+        results[index] = run(suspect_row, allow_defer=False)
+    return results
+
+
+def _provider_answered(result: SessionResult) -> bool:
+    """Whether this session reached the provider and got an answer, good or bad.
+
+    A session with nothing to summarize, or one whose extraction failed, never called the
+    provider, so it says nothing about whether the provider is up and cannot clear a suspect.
+    """
+    return result.summarized or result.suppressed or result.placeholder
 
 
 def _merge_truncated(results: list[SessionResult]) -> dict[str, int]:
@@ -848,6 +968,14 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "hook_ok": sum(1 for r in results if r.hook == "ok"),
         "hook_failed": sum(1 for r in results if r.hook == "failed"),
         "run_record_errors": sum(1 for r in results if r.run_record_error),
+        #: `#N` refs corrected to `id N` across the sweep. Not an outcome and not loss: every
+        #: digest it counts was written, with the wrong ref fixed.
+        "ticket_refs_rewritten": sum(r.ticket_refs_rewritten for r in results),
+        #: The provider was down: the session that found it so, and the ones the sweep then
+        #: did not hand to it. Both left pending with no budget spent. Non-zero drives
+        #: `run_cli.EXIT_PROVIDER_UNAVAILABLE`.
+        "deferred": sum(1 for r in results if r.deferred),
+        "not_attempted": sum(1 for r in results if r.not_attempted),
         "input_tokens": sum(r.input_tokens for r in results),
         "output_tokens": sum(r.output_tokens for r in results),
         "degraded": sum(1 for r in results if r.degradation_level),

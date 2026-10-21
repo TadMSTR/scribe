@@ -1,6 +1,6 @@
 [project]
 name = "scribe"
-version = "0.12.1"
+version = "0.13.0"
 description = "Deterministic Claude Code transcript extractor and session summarizer"
 readme = "README.md"
 # SPDX string, not the `{ text = ... }` table: setuptools deprecated the table with a removal
@@ -26,6 +26,11 @@ requires-python = ">=3.11"
 # that exists today, and a 0.29 is a deliberate reading task rather than a silent bump.
 dependencies = [
     "httpx>=0.27,<0.29",
+    # Not used directly: httpx's CA bundle, floored for PYSEC-2026-4320 (2026-10-21). A floor
+    # here is what makes a wheel deploy upgrade it; without one, pip keeps an already-installed
+    # certifi that satisfies httpx, and the lock never reaches the venv (audit F-04, DH-05).
+    # The ceiling is a review point for a calendar-versioned bundle, not a known break.
+    "certifi>=2026.10.19,<2028",
 ]
 
 [project.optional-dependencies]

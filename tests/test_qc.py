@@ -35,8 +35,10 @@ from scribe.qc import (
     classify_span,
     composition_split,
     grounding_terms,
+    is_id_conflation,
     path_grounded,
     path_literal,
+    rewrite_id_conflations,
     span_grounded,
     strip_scribe_markers,
 )
@@ -1081,3 +1083,176 @@ def test_the_id_context_pattern_does_not_backtrack_on_a_long_word_run() -> None:
         started = time.perf_counter()
         re.search(_ID_CONTEXT + r"4242\b", filler)
         assert time.perf_counter() - started < 2.0
+
+
+# --- #1188 (id 1271) item 2a: rewrite id-conflated ticket refs at write time ----------------
+
+
+def _ticket_log(text: str) -> EventLog:
+    """A log whose only mention of each number is `text`, so the shape under test is the only
+    evidence. `task_id=541` is the commonest conflation source on the live corpus."""
+    return EventLog(
+        session_id="s",
+        transcript_path="/var/tmp/projects/one/sess.jsonl",
+        turns=[Turn(turn_uuid="u1", index=0, user_text=text)],
+    )
+
+
+def _rewrite(digest: str, log: EventLog) -> tuple[str, int]:
+    return rewrite_id_conflations(digest, check_digest(digest, log))
+
+
+def test_an_id_conflated_ref_is_rewritten_to_the_id() -> None:
+    text, n = _rewrite("- Closed #541 today\n", _ticket_log("updated task_id=541"))
+    assert text == "- Closed id 541 today\n"
+    assert n == 1
+
+
+def test_every_occurrence_is_rewritten_and_counted() -> None:
+    text, n = _rewrite("- Filed #541\n- Then #541 again\n", _ticket_log("see /tasks/541"))
+    assert "#541" not in text
+    assert text.count("id 541") == 2
+    assert n == 2
+
+
+def test_a_ref_the_model_already_annotated_collapses_to_one_id() -> None:
+    """`#541 (id 541)` rewritten naively reads `id 541 (id 541)`."""
+    text, n = _rewrite("- Filed #541 (id 541)\n", _ticket_log("task_id=541"))
+    assert text == "- Filed id 541\n"
+    assert n == 1
+
+
+def test_a_grounded_ref_is_untouched() -> None:
+    """The log holds `#541` itself, so the claim grounds and is not a finding at all -- even
+    though `541` also appears as an id."""
+    log = _ticket_log("ticket #541 (task_id=541)")
+    digest = "- Closed #541 (id 541)\n"
+    assert check_digest(digest, log).findings == []
+    assert _rewrite(digest, log) == (digest, 0)
+
+
+def test_a_shorter_number_is_not_rewritten_inside_a_longer_one() -> None:
+    """`#65` is a different ticket from `#655`, and an id of 655 is no evidence about 65."""
+    log = _ticket_log("updated task_id=655")
+    text, n = _rewrite("- Closed #655 and #65\n", log)
+    assert text == "- Closed id 655 and #65\n"
+    assert n == 1
+
+
+def test_a_coincidental_number_is_untouched() -> None:
+    """`73` is a quantity in this log, not an id. `id 73` would be a fabrication of its own."""
+    log = _ticket_log("ran 73 pipelines")
+    digest = "- See #73\n"
+    report = check_digest(digest, log)
+    assert [f.claim for f in report.findings if f.kind == "ticket"] == ["#73"]
+    assert _rewrite(digest, log) == (digest, 0)
+
+
+def test_an_absent_number_is_untouched() -> None:
+    log = _ticket_log("nothing numeric here")
+    digest = "- See #4242\n"
+    assert _rewrite(digest, log) == (digest, 0)
+
+
+def test_scribe_markers_are_never_rewritten() -> None:
+    """The anchor is written by scribe, not the model. `#541` in it is not a claim."""
+    log = _ticket_log("task_id=541")
+    head = anchor(session_id="#541", turn_uuid="u1", transcript_path="/t.jsonl")
+    digest = f"{head}\n- Closed #541\n{terminator('u1')}\n"
+    text, n = _rewrite(digest, log)
+    assert head in text
+    assert "- Closed id 541" in text
+    assert n == 1
+
+
+def test_the_rewrite_reads_the_report_and_does_not_regrade() -> None:
+    """A report with no findings rewrites nothing, whatever the text holds -- the verdict is
+    the gate's, taken once, and the rewrite never second-guesses it (audit F-02)."""
+    assert rewrite_id_conflations("- Closed #541\n", Report()) == ("- Closed #541\n", 0)
+    report = Report()
+    report.add("groundedness", "x", kind="ticket", claim="#541", id_conflation=False)
+    assert rewrite_id_conflations("- Closed #541\n", report) == ("- Closed #541\n", 0)
+    report.findings[0].id_conflation = True
+    assert rewrite_id_conflations("- Closed #541\n", report) == ("- Closed id 541\n", 1)
+
+
+def test_the_gate_records_the_conflation_verdict_on_the_finding() -> None:
+    report = check_digest("- Closed #541 and #73\n", _ticket_log("task_id=541, ran 73 jobs"))
+    verdicts = {f.claim: f.id_conflation for f in report.findings if f.kind == "ticket"}
+    assert verdicts == {"#541": True, "#73": False}
+
+
+def test_a_self_annotation_collapses_whatever_its_case() -> None:
+    """Audit F-05: `#541 (ID 541)` was left as `id 541 (ID 541)`."""
+    text, n = _rewrite("- Filed #541 (ID 541)\n", _ticket_log("task_id=541"))
+    assert (text, n) == ("- Filed id 541\n", 1)
+
+
+@pytest.mark.parametrize("pad", [" ", "\t", " \n "])
+def test_the_id_context_is_linear_in_a_whitespace_run(pad) -> None:
+    """Audit F-02. `\\bid\\s*[:=]?\\s*` split one whitespace run two ways: `id` + 32k spaces
+    took 1.8 s per search, and the rewrite repeated the search. Linear, 60k spaces is
+    milliseconds; the bound is loose so a slow runner cannot flake it."""
+    corpus = "id" + pad * 60_000
+    start = time.perf_counter()
+    assert is_id_conflation("#541", corpus) is False
+    assert time.perf_counter() - start < 0.5
+
+
+def test_the_conflation_predicate_is_the_one_the_gate_and_survey_use() -> None:
+    from scribe.qc_survey import ID_CONFLATION, classify_ticket_claim
+
+    corpus = "updated task_id=541 and ran 73 jobs"
+    assert is_id_conflation("#541", corpus) is True
+    assert is_id_conflation("#73", corpus) is False
+    assert classify_ticket_claim("#541", corpus) == ID_CONFLATION
+    assert "internal id" in _ticket_detail("#541", corpus)
+
+
+# --- #908 (id 991) option 2: co-occurrence cannot invent the root of a path ------------------
+
+
+def _dotted_log() -> EventLog:
+    return _ticket_log("wrote ~/.claude/comms/artifacts/build-plans/x/handoff.md")
+
+
+def test_a_backticked_path_missing_its_leading_dot_is_not_grounded() -> None:
+    """`~/claude/...` and `~/.claude/...` share every `_TOKEN_RE` token and name different trees."""
+    report = check_digest(
+        "- Wrote `~/claude/comms/artifacts/build-plans/x/handoff.md`\n", _dotted_log()
+    )
+    assert [f.claim for f in report.findings] == [
+        "~/claude/comms/artifacts/build-plans/x/handoff.md"
+    ]
+
+
+def test_the_same_path_with_its_dot_still_grounds() -> None:
+    report = check_digest(
+        "- Wrote `~/.claude/comms/artifacts/build-plans/x/handoff.md`\n", _dotted_log()
+    )
+    assert report.findings == []
+
+
+def test_a_path_with_a_real_root_still_grounds_by_co_occurrence() -> None:
+    """The narrowing touches the root only: a compressed path under a root the log names keeps
+    the co-occurrence route it had."""
+    log = _ticket_log("cd ~/.claude/comms && ls artifacts/build-plans/x and then handoff.md")
+    corpus = log.grounding_text().lower()
+    claim = "~/.claude/comms/artifacts/build-plans/x/handoff.md"
+    assert claim not in corpus
+    assert span_grounded(claim, CLAIM_IDENTIFIER, grounding_terms(log), corpus) is True
+
+
+def test_the_root_rule_does_not_touch_spans_that_are_not_paths() -> None:
+    log = _ticket_log("the stage runs mistral small latest")
+    corpus = log.grounding_text().lower()
+    assert span_grounded("mistral small latest", CLAIM_IDENTIFIER, grounding_terms(log), corpus)
+
+
+def test_an_id_inside_an_escaped_json_string_is_a_conflation() -> None:
+    """A tool result that was itself JSON reaches the corpus escaped: `{\\"id\\": 1079}`. All 7
+    `coincidental-number` findings on the live corpus were this shape (2026-10-21)."""
+    log = _ticket_log('{"id": 1079, "identifier": "#996"}')
+    assert '\\"id\\": 1079' in log.grounding_text()
+    text, n = _rewrite("- Closed #1079\n", log)
+    assert (text, n) == ("- Closed id 1079\n", 1)

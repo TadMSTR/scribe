@@ -120,7 +120,9 @@ def write_eventlog(root: str | Path, log: EventLog) -> Path:
             fh.flush()
             os.fsync(fh.fileno())
         tmp.replace(path)
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError too: an unencodable string raises `UnicodeEncodeError` from `write`, and
+        # leaving the partial temp file behind repeated once per sweep (audit F-03).
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise

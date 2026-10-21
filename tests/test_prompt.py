@@ -126,3 +126,15 @@ def test_the_prompt_pairs_each_field_with_its_own_cap(caps) -> None:
         if "maxItems" in prop
     }
     assert stated == declared
+
+
+def test_the_system_prompt_teaches_the_ticket_citation_convention() -> None:
+    """#1188 (id 1271) item 2a. Pinned verbatim: this rule is what the `id-conflation` count
+    measures, and a silent rewording would change the population `qc-report --by prompt`
+    compares without anyone deciding to."""
+    assert (
+        "Ticket references: a ticket's #number and its internal id are different numbers. When "
+        "the log shows both, write them as #N (id M). When it shows only an id (task_id=..., "
+        '"id": ..., /tasks/...), write id M. Never put # in front of a number the log shows only '
+        "as an id."
+    ) in SYSTEM

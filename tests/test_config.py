@@ -137,3 +137,28 @@ def test_provider_block_must_be_a_table(tmp_path) -> None:
 def test_unknown_stage_lookup_raises() -> None:
     with pytest.raises(ConfigError, match="no configuration for stage"):
         Config().provider_for("session")
+
+
+# --- [qc] rewrite_id_conflations (#1188 (id 1271) item 2a) ---------------------------------
+
+
+def test_the_id_conflation_rewrite_defaults_on_with_the_key_absent(tmp_path) -> None:
+    """Absent key, existing `[qc]` table: forge's config carries one and must need no edit."""
+    p = tmp_path / "scribe.toml"
+    p.write_text('[qc]\nrun_record = ""\n')
+    assert load(p).qc_rewrite_id_conflations is True
+    assert Config().qc_rewrite_id_conflations is True
+
+
+def test_the_id_conflation_rewrite_can_be_turned_off(tmp_path) -> None:
+    p = tmp_path / "scribe.toml"
+    p.write_text("[qc]\nrewrite_id_conflations = false\n")
+    assert load(p).qc_rewrite_id_conflations is False
+
+
+def test_the_id_conflation_rewrite_refuses_a_non_boolean(tmp_path) -> None:
+    """`"false"` is a truthy string; accepting it would turn the switch ON."""
+    p = tmp_path / "scribe.toml"
+    p.write_text('[qc]\nrewrite_id_conflations = "false"\n')
+    with pytest.raises(ConfigError, match="rewrite_id_conflations"):
+        load(p)
