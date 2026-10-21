@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import __version__, runrecord
+from . import __version__, corrections, runrecord
 from .childenv import BASE_ENV, allowlisted_env
 from .config import Config
 from .discovery import orphaned, scan
@@ -35,8 +35,8 @@ from .eventlog import (
 from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
-from .manifest import append_turn
-from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest, rewrite_id_conflations
+from .manifest import append, record_for_turn
+from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest, id_conflation_edits
 from .state import STATUS_FAILED, SessionRow, Store
 from .summarize.prompt import prompt_sha256
 from .summarize.providers import Provider, build
@@ -150,6 +150,10 @@ class SessionResult:
     #: failed observation is counted in `run_record_errors`, per invariant 13, and must not
     #: turn a good sweep into a failed one.
     run_record_error: str = ""
+    #: Why this session's corrections-ledger record was not written, or "" if it was (or none
+    #: was due -- only a block `rewrite_id_conflations` changed gets one). Counted in
+    #: `correction_errors`, never fatal, not in `errors`: the same contract as the run record.
+    correction_error: str = ""
     #: `#N` refs rewritten to `id N` after grading -- see `qc.rewrite_id_conflations`. Counted
     #: so a falling `id-conflation` rate after a prompt change can be told apart from the
     #: rewrite silently not running: the first moves this toward 0 too, the second leaves it
@@ -199,6 +203,7 @@ class SessionResult:
             "hook": self.hook,
             "hook_error": self.hook_error,
             "run_record_error": self.run_record_error,
+            "correction_error": self.correction_error,
             "ticket_refs_rewritten": self.ticket_refs_rewritten,
             "deferred": self.deferred,
             "not_attempted": self.not_attempted,
@@ -378,33 +383,101 @@ def run_hook(
     return f"exit {proc.returncode}" + (f": {tail}" if tail else "")
 
 
-def _after_write(cfg: Config, result: SessionResult, path: Path, turn_uuid: str) -> None:
-    """Everything that follows a block reaching disk. None of it can unwrite the block.
+@dataclass
+class AfterWrite:
+    """What `after_write` did to one file. Every failure here is counted, never raised."""
 
-    Order is load-bearing. Frontmatter first, because it rewrites the file and a hook must be
-    handed the finished file. The manifest before the hook, because the hook is the
-    notification and the manifest is the payload it points at -- a consumer woken by the hook
-    must find its line already there. The manifest hashes the BLOCK, which frontmatter does
-    not touch, so the two do not interact.
+    frontmatter_error: str = ""
+    #: turn uuid -> its `index.jsonl` record, for every block whose line was appended.
+    manifest_records: dict[str, dict] = field(default_factory=dict)
+    manifest_errors: dict[str, str] = field(default_factory=dict)
+    #: Ledger records appended, and turn uuid -> why one was not.
+    corrections_appended: int = 0
+    correction_errors: dict[str, str] = field(default_factory=dict)
+    #: "" when no hook is configured, else "ok" or "failed".
+    hook: str = ""
+    hook_error: str = ""
+
+
+def after_write(cfg: Config, path: Path, blocks: Sequence[tuple[str, dict | None]]) -> AfterWrite:
+    """Everything that follows blocks reaching disk in one file. None of it can unwrite them.
+
+    `blocks` is `(turn_uuid, correction)` per block just written, where `correction` is the
+    `corrections.record` keyword arguments for a block scribe edited after the model wrote it
+    -- everything but `digest` and `sha256_after`, which are only known here -- or None.
+
+    **The one sequence for every writer.** The sweep calls it with one block; `scribe
+    correct` with every block it changed in the file. Shared rather than copied, because two
+    writers that drift in what follows a write is exactly the failure invariant 17 describes:
+    a block on disk with no `index.jsonl` line, and a `--check` red on correct data.
+
+    Order is load-bearing:
+
+      1. **Frontmatter**, once per file, because it rewrites the file and a hook must be
+         handed the finished file. It does not touch blocks, so no hash below moves.
+      2. **The manifest line**, per block, so `scribe index --check` stays clean.
+      3. **The ledger record**, per corrected block, after the manifest because its
+         `sha256_after` is that line's `sha256` -- the same hash, derived once.
+      4. **The hook**, once per file, last: it is the notification and the manifest is the
+         payload it points at, so a consumer woken by it must find its line already there.
     """
+    done = AfterWrite()
     if cfg.emit_frontmatter:
         try:
             apply_frontmatter(path)
         except OSError as exc:
-            result.errors.append(f"frontmatter: {exc}")
-    try:
-        append_turn(cfg, path, turn_uuid)
-        result.manifest_appended = True
-    except (OSError, LookupError, ValueError) as exc:
-        result.manifest_error = str(exc)
+            done.frontmatter_error = str(exc)
+    ledger = cfg.corrections_file()
+    for turn_uuid, correction in blocks:
+        rec: dict | None = None
+        try:
+            rec = record_for_turn(cfg, path, turn_uuid)
+            append(cfg, rec)
+            done.manifest_records[turn_uuid] = rec
+        except (OSError, LookupError, ValueError) as exc:
+            done.manifest_errors[turn_uuid] = str(exc)
+        if correction is None or ledger is None:
+            continue
+        try:
+            entry = corrections.record(
+                **correction,
+                digest=rec["path"] if rec else _relative(cfg, path),
+                sha256_after=rec["sha256"] if rec else None,
+            )
+        except (TypeError, ValueError) as exc:
+            done.correction_errors[turn_uuid] = f"{type(exc).__name__}: {exc}"
+            continue
+        err = corrections.append(ledger, entry)
+        if err:
+            done.correction_errors[turn_uuid] = err
+        else:
+            done.corrections_appended += 1
     if cfg.on_digest_written:
-        result.hook_error = run_hook(
+        done.hook_error = run_hook(
             cfg.on_digest_written,
             path,
             cfg.on_digest_written_timeout_seconds,
             env=hook_env(cfg.on_digest_written_env),
         )
-        result.hook = "failed" if result.hook_error else "ok"
+        done.hook = "failed" if done.hook_error else "ok"
+    return done
+
+
+def _after_write(
+    cfg: Config,
+    result: SessionResult,
+    path: Path,
+    turn_uuid: str,
+    correction: dict | None = None,
+) -> None:
+    """`after_write` for the sweep's one block, folded into its `SessionResult`."""
+    done = after_write(cfg, path, [(turn_uuid, correction)])
+    if done.frontmatter_error:
+        result.errors.append(f"frontmatter: {done.frontmatter_error}")
+    result.manifest_appended = turn_uuid in done.manifest_records
+    result.manifest_error = done.manifest_errors.get(turn_uuid, "")
+    result.correction_error = done.correction_errors.get(turn_uuid, "")
+    result.hook, result.hook_error = done.hook, done.hook_error
 
 
 def _load_session(row: SessionRow, cfg: Config) -> tuple[EventLog, bool]:
@@ -552,6 +625,9 @@ def process_session(
     except (OSError, ValueError) as exc:  # ValueError: an unencodable string (audit F-03)
         result.errors.append(f"eventlog: {exc}")
 
+    # What the post-grading rewrite changed, for the corrections ledger. Empty when it is off
+    # or changed nothing, which is what keeps a ledger line off every uncorrected block.
+    edits: list[dict] = []
     with span(
         SPAN_SUMMARIZE, session_id=log.session_id, agent=result.agent, events=st.tool_events
     ) as sp:
@@ -662,7 +738,9 @@ def process_session(
         # `#N (id M)` rule gets evaluated. Rewriting first would grade scribe's correction and
         # read zero whatever the model did. Only what reaches disk is corrected.
         if cfg.qc_rewrite_id_conflations:
-            markdown, result.ticket_refs_rewritten = rewrite_id_conflations(markdown, report)
+            # `first_line=2`: the body follows the anchor, which is the block's line 1.
+            markdown, edits = id_conflation_edits(markdown, report, first_line=2)
+            result.ticket_refs_rewritten = len(edits)
         # On the summarize span rather than a new one: the dashboards query these names, and
         # a QC time series belongs on the span that produced the digest it grades.
         set_span_attributes(
@@ -708,7 +786,17 @@ def process_session(
             "digest produced but not written: the turn already holds a final block"
         )
     if result.written:
-        _after_write(cfg, result, path, _last_turn_uuid(log))
+        correction = None
+        if edits:
+            # `sha256_before` is null on `live`: the unrewritten block never reached disk.
+            correction = {
+                "source": corrections.SOURCE_LIVE,
+                "session_id": log.session_id,
+                "turn_uuid": _last_turn_uuid(log),
+                "edits": edits,
+                "sha256_before": None,
+            }
+        _after_write(cfg, result, path, _last_turn_uuid(log), correction)
     if cfg.qc_run_record and qc is not None:
         result.run_record_error = runrecord.append(
             cfg.qc_run_record,
@@ -968,6 +1056,7 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "hook_ok": sum(1 for r in results if r.hook == "ok"),
         "hook_failed": sum(1 for r in results if r.hook == "failed"),
         "run_record_errors": sum(1 for r in results if r.run_record_error),
+        "correction_errors": sum(1 for r in results if r.correction_error),
         #: `#N` refs corrected to `id N` across the sweep. Not an outcome and not loss: every
         #: digest it counts was written, with the wrong ref fixed.
         "ticket_refs_rewritten": sum(r.ticket_refs_rewritten for r in results),

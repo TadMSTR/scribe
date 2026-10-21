@@ -32,6 +32,7 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "scribe"
 #: Every subcommand `python -m scribe` dispatches to, per `__main__.USAGE`.
 SUBCOMMANDS = (
     "cap-survey",
+    "correct",
     "deps-drift",
     "extract",
     "events",
@@ -49,6 +50,7 @@ SUBCOMMANDS = (
 #: `run_cli.py`'s docstring reachable, since neither named a subcommand at all.
 OWNERS = {
     "cap_survey_cli.py": "cap-survey",
+    "correct_cli.py": "correct",
     "deps_drift_cli.py": "deps-drift",
     "events_cli.py": "events",
     "index_cli.py": "index",

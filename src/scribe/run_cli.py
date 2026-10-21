@@ -172,6 +172,13 @@ def main(argv: list[str] | None = None) -> int:
             for r in results:
                 if r.run_record_error:
                     print(f"    {Path(r.transcript_path).name}: run record: {r.run_record_error}")
+        # Same footing as the run record: the corrected digest is on disk, and what is missing
+        # is the ledger's account of what was changed in it.
+        if totals["correction_errors"]:
+            print(f"  {totals['correction_errors']} corrections-ledger record(s) not written")
+            for r in results:
+                if r.correction_error:
+                    print(f"    {Path(r.transcript_path).name}: corrections: {r.correction_error}")
         if totals["errors"]:
             print(f"  {totals['errors']} error(s)")
             for r in results:

@@ -6,7 +6,8 @@ import sys
 
 USAGE = (
     "usage: python -m scribe "
-    "{cap-survey|deps-drift|extract|events|index|journal|qc|qc-report|qc-survey|recover|run} ..."
+    "{cap-survey|correct|deps-drift|extract|events|index|journal|qc|qc-report|qc-survey|"
+    "recover|run} ..."
 )
 
 
@@ -16,6 +17,10 @@ def main(argv: list[str] | None = None) -> int:
         from .cap_survey_cli import main as cap_survey_main
 
         return cap_survey_main(args[1:])
+    if args and args[0] == "correct":
+        from .correct_cli import main as correct_main
+
+        return correct_main(args[1:])
     if args and args[0] == "deps-drift":
         from .deps_drift_cli import main as deps_drift_main
 
