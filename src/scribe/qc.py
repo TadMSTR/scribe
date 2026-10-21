@@ -194,10 +194,11 @@ _BINARIES = frozenset(
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{2,}|\d{2,}")
 #: `417` written as an internal id rather than as a `#` identifier. See `_ticket_detail`.
 #:
-#: **This selects a MESSAGE, never a verdict.** Every branch of `_ticket_detail` returns a
-#: finding; the only question is whether it names the conflation or says "not in the event log".
-#: Widening it therefore cannot change the failure rate, and the rate was measured unchanged
-#: either side of this edit.
+#: **This selects a MESSAGE and a REWRITE, never a verdict.** Every branch of `_ticket_detail`
+#: returns a finding; the only question is whether it names the conflation or says "not in the
+#: event log". Widening it therefore cannot change the failure rate, and the rate was measured
+#: unchanged either side of this edit. Since 0.13.0 it also selects which rejected `#N` are
+#: rewritten to `id N` (`rewrite_id_conflations`), so it now decides what reaches disk.
 #:
 #: It was too narrow to earn its keep. `\bid` requires a word boundary before `id`, and the
 #: form the corpus actually holds is `task_id=541` -- where `id` is preceded by an underscore,
@@ -220,8 +221,16 @@ _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{2,}|\d{2,}")
 #:
 #: Note where this was found: the same module vikunja#889 had just capped a scan in. A pattern
 #: is as able to be quadratic as a loop, and only the loop had been looked at.
+#:
+#: **And a JSON object inside a STRING is escaped.** `grounding_text()` serializes the log, so a
+#: tool result that was itself JSON reaches the corpus as `{\"id\": 1079, ...}`. The first
+#: alternative required a bare `"` after `id` and never matched it. Measured 2026-10-21: all 7
+#: findings in the `coincidental-number` bucket were this shape, true conflations misfiled.
+#: Since 0.13.0 this also decides what `rewrite_id_conflations` corrects, so a miss here is a
+#: wrong ref left on disk, not just a vaguer message. `\\?` is a single optional character, so
+#: the alternative stays free of unbounded quantifiers.
 _ID_CONTEXT = (
-    r'(?:"\w{0,32}id"\s*:\s*"?'  # {"id": 417}, {"task_id": "417"}
+    r'(?:\\?"\w{0,32}id\\?"\s*:\s*\\?"?'  # {"id": 417}, {"task_id": "417"}, {\"id\": 417}
     r"|\bid\s*[:=]?\s*"  # id 417, id: 417, id=417
     r'|_id\s*[:=]\s*"?'  # task_id=417  <- the commonest miss
     r'|"target"\s*:\s*"'  # {"target": "417"} in an MCP event's args digest

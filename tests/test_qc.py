@@ -1220,3 +1220,12 @@ def test_the_root_rule_does_not_touch_spans_that_are_not_paths() -> None:
     log = _ticket_log("the stage runs mistral small latest")
     corpus = log.grounding_text().lower()
     assert span_grounded("mistral small latest", CLAIM_IDENTIFIER, grounding_terms(log), corpus)
+
+
+def test_an_id_inside_an_escaped_json_string_is_a_conflation() -> None:
+    """A tool result that was itself JSON reaches the corpus escaped: `{\\"id\\": 1079}`. All 7
+    `coincidental-number` findings on the live corpus were this shape (2026-10-21)."""
+    log = _ticket_log('{"id": 1079, "identifier": "#996"}')
+    assert '\\"id\\": 1079' in log.grounding_text()
+    text, n = _rewrite("- Closed #1079\n", log)
+    assert (text, n) == ("- Closed id 1079\n", 1)
