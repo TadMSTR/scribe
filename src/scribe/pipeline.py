@@ -155,6 +155,14 @@ class SessionResult:
     #: rewrite silently not running: the first moves this toward 0 too, the second leaves it
     #: at 0 while the bucket stays full.
     ticket_refs_rewritten: int = 0
+    #: The provider was down (`Outcome.provider_unavailable`), so the session was left exactly
+    #: as it was: no block written, no state touched, no retry budget spent. The next sweep
+    #: re-offers it because its offset never moved (#1188 (id 1271) item 4). An outage is not
+    #: a property of the session, and `MAX_PROVISIONAL_ATTEMPTS` exists for failures that are.
+    deferred: bool = False
+    #: Never handed to the provider: an earlier session in this sweep was deferred, and the
+    #: sweep stopped calling a provider it had just found down. Untouched, like `deferred`.
+    not_attempted: bool = False
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -192,6 +200,8 @@ class SessionResult:
             "hook_error": self.hook_error,
             "run_record_error": self.run_record_error,
             "ticket_refs_rewritten": self.ticket_refs_rewritten,
+            "deferred": self.deferred,
+            "not_attempted": self.not_attempted,
             "errors": self.errors,
         }
 
@@ -576,6 +586,20 @@ def process_session(
                 log_path=spend_log,
             )
 
+        if outcome.provider_unavailable:
+            # Return BEFORE the block and before any store write. No placeholder: it would
+            # occupy the turn on disk for a session that is merely late. No `mark_provisional`:
+            # that spends one of `MAX_PROVISIONAL_ATTEMPTS` and advances the offset, so a few
+            # hours of outage would retire every pending session until a manual `recover`.
+            # Leaving the row alone is what makes the next sweep re-offer it for free.
+            set_span_attributes(sp, deferred=True)
+            result.deferred = True
+            result.placeholder = False
+            result.errors.append(
+                f"provider unavailable, session left pending for the next sweep: {outcome.reason}"
+            )
+            return result
+
         # Defence in depth on the way to disk. The audit observed that nothing re-redacts the
         # summarizer's RENDERED output, so the whole redaction model rested on extraction-time
         # completeness -- and the two Medium findings in that layer showed the assumption was not
@@ -806,10 +830,28 @@ def run_once(
             provider_factory
             or (lambda: build(cfg.provider_for("session"), cfg.stages["session"].model))
         )()
-    return [
-        process_session(row, cfg, store, provider=provider, dry_run=dry_run, spend_log=spend_log)
-        for row in ready
-    ]
+    results: list[SessionResult] = []
+    tripped = False
+    for row in ready:
+        # The circuit breaker. Once one session found the provider down, every later one would
+        # make its own 3 calls against it -- up to ~6 min each against a hanging endpoint --
+        # to reach the same verdict. They are left untouched instead, and re-offered next sweep.
+        if tripped:
+            results.append(
+                SessionResult(
+                    transcript_path=row.transcript_path,
+                    agent=row.agent,
+                    not_attempted=True,
+                    full_read=row.last_offset == 0,
+                )
+            )
+            continue
+        result = process_session(
+            row, cfg, store, provider=provider, dry_run=dry_run, spend_log=spend_log
+        )
+        tripped = result.deferred
+        results.append(result)
+    return results
 
 
 def _merge_truncated(results: list[SessionResult]) -> dict[str, int]:
@@ -866,6 +908,11 @@ def summarize_run(results: list[SessionResult]) -> dict:
         #: `#N` refs corrected to `id N` across the sweep. Not an outcome and not loss: every
         #: digest it counts was written, with the wrong ref fixed.
         "ticket_refs_rewritten": sum(r.ticket_refs_rewritten for r in results),
+        #: The provider was down: the session that found it so, and the ones the sweep then
+        #: did not hand to it. Both left pending with no budget spent. Non-zero drives
+        #: `run_cli.EXIT_PROVIDER_UNAVAILABLE`.
+        "deferred": sum(1 for r in results if r.deferred),
+        "not_attempted": sum(1 for r in results if r.not_attempted),
         "input_tokens": sum(r.input_tokens for r in results),
         "output_tokens": sum(r.output_tokens for r in results),
         "degraded": sum(1 for r in results if r.degradation_level),

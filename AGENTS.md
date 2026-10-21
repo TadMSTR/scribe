@@ -205,6 +205,24 @@ If a retention knob is ever added, it **defaults off**, and every log it deletes
 the run totals and printed on the human surface (invariant 13). A pruning pass that reports
 nothing is indistinguishable from one that pruned nothing.
 
+**19. An outage is not a property of the session, so it spends nothing.**
+`MAX_PROVISIONAL_ATTEMPTS` bounds retries for failures that are *determined by the input*, and
+before 0.13.0 a provider outage was charged against it as if it were one. An outage of 2–3
+hours retired every pending session until someone ran `scribe recover --apply`, and
+`scribe run` exited `0` throughout (#1188 (id 1271) item 4). Now a run that ended on a
+`ProviderError` with `unavailable=True` (transport or timeout, 429, 5xx, a `claude-cli`
+timeout) returns from `process_session` **before** the block and before any store write. The
+offset does not move, so `scan` (or `orphaned`) re-offers the session at no cost. `run_once`
+stops calling the provider after the first deferral, and `run_cli` returns
+`EXIT_PROVIDER_UNAVAILABLE` (`69`).
+
+`unavailable` is deliberately narrower than `retryable`. An unparseable envelope is retryable
+and is **not** an outage, because it can be the input's fault. Widening `unavailable` to cover
+it would defer such a session on every sweep forever, which is the 12-attempt burn `state.py`
+documents, by another route. The exit code is a contract: `0` ok, `2` config, `69` outage.
+Do not reuse `1` (an uncaught crash) or `75` (the cron's `flock -E 75` skip, which forge's
+wrapper reports as ok).
+
 ## Porting notes
 
 `_INJECTED_PREFIXES` and the `isMeta` guard are ported verbatim from

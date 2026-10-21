@@ -193,6 +193,37 @@ direction — Claude Code appends to an existing transcript when a session resum
 records how far the file was *read*, and growth past that offset makes a session live again
 regardless of its status.
 
+### When the provider is down
+
+A provider outage delays digests; it does not lose them and it does not spend their retry
+budget. Each call is still tried 3 times with backoff. If the session's last attempt failed
+because the provider could not be reached (a transport error or timeout, a 429, or a 5xx; for
+`claude-cli`, a timeout), scribe writes no block, touches no state, and leaves the session
+pending. Its read offset has not moved, so the next sweep offers it again. The sweep then stops
+calling the provider: the remaining sessions are counted as *not attempted* and are also left
+pending.
+
+```
+live: 8 session(s), ...
+  !! provider unavailable: 1 deferred, 7 not attempted -- left pending, no retry budget spent; the next sweep retries them
+```
+
+An unparseable response envelope, or a 4xx other than 429, is **not** an outage: the provider
+answered, and the failure can be a property of the input. Those still become a placeholder and
+spend one of `state.MAX_PROVISIONAL_ATTEMPTS`, as before.
+
+There is no fallback provider. A late digest is acceptable; a lost or silent one is not. That
+is why the exit code changes:
+
+| `scribe run` exit code | meaning |
+|---:|---|
+| `0` | the sweep ran; any failures are in the output and in the state DB |
+| `2` | config error |
+| `69` | the provider was unavailable. Sessions were left pending and nothing was lost (`EX_UNAVAILABLE`, `run_cli.EXIT_PROVIDER_UNAVAILABLE`) |
+
+`69` is meant to make a cron wrapper report the sweep as failed. A wrapper that treats only
+`0` (and its own lock-skip code) as success needs no change to raise it.
+
 ### Three tiers, and how to get between them
 
 What scribe keeps is layered by cost, and each layer is reachable from the one above it:
@@ -359,7 +390,7 @@ are marked as such in the block's own anchor:
 | body | anchor | meaning |
 |---|---|---|
 | a digest | no `provisional:` attribute | final; never overwritten |
-| `render_failure` placeholder | `provisional:placeholder` | the model call or the schema failed |
+| `render_failure` placeholder | `provisional:placeholder` | the model call or the schema failed (an outage writes nothing instead; see [When the provider is down](#when-the-provider-is-down)) |
 | suppression note | `provisional:suppressed` | the contamination guard fired |
 
 A provisional block is **replaced in place** by the first real digest that arrives for the

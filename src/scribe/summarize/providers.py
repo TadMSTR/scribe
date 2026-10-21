@@ -27,12 +27,28 @@ class ProviderError(RuntimeError):
     `retryable` distinguishes "try again" from "this will fail identically forever". A rate
     limit is retryable; a malformed request is not. Treating everything as retryable turns a
     permanent bug into a quota burn.
+
+    `unavailable` is narrower, and says the PROVIDER is down rather than that this call went
+    wrong: a transport error or timeout, a 429, a 5xx. It is what lets the pipeline leave a
+    session pending through an outage instead of spending its retry budget on one (#1188
+    (id 1271) item 4). Every unavailable error is retryable; the reverse does not hold. An
+    unparseable response envelope is retryable and NOT unavailable, because it can be a
+    property of the input -- treated as an outage, a session that reliably produces one would
+    be deferred on every sweep forever, which is the 12-attempt burn `state.py` documents.
     """
 
-    def __init__(self, message: str, *, retryable: bool = False, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        status: int | None = None,
+        unavailable: bool = False,
+    ) -> None:
         super().__init__(message)
-        self.retryable = retryable
+        self.retryable = retryable or unavailable
         self.status = status
+        self.unavailable = unavailable
 
 
 @dataclass
@@ -105,15 +121,20 @@ class OpenAICompatibleProvider(Provider):
         try:
             resp = httpx.post(url, json=payload, headers=headers, timeout=timeout)
         except Exception as exc:  # httpx.TransportError and friends
-            raise ProviderError(f"{self.name}: transport error: {exc}", retryable=True) from exc
+            raise ProviderError(
+                f"{self.name}: transport error: {exc}", retryable=True, unavailable=True
+            ) from exc
 
         if resp.status_code == 429:
-            raise ProviderError(f"{self.name}: rate limited", retryable=True, status=429)
+            raise ProviderError(
+                f"{self.name}: rate limited", retryable=True, status=429, unavailable=True
+            )
         if resp.status_code >= 500:
             raise ProviderError(
                 f"{self.name}: server error {resp.status_code}",
                 retryable=True,
                 status=resp.status_code,
+                unavailable=True,
             )
         if resp.status_code >= 400:
             # 4xx other than 429 will fail identically on retry. The body is NOT included:
@@ -224,15 +245,20 @@ class ClaudeCliProvider(Provider):
                 env=self.child_env(),
             )
         except subprocess.TimeoutExpired as exc:
-            raise ProviderError(f"{self.name}: timed out after {timeout}s", retryable=True) from exc
+            raise ProviderError(
+                f"{self.name}: timed out after {timeout}s", retryable=True, unavailable=True
+            ) from exc
         except OSError as exc:
             raise ProviderError(f"{self.name}: {exc}", retryable=False) from exc
 
         if proc.returncode != 0:
-            # 124/142 are the shell's timeout conventions and are worth retrying; anything
-            # else from the CLI is likely to repeat.
-            retryable = proc.returncode in (124, 142)
-            raise ProviderError(f"{self.name}: exited {proc.returncode}", retryable=retryable)
+            # 124/142 are the shell's timeout conventions and are worth retrying -- and, like
+            # `TimeoutExpired`, they say the backend did not answer, so they are an outage.
+            # Anything else from the CLI is likely to repeat.
+            timed_out = proc.returncode in (124, 142)
+            raise ProviderError(
+                f"{self.name}: exited {proc.returncode}", retryable=timed_out, unavailable=timed_out
+            )
         if not (proc.stdout or "").strip():
             raise ProviderError(f"{self.name}: produced no output", retryable=True)
         return Completion(text=proc.stdout, model=self.model, provider=self.name)

@@ -143,6 +143,8 @@ def test_status_codes_map_to_the_right_retryability(monkeypatch, status, retryab
         OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
     assert exc.value.retryable is retryable
     assert exc.value.status == status
+    # Every retryable status here is an outage (429, 5xx); no 4xx is (#1188 (id 1271) item 4).
+    assert exc.value.unavailable is retryable
 
 
 def test_a_rejected_request_body_is_not_echoed(monkeypatch) -> None:
@@ -171,6 +173,7 @@ def test_transport_error_is_retryable(monkeypatch) -> None:
     with pytest.raises(ProviderError) as exc:
         OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
     assert exc.value.retryable is True
+    assert exc.value.unavailable is True
 
 
 def test_unparseable_envelope_is_retryable(monkeypatch) -> None:
@@ -181,6 +184,9 @@ def test_unparseable_envelope_is_retryable(monkeypatch) -> None:
     with pytest.raises(ProviderError) as exc:
         OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
     assert exc.value.retryable is True
+    # Retryable but NOT an outage: the provider answered, and a bad envelope can be a property
+    # of the input. Deferring it would re-offer such a session every sweep forever.
+    assert exc.value.unavailable is False
 
 
 def test_provider_without_base_url_or_model_is_refused() -> None:
@@ -238,6 +244,7 @@ def test_claude_cli_empty_output_is_a_failure(monkeypatch) -> None:
     with pytest.raises(ProviderError, match="no output") as exc:
         ClaudeCliProvider(CLI).complete("sys", "user")
     assert exc.value.retryable is True
+    assert exc.value.unavailable is False
 
 
 @pytest.mark.parametrize("code,retryable", [(1, False), (2, False), (124, True), (142, True)])
@@ -246,6 +253,8 @@ def test_claude_cli_exit_codes(monkeypatch, code, retryable) -> None:
     with pytest.raises(ProviderError) as exc:
         ClaudeCliProvider(CLI).complete("sys", "user")
     assert exc.value.retryable is retryable
+    # 124/142 are timeouts, and a timeout is an outage.
+    assert exc.value.unavailable is retryable
 
 
 def test_claude_cli_timeout_is_retryable(monkeypatch) -> None:
@@ -253,6 +262,7 @@ def test_claude_cli_timeout_is_retryable(monkeypatch) -> None:
     with pytest.raises(ProviderError, match="timed out") as exc:
         ClaudeCliProvider(CLI).complete("sys", "user", timeout=5)
     assert exc.value.retryable is True
+    assert exc.value.unavailable is True
 
 
 def test_claude_cli_passes_the_model_when_configured(monkeypatch) -> None:
