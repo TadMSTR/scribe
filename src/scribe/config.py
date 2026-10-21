@@ -31,6 +31,10 @@ DEFAULT_EVENTLOG_DIR = "~/.local/share/scribe/eventlogs"
 #: per written digest, so a sweep's worst case is this times the sessions it writes.
 DEFAULT_HOOK_TIMEOUT_SECONDS = 30.0
 MANIFEST_NAME = "index.jsonl"
+#: Beside `index.jsonl` by default -- see `corrections`.
+CORRECTIONS_NAME = "corrections.jsonl"
+#: Where `scribe correct --apply` copies a file before replacing it, beside the digest root.
+BACKUP_DIR_NAME = "backups"
 #: One JSON line per session a live sweep finished -- see `runrecord`. Beside the digests and
 #: event logs rather than with the state DB, because it is history to keep, not state to
 #: rebuild, and on a host that backs up `~/.local/share/scribe` it goes with them.
@@ -111,6 +115,13 @@ class Config:
     #: Where `index.jsonl` lives. Empty means the default; read it through `manifest_file()`,
     #: which is the one place that resolves it.
     manifest_path: str = ""
+    #: The corrections ledger. `None` means the default, `""` turns it off; read it through
+    #: `corrections_file()`.
+    corrections_path: str | None = None
+    #: Where `scribe correct --apply` backs files up. Empty means the default; read it through
+    #: `backup_root()`. There is no off switch: `correct` does not replace a file it has not
+    #: copied first.
+    backup_dir: str = ""
     #: argv run once per written digest, with the digest's path appended. Empty runs nothing.
     on_digest_written: tuple[str, ...] = ()
     on_digest_written_timeout_seconds: float = DEFAULT_HOOK_TIMEOUT_SECONDS
@@ -137,6 +148,20 @@ class Config:
         if self.manifest_path:
             return Path(self.manifest_path).expanduser()
         return Path(self.output_dir).expanduser().parent / MANIFEST_NAME
+
+    def corrections_file(self) -> Path | None:
+        """The corrections ledger, or None when disabled. Defaults beside `index.jsonl`."""
+        if self.corrections_path is None:
+            return Path(self.output_dir).expanduser().parent / CORRECTIONS_NAME
+        if not self.corrections_path:
+            return None
+        return Path(self.corrections_path).expanduser()
+
+    def backup_root(self) -> Path:
+        """`backup_dir` if set, else `<output_dir>/../backups`. Never inside either tree."""
+        if self.backup_dir:
+            return Path(self.backup_dir).expanduser()
+        return Path(self.output_dir).expanduser().parent / BACKUP_DIR_NAME
 
     def provider_for(self, stage: str) -> ProviderConfig:
         """Return the provider serving `stage`, raising a config error if it is undeclared.
@@ -206,6 +231,30 @@ def _inside(child: Path, root: Path) -> bool:
     """Whether `child` is `root` or anywhere beneath it, compared as resolved paths."""
     c, r = child.resolve(strict=False), root.resolve(strict=False)
     return c == r or r in c.parents
+
+
+def _refuse_inside_trees(cfg: Config) -> None:
+    """Refuse any file scribe writes beside the digests that resolves INSIDE either tree.
+
+    One check for all of them -- the manifest, the corrections ledger and the backup root --
+    so a new sibling is one tuple entry rather than a second copy of the rule. Checked on the
+    EFFECTIVE path, so a default that lands somewhere unsafe is caught too: an `eventlog_dir`
+    set to `output_dir`'s parent would otherwise swallow the defaults. Inside `output_dir` a
+    file is one indexer glob away from being indexed as if it were a digest -- for the backup
+    root that is a duplicate of every corrected digest; inside `eventlog_dir` it is a file
+    that directory's contract says is never a search target.
+    """
+    targets = [("manifest_path", cfg.manifest_file()), ("backup_dir", cfg.backup_root())]
+    ledger = cfg.corrections_file()
+    if ledger is not None:
+        targets.append(("corrections_path", ledger))
+    for name, effective in targets:
+        for key, root in (("output_dir", cfg.output_dir), ("eventlog_dir", cfg.eventlog_dir)):
+            if _inside(effective, Path(root).expanduser()):
+                raise ConfigError(
+                    f"index.{name} resolves to {effective}, inside {key}; keep it outside "
+                    "both the digest tree and the event-log tree"
+                )
 
 
 def _load_qc(cfg: Config, qc: object) -> None:
@@ -296,18 +345,14 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
     cfg.on_digest_written_env = tuple(env_names)
     if "manifest_path" in index:
         cfg.manifest_path = str(index["manifest_path"])
-    # Checked on the EFFECTIVE path, so a default that lands somewhere unsafe is caught too:
-    # an `eventlog_dir` set to `output_dir`'s parent would otherwise swallow the default.
-    # Inside `output_dir` the manifest is one indexer glob away from being indexed as if it
-    # were a digest; inside `eventlog_dir` it is a file that directory's contract says is
-    # never a search target.
-    effective = cfg.manifest_file()
-    for key, root in (("output_dir", cfg.output_dir), ("eventlog_dir", cfg.eventlog_dir)):
-        if _inside(effective, Path(root).expanduser()):
-            raise ConfigError(
-                f"index.manifest_path resolves to {effective}, inside {key}; keep it outside "
-                "both the digest tree and the event-log tree"
-            )
+    for key in ("corrections_path", "backup_dir"):
+        if key in index and not isinstance(index[key], str):
+            raise ConfigError(f"index.{key} must be a path string")
+    if "corrections_path" in index:
+        cfg.corrections_path = index["corrections_path"]
+    if "backup_dir" in index:
+        cfg.backup_dir = index["backup_dir"]
+    _refuse_inside_trees(cfg)
 
     _load_qc(cfg, data.get("qc", {}))
 

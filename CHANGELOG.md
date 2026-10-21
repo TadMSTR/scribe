@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-10-21
+
+**Minor.** A new command corrects id-conflated ticket refs in digests written before 0.13.0. A
+new append-only ledger records every edit scribe makes to a digest after the model wrote it,
+whether live or after the fact (#1194 (id 1277)). There is no schema change and no change to
+the run record or the digest format. Two new optional config keys default outside both trees,
+so existing configs need no edit.
+
+### Added
+
+- **`scribe correct`.** It applies 0.13.0's id-conflation rewrite to blocks already on disk.
+  Each complete, final block is re-graded against its own event log with the current gate, and
+  receives exactly the edit the live path would make.
+  - Dry run by default. It prints totals and up to 20 sample edits; `--json` lists every edit.
+  - `--apply` needs `--lock PATH`, naming the lock file the sweep's cron holds, and exits `75`
+    if that lock is held. scribe has no internal lock, so an unlocked apply racing a sweep
+    could drop a just-appended block. `--apply` with neither `--lock` nor `--no-lock` is
+    refused.
+  - Each file is copied to `<backup_dir>/correct-<UTC>/` before it is replaced atomically. If
+    the backup fails, the file is not touched.
+  - Every changed block gets an `index.jsonl` line, so `scribe index --check` stays clean.
+  - Idempotent: a second apply changes nothing and writes nothing.
+  - Skipped and counted: provisional blocks, torn blocks, and blocks with a missing or
+    unloadable event log.
+  - Exit codes: `0` nothing to do or applied, `1` corrections pending (dry run), `2` usage or
+    config error, `4` the tool failed, `75` locked. Documented in the README and in AGENTS.md
+    invariant 20.
+- **`corrections.jsonl`**, the corrections ledger. It gets one line per block edited after the
+  model wrote it, with `reason`, `source` (`live` or `correct`), `digest`, `session_id`,
+  `turn_uuid`, `sha256_before`/`sha256_after` and the changed ref tokens. It never stores whole
+  lines. The live sweep writes it whenever the rewrite changes a block; `sha256_before` is
+  `null` there, because the unrewritten block never reached disk. A failed write is counted
+  as `correction_errors` and printed in the sweep summary, and it never fails the sweep.
+- **Config:** `[index] corrections_path` (default `<output_dir>/../corrections.jsonl`; `""`
+  turns the ledger off) and `[index] backup_dir` (default `<output_dir>/../backups`). Both are
+  refused at load if they resolve inside `output_dir` or `eventlog_dir`. That refusal is now a
+  single check shared with `manifest_path`.
+- `qc.id_conflation_edits`, which returns the edit list. `rewrite_id_conflations` is now its
+  count-only form, so the live path and `correct` share one implementation.
+
+### Changed
+
+- `pipeline._after_write` is now a shared `after_write`: frontmatter, the manifest line, the
+  ledger record and the hook, in that order, for one or many blocks in a file. The sweep and
+  `correct` both call it, so the two writers cannot drift on what follows a write.
+
+### Notes
+
+- **`qc-survey` will report fewer id conflations after a `correct --apply`.** It grades what
+  is on disk. `runs.jsonl` is not rewritten and keeps measuring the model's original output,
+  so a lower survey count is this command at work, not the prompt.
+
 ## [0.13.0] — 2026-10-21
 
 **Minor.** Three behaviour changes and one new exit code. scribe now corrects the wrong ticket

@@ -34,6 +34,13 @@ eventlog_dir  = "~/.local/share/scribe/eventlogs"
 # Refused if it resolves inside output_dir or eventlog_dir.
 # manifest_path = "~/.local/share/scribe/index.jsonl"
 #
+# Append-only ledger of every block scribe edited after the model wrote it (the live
+# id-conflation rewrite and `scribe correct`). Default is a sibling of output_dir; "" turns
+# it off. Refused if it resolves inside output_dir or eventlog_dir.
+# corrections_path = "~/.local/share/scribe/corrections.jsonl"
+# Where `scribe correct --apply` copies each file before replacing it. Same refusal.
+# backup_dir = "~/.local/share/scribe/backups"
+#
 # An ARGV LIST, run without a shell, once per written digest, with the digest's path
 # appended. A string is refused at load: the path derives from an external agent name.
 # on_digest_written = ["/usr/local/bin/my-indexer", "--file"]

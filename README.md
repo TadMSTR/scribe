@@ -640,6 +640,78 @@ of `0.10` is ten points. The exit code is the contract a scheduler alerts on:
 No success path returns `1`. A missing record file is `3`: a fresh install has no data yet,
 which is not the same as a broken tool.
 
+#### Correcting digests already written: `scribe correct`
+
+Since 0.13.0 the sweep rewrites an id-conflated `#N` to `id N` before the block is written.
+Blocks written before that still carry the wrong ref. `scribe correct` applies the same
+rewrite to them: it re-grades every complete, final block against its own event log with the
+current gate, and makes exactly the edit the live path would.
+
+```
+python -m scribe correct --config scribe.toml                  # dry run: counts and a sample
+python -m scribe correct --config scribe.toml --json           # ... every edit
+python -m scribe correct --config scribe.toml --apply --lock ~/.local/state/scribe/scribe.lock
+```
+
+- **Dry run by default.** It writes nothing: no digest, manifest line, ledger record or backup.
+- **`--apply` must name the sweep's lock file.** scribe has no lock of its own; the cron's
+  `flock -n` is the only mutual exclusion, and an unlocked `correct` racing a sweep could drop
+  a block the sweep had just appended. `--lock PATH` takes the same `flock(2)` lock the cron's
+  `flock(1)` does and exits `75` if it is held. Use **the same path as the cron line**.
+  `--apply` without `--lock` is refused unless you pass `--no-lock`, for a corpus no sweep
+  writes to.
+- **Backup first.** Each file is copied to `<backup_dir>/correct-<UTC>/<agent>/<date>.md`
+  (`[index] backup_dir`, default `<output_dir>/../backups`; files `0600`, directories `0700`)
+  before it is replaced atomically. A file whose backup fails is not touched.
+- **The manifest stays clean.** Every changed block gets an `index.jsonl` line, through the
+  same post-write sequence the sweep runs, so `scribe index --check` passes afterwards.
+- **Idempotent.** `id 1258` is not a ticket claim, so a second `--apply` finds nothing.
+- Skipped and counted, never guessed: provisional blocks, torn blocks, and blocks whose event
+  log is missing or unloadable.
+
+| code | meaning |
+|---:|---|
+| `0` | nothing to correct, or `--apply` completed |
+| `1` | dry run: corrections are pending (as `recover`'s dry run, so a monitor can alert on it) |
+| `2` | usage or config error, including `--apply` with neither `--lock` nor `--no-lock` |
+| `4` | **the tool failed**, or a backup could not be written; the report says how far it got |
+| `75` | the lock is held: a sweep is running and nothing was written |
+
+**After an apply, `qc-survey` reports fewer id conflations.** It grades what is on disk. That is
+this command, not the prompt improving: the run record is not rewritten, and it keeps measuring
+the model's original output, which is what `qc-report --by prompt` compares.
+
+#### The corrections ledger
+
+Every block scribe edits after the model wrote it gets one line in `corrections.jsonl`
+(`[index] corrections_path`, default `<output_dir>/../corrections.jsonl`, mode `0600`; `""`
+turns it off). The sweep writes `source: live` lines and `scribe correct` writes `source:
+correct` lines:
+
+```json
+{"record_version": 1, "ts": "2026-10-21T20:23:47Z", "scribe_version": "0.14.0",
+ "reason": "id-conflation", "source": "correct", "digest": "research/2026-10-19.md",
+ "session_id": "…", "turn_uuid": "…", "sha256_before": "…", "sha256_after": "…",
+ "edits": [{"line": 12, "before": "#1258", "after": "id 1258"}]}
+```
+
+- `line` is 1-based within the block; the anchor is line 1.
+- `before`/`after` are the ref tokens only, never the line around them, so the ledger is not a
+  second copy of digest prose.
+- `sha256_after` equals the block's `index.jsonl` hash. `sha256_before` is the block's hash
+  before the edit, which lets a restore from backup be checked block by block. It is `null` on
+  `live`, because the unrewritten block never reached disk.
+- `reason` has one value today, `id-conflation`.
+
+The record is kept out of the digest on purpose. The anchor is a parsed format that the
+SessionStart preview and indexers read, and agents read the body. Look a block up by
+`(digest, turn_uuid)`, which every anchor carries. A failed ledger write is counted
+(`correction_errors`), printed in the sweep summary, and never fails the sweep.
+
+`corrections_path`, `backup_dir` and `manifest_path` are all refused at config load if they
+resolve inside `output_dir` or `eventlog_dir`. A file under the digest root is one indexer
+glob away from being indexed as a digest; a backup there would duplicate every corrected one.
+
 ## Dependencies
 
 `uv.lock` is committed, and CI gates on it three ways: `uv lock --check` for currency, then
@@ -694,6 +766,8 @@ operator's business.
 | Digests | `~/.local/share/scribe/digests/<agent>/<date>.md` (the default `output_dir`) |
 | Event logs | `~/.local/share/scribe/eventlogs/<session-id>.json` (the default `eventlog_dir`) |
 | State | `~/.local/state/scribe/scribe.sqlite3` |
+| Manifest, run record, corrections ledger | `~/.local/share/scribe/{index,runs,corrections}.jsonl`, siblings of the digest root |
+| Backups | `~/.local/share/scribe/backups/correct-<UTC>/`, written by `scribe correct --apply` |
 | Watchdog | `python -m scribe recover` (a dry run unless `--apply`) daily, alerting on its exit code: non-zero means digests were lost or left provisional. The codes are a contract, documented in `recover_cli.py` |
 
 The event-log directory is a **sibling** of the digest directory, never a child. Digests are

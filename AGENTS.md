@@ -187,8 +187,16 @@ Every `index.jsonl` field except `written_at` is re-derivable from the digests, 
 compute it from what is on disk, or `--check` fails on every line forever. That is the
 failure `written_at` would have caused, and it is why `written_at` is excluded from the
 comparison. Every path that changes a block must also append a line for it — `append_block`
-via the pipeline, and `recover`'s anchor stamping. A writer that skips this turns `--check` red
-on correct data. `sha256` hashes the **block**: a file hash goes stale on every later append.
+via the pipeline, `recover`'s anchor stamping, and `scribe correct`. A writer that skips this
+turns `--check` red on correct data. `sha256` hashes the **block**: a file hash goes stale on
+every later append.
+
+**A post-model edit also appends to `corrections.jsonl`** — the live id-conflation rewrite
+(`source: live`) and `scribe correct` (`source: correct`), one record per edited block with its
+reason, its `sha256_before`/`sha256_after` and the changed **tokens**, never whole lines. Both
+writers go through `pipeline.after_write`, which runs frontmatter, the manifest line, the ledger
+record and the hook in that order. Do not copy that sequence into a third writer; call it. The
+ledger, `backup_dir` and `manifest_path` share one refusal in `config._refuse_inside_trees`.
 
 **18. Event logs are kept indefinitely. That is a decision, not a missing feature.**
 Decided by the operator on 2026-09-24 (vikunja#954). Claude Code deletes a transcript
@@ -237,6 +245,23 @@ it would defer such a session on every sweep forever, which is the 12-attempt bu
 documents, by another route. The exit code is a contract: `0` ok, `2` config, `69` outage.
 Do not reuse `1` (an uncaught crash) or `75` (the cron's `flock -E 75` skip, which forge's
 wrapper reports as ok).
+
+**20. `scribe correct --apply` writes only under the sweep's lock, and only after a backup.**
+scribe has no internal lock. The cron's `flock -n -E 75 <lock>` is the only mutual exclusion,
+and a read-modify-replace racing `append_block` drops the block the sweep just appended. So
+`--apply` takes `flock(2)` on `--lock PATH` (the same lock `flock(1)` takes) and exits `75` when
+it is held, or refuses with `2` unless `--no-lock` says no sweep writes this corpus. A file is
+replaced only after its original bytes are in `<backup_dir>/correct-<UTC>/`; a failed backup
+stops the run with `4` and leaves the file alone. The exit codes are a contract, like
+`recover`'s: `0` nothing to do or applied, `1` the dry run found corrections pending, `2` usage
+or config, `4` the tool failed, `75` locked. The dry run's `1` is deliberate, so a monitor can
+alert on pending corrections. Mutation-proven at 0.14.0: neutering the manifest append fails 10
+tests, the backup 1, the lock 2.
+
+`correct` takes no free-form edits and has one `reason`. Add a reason when a second
+gate-derived correction exists, not before. It never rewrites `runs.jsonl`: QC history keeps
+measuring the model's output, so `qc-survey` (which grades disk) and `qc-report` (which reads
+the record) will legitimately disagree about id conflations after an apply.
 
 ## Porting notes
 

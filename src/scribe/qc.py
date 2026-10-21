@@ -930,6 +930,8 @@ _SELF_ANNOTATED = r"[ \t]*\(id[ \t]+{n}\)"
 def rewrite_id_conflations(text: str, report: Report) -> tuple[str, int]:
     """Rewrite every `#N` the gate rejected as an id conflation to `id N`. Returns `(text, n)`.
 
+    The count-only form of `id_conflation_edits`, which does the work.
+
     **Call this AFTER grading, never before.** `report` is the verdict on the model's own output,
     and the run record's `id-conflation` count is the measure of whether the prompt is teaching
     the model the `#N (id M)` convention. Rewriting first would grade scribe's correction
@@ -957,13 +959,32 @@ def rewrite_id_conflations(text: str, report: Report) -> tuple[str, int]:
     reached once, while grading, and a second search doubled the gate's worst-case regex cost
     on a hostile session (audit F-02).
     """
+    rewritten, edits = id_conflation_edits(text, report)
+    return rewritten, len(edits)
+
+
+def id_conflation_edits(
+    text: str, report: Report, *, first_line: int = 1
+) -> tuple[str, list[dict[str, int | str]]]:
+    """`rewrite_id_conflations`, also returning what it changed: `(text, edits)`.
+
+    One edit per rewritten ref, `{"line", "before", "after"}`, in text order. `line` is
+    1-based and counted from `first_line`, so a caller holding a block BODY can number lines
+    within the whole block (the anchor is the block's line 1). `before` is the exact span
+    replaced -- `#1258`, or `#1258 (id 1258)` for a self-annotated pair -- and `after` is
+    `id 1258`. Tokens only, never the surrounding line: this is what `corrections` records,
+    and a ledger of whole lines would be a second copy of digest prose.
+
+    The live path and `scribe correct` both call this, so what the ledger says changed is
+    what was changed, whichever of the two did it.
+    """
     conflated = {f.claim for f in report.findings if f.kind == CLAIM_TICKET and f.id_conflation}
     if not conflated:
-        return text, 0
+        return text, []
     protected = [m.span() for rx in _MARKER_RES for m in rx.finditer(text)]
     out: list[str] = []
+    edits: list[dict[str, int | str]] = []
     pos = 0
-    count = 0
     for m in _TICKET_RE.finditer(text):
         if f"#{m.group(1)}" not in conflated:
             continue
@@ -976,10 +997,16 @@ def rewrite_id_conflations(text: str, report: Report) -> tuple[str, int]:
             end = dup.end()
         out.append(text[pos : m.start()])
         out.append(f"id {number}")
+        edits.append(
+            {
+                "line": first_line + text.count("\n", 0, m.start()),
+                "before": text[m.start() : end],
+                "after": f"id {number}",
+            }
+        )
         pos = end
-        count += 1
     out.append(text[pos:])
-    return "".join(out), count
+    return "".join(out), edits
 
 
 def check_event_coverage(
