@@ -200,14 +200,22 @@ budget. Each call is still tried 3 times with backoff. If the session's last att
 because the provider did not answer at all, scribe writes no block, touches no state, and leaves
 the session pending. "Did not answer" is narrow on purpose: a connection refused or timed out
 (`ConnectError`, `ConnectTimeout`, `PoolTimeout`), a connection closed mid-protocol
-(`RemoteProtocolError`), a 429, a 5xx, or for `claude-cli` a timeout. Its read offset has not
-moved, so the next sweep offers it again.
+(`RemoteProtocolError`), a 429 or a 5xx. Its read offset has not moved, so the next sweep
+offers it again. A timeout is not in that list, for httpx or for `claude-cli`: a slow answer can
+be the input's fault, so it spends retry budget like any other failure. An endpoint that
+accepts the connection and then never answers is therefore not deferred.
 
 **One deferral is a suspicion; two in a row is an outage.** The next session is the probe. If
 it also finds the provider down, the sweep stops calling the provider, and the remaining
-sessions are counted as *not attempted* and left pending. If the provider answers it, the first
-session's failure was its own, so that session is re-run onto the provisional path and its
-retry budget bounds it. One bad session cannot stall the queue behind it.
+sessions are counted as *not attempted* and left pending. If the provider answers any session
+in the sweep, before or after the deferred one, that session's failure was its own: it is
+re-run onto the provisional path, and its retry budget bounds it. That holds when it is the last
+or only session too, as long as something else in the sweep got an answer.
+
+One case is not bounded, and it is accepted: two deferrals in a row with nothing answered
+before them read as an outage, so the sessions behind them wait. It takes two sessions whose own
+requests each make the endpoint refuse, drop or 5xx. Telling that apart from an outage would
+need a per-session deferral count in the state DB.
 
 ```
 live: 8 session(s), ...

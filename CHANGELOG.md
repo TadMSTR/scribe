@@ -41,10 +41,11 @@ config key, which defaults on, so existing configs need no edit.
 
 - **A provider outage leaves sessions pending** (#1188 (id 1271) item 4). There is no
   fallback provider; a late digest is acceptable. If a session's last attempt failed with
-  `ProviderError.unavailable` (a transport error or timeout, a 429, a 5xx, or a `claude-cli`
-  timeout or exit 124/142), scribe writes no placeholder, makes no state write and spends none
-  of `MAX_PROVISIONAL_ATTEMPTS`. The session is re-offered next sweep. After the first
-  deferral the sweep stops calling the provider, and the summary prints
+  `ProviderError.unavailable` (the endpoint refused or dropped the connection, or answered 429
+  or 5xx; see *Security* below for the exact list), scribe writes no placeholder, makes no
+  state write and spends none of `MAX_PROVISIONAL_ATTEMPTS`. The session is re-offered next
+  sweep. After two consecutive deferrals the sweep stops calling the provider, and the summary
+  prints
   `!! provider unavailable: N deferred, M not attempted`. An unparseable envelope, or any other
   4xx, still goes provisional and spends the budget, because either can be the input's fault.
 - **The system prompt teaches `#N (id M)`.** When the log shows both, write `#N (id M)`. When
@@ -95,6 +96,16 @@ Fixes from this release's own pre-merge audit (scribe-qc-integrity-2026-10, 1 Me
 - **F-04 (Low): certifi floor `>=2026.10.19,<2028`** in `[project.dependencies]`, so a wheel
   deploy upgrades the CA bundle instead of keeping an installed vulnerable one.
 - **F-05 (Info):** `#N (ID N)` now collapses like `#N (id N)`.
+- **R2-01 (Low, re-check round): the probe looked only forward.** A deferred session with no
+  answered session after it was deferred every sweep: the last or only one, and every orphan.
+  A suspect is now cleared if the provider answered any session in the sweep, earlier ones
+  included. Two adjacent suspects with nothing answered before them still trip the breaker.
+  That is accepted and documented in the README.
+- **R2-02 (Low, re-check round): a `claude-cli` timeout is no longer an outage.**
+  `TimeoutExpired` and exit 124/142 are retryable, not `unavailable`, like an httpx read timeout.
+- **R2-03 (Info, re-check round):** corrected the `run_once` comment. A hanging endpoint (one
+  that accepts the connection and never answers) spends retry budget and does not trip the
+  breaker. Mistral's Cloudflare front returns a 524 first, which does count as an outage.
 
 ### Fixed
 

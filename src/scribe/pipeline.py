@@ -847,8 +847,11 @@ def run_once(
         )
 
     # The circuit breaker. Once the provider is down, every later session would make its own
-    # 3 calls to reach the same verdict -- up to ~6 min each against a hanging endpoint -- so
-    # they are left untouched and re-offered next sweep.
+    # 3 calls to reach the same verdict, so they are left untouched and re-offered next sweep.
+    # It covers an endpoint that refuses or drops the connection, or answers 429/5xx. It does
+    # NOT cover one that accepts the connection and never answers: a read timeout is retryable
+    # but not `unavailable` (see `providers.py`), so each such session spends its 3 x timeout
+    # and then provisional budget (audit R2-03).
     #
     # **It trips on TWO deferrals in a row, not one** (audit F-01). One session deferring
     # cannot tell an outage from a fault in that session's own request, and on one deferral a
@@ -857,8 +860,21 @@ def run_once(
     # down, the outage is confirmed and both stay pending. If the provider answers it, the
     # first deferral was not an outage, and that session is re-run with `allow_defer=False` --
     # onto the provisional path, where `MAX_PROVISIONAL_ATTEMPTS` bounds it.
+    #
+    # **Evidence counts from either side of the suspect** (audit R2-01). A probe that only
+    # looked forward left a suspect with nothing after it -- the last or only ready session,
+    # and every orphan, which `orphaned()` appends last -- deferred on every sweep forever. So
+    # `provider_seen_up` remembers whether the provider answered ANY session this sweep, and a
+    # suspect still pending when the loop ends is re-run if it did. The cost, accepted: an
+    # outage that starts just before the last session spends one provisional attempt on it.
+    #
+    # **Residual, accepted (Ted, 2026-10-21):** two suspects in a row with no answered session
+    # before them still trip the breaker. Telling that from an outage would need a per-session
+    # deferral count in the state DB. It takes two sessions whose own requests each make the
+    # endpoint refuse, drop or 5xx, which `unavailable`'s narrow definition makes speculative.
     results: list[SessionResult] = []
     tripped = False
+    provider_seen_up = False
     suspect: tuple[int, SessionRow] | None = None
     for row in ready:
         if tripped:
@@ -878,10 +894,15 @@ def run_once(
                 suspect = (len(results) - 1, row)
             else:
                 tripped = True
-        elif suspect is not None and _provider_answered(result):
-            index, suspect_row = suspect
-            results[index] = run(suspect_row, allow_defer=False)
-            suspect = None
+        elif _provider_answered(result):
+            provider_seen_up = True
+            if suspect is not None:
+                index, suspect_row = suspect
+                results[index] = run(suspect_row, allow_defer=False)
+                suspect = None
+    if suspect is not None and provider_seen_up and not tripped:
+        index, suspect_row = suspect
+        results[index] = run(suspect_row, allow_defer=False)
     return results
 
 

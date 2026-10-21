@@ -353,3 +353,42 @@ def test_the_exit_code_is_clear_of_every_code_already_in_use() -> None:
     """0 ok, 1 an uncaught crash, 2 usage/config, 75 the cron's `flock -E 75` skip. A collision
     with 75 would read as "previous sweep still running" and be reported as ok."""
     assert EXIT_PROVIDER_UNAVAILABLE not in (0, 1, 2, 75)
+
+
+def _last(cfg, store) -> str:
+    return _order(cfg, store)[-1]
+
+
+def test_a_suspect_with_nothing_after_it_is_cleared_by_an_earlier_answer(env) -> None:
+    """Audit R2-01, reproduced: the poison session is LAST, so no later session can probe it.
+    The provider answered the two before it, which is evidence enough."""
+    cfg, store, _paths = env
+    last = _last(cfg, store)
+    results = _sweep(cfg, store, Poison(last))
+    by_id = {r.session_id: r for r in results}
+    assert summarize_run(results)["deferred"] == 0
+    assert by_id[last].placeholder is True
+    assert store.get(by_id[last].transcript_path).attempts == 1
+
+
+def test_a_lone_poison_session_is_retired_by_its_budget(env) -> None:
+    """After the first sweep the healthy sessions are done, and the poison one is often the
+    only ready row: nothing in the sweep can answer, so it stays deferred for that sweep --
+    but the first sweep already moved it onto the provisional path."""
+    cfg, store, _paths = env
+    last = _last(cfg, store)
+    for _ in range(MAX_PROVISIONAL_ATTEMPTS + 1):
+        _sweep(cfg, store, Poison(last))
+    assert _sweep(cfg, store, Poison(last)) == []
+
+
+def test_a_genuine_outage_with_one_session_left_stays_deferred(env) -> None:
+    """Nothing answered at all, so a single remaining deferral is not re-run: an outage must
+    not spend budget just because it reached the last session."""
+    cfg, store, paths = env
+    _order(cfg, store)  # a dry run creates the rows; it processes nothing (invariant 8)
+    for p in paths[1:]:
+        store.mark_summarized(str(p), offset=10**9, last_turn_uuid="", turn_uuids=[])
+    (only,) = _sweep(cfg, store, Down())
+    assert only.deferred is True
+    assert store.get(only.transcript_path).attempts == 0

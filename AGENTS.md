@@ -213,18 +213,22 @@ hours retired every pending session until someone ran `scribe recover --apply`, 
 `ProviderError` with `unavailable=True` returns from `process_session` **before** the block and
 before any store write. The offset does not move, so `scan` (or `orphaned`) re-offers the
 session at no cost. `unavailable` means the endpoint did not answer: httpx `ConnectError`,
-`ConnectTimeout`, `PoolTimeout` or `RemoteProtocolError`, a 429, a 5xx, or a `claude-cli`
-timeout. `run_once` stops calling the provider after **two** consecutive deferrals, and
-`run_cli` returns `EXIT_PROVIDER_UNAVAILABLE` (`69`).
+`ConnectTimeout`, `PoolTimeout` or `RemoteProtocolError`, a 429 or a 5xx. No timeout counts,
+including `claude-cli`'s (audit R2-02). `run_once` stops calling the provider after **two**
+consecutive deferrals, and `run_cli` returns `EXIT_PROVIDER_UNAVAILABLE` (`69`).
 
 **Why two, and why the classes are that narrow** (scribe-qc-integrity-2026-10 audit F-01). The
 first version marked *every* exception from `httpx.post` as unavailable and tripped on one
 deferral. A session whose own request could not be encoded (a lone surrogate) was then
 deferred on every sweep forever, and every session behind it was never attempted, while the
 run blamed the provider. A read timeout can be input-driven the same way. So a deferral is a
-suspicion until the next session confirms it, and a suspect the provider then answers for is
-re-run with `allow_defer=False`, onto the provisional path. Widening `unavailable` again, or
-tripping on one deferral, re-opens that.
+suspicion until another session confirms it. A suspect is re-run with `allow_defer=False`,
+onto the provisional path, if the provider answered ANY session in the sweep, before it or
+after it (audit R2-01: a forward-only probe left the last, the only, and every orphaned
+suspect deferred forever). Widening `unavailable` again, or tripping on one deferral, re-opens
+that. One residual is accepted: two adjacent suspects with nothing answered before them still
+trip the breaker, because only a per-session deferral count in the state DB could tell them
+from an outage.
 
 `unavailable` is deliberately narrower than `retryable`. An unparseable envelope, a read or
 write timeout and a dropped stream are retryable and are **not** an outage, because each can be

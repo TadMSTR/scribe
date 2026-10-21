@@ -270,20 +270,18 @@ class ClaudeCliProvider(Provider):
                 env=self.child_env(),
             )
         except subprocess.TimeoutExpired as exc:
-            raise ProviderError(
-                f"{self.name}: timed out after {timeout}s", retryable=True, unavailable=True
-            ) from exc
+            # Retryable, NOT an outage: `claude -p`'s run time scales with the input, so a
+            # session big enough to always exceed `timeout` would otherwise be deferred
+            # forever -- the shape audit F-01 removed from httpx's read timeout (audit R2-02).
+            raise ProviderError(f"{self.name}: timed out after {timeout}s", retryable=True) from exc
         except OSError as exc:
             raise ProviderError(f"{self.name}: {exc}", retryable=False) from exc
 
         if proc.returncode != 0:
-            # 124/142 are the shell's timeout conventions and are worth retrying -- and, like
-            # `TimeoutExpired`, they say the backend did not answer, so they are an outage.
-            # Anything else from the CLI is likely to repeat.
+            # 124/142 are the shell's timeout conventions: worth retrying, and like
+            # `TimeoutExpired` not an outage (audit R2-02). Anything else is likely to repeat.
             timed_out = proc.returncode in (124, 142)
-            raise ProviderError(
-                f"{self.name}: exited {proc.returncode}", retryable=timed_out, unavailable=timed_out
-            )
+            raise ProviderError(f"{self.name}: exited {proc.returncode}", retryable=timed_out)
         if not (proc.stdout or "").strip():
             raise ProviderError(f"{self.name}: produced no output", retryable=True)
         return Completion(text=proc.stdout, model=self.model, provider=self.name)

@@ -253,8 +253,9 @@ def test_claude_cli_exit_codes(monkeypatch, code, retryable) -> None:
     with pytest.raises(ProviderError) as exc:
         ClaudeCliProvider(CLI).complete("sys", "user")
     assert exc.value.retryable is retryable
-    # 124/142 are timeouts, and a timeout is an outage.
-    assert exc.value.unavailable is retryable
+    # 124/142 are timeouts: retryable, never an outage -- run time scales with the input
+    # (audit R2-02).
+    assert exc.value.unavailable is False
 
 
 def test_claude_cli_timeout_is_retryable(monkeypatch) -> None:
@@ -262,7 +263,7 @@ def test_claude_cli_timeout_is_retryable(monkeypatch) -> None:
     with pytest.raises(ProviderError, match="timed out") as exc:
         ClaudeCliProvider(CLI).complete("sys", "user", timeout=5)
     assert exc.value.retryable is True
-    assert exc.value.unavailable is True
+    assert exc.value.unavailable is False  # audit R2-02
 
 
 def test_claude_cli_passes_the_model_when_configured(monkeypatch) -> None:
