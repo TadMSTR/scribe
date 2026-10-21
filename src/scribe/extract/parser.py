@@ -1,9 +1,9 @@
 """Turn one Claude Code JSONL transcript into a structured event log.
 
 No LLM, no network, no writes to the transcript. `~/.claude/projects/*/*.jsonl` is the only
-durable record of what actually happened and Claude Code's unset `cleanupPeriodDays` already
-caps it at 30 days (vikunja#778), so this module opens transcripts read-only and never
-writes back to that tree under any code path.
+durable record of what actually happened and Claude Code's `cleanupPeriodDays` already
+caps it (default 30 days, configurable; vikunja#778), so this module opens transcripts
+read-only and never writes back to that tree under any code path.
 
 What the pipeline this replaces did, and why it is wrong: `parse-transcript.sh :: format_turn()`
 keeps `[User]:` text and assistant `text` blocks and skips `tool_use`, `tool_result` and

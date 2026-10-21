@@ -97,7 +97,7 @@ The extractor has **no runtime dependencies** and makes no network calls. That i
 
 ## Design commitments
 
-**Read-only on transcripts.** Scribe never writes to `~/.claude/projects/*/*.jsonl`. Those are the only durable record of what happened, and Claude Code already expires them after 30 days. The test suite asserts this on both content and mtime rather than trusting code review.
+**Read-only on transcripts.** Scribe never writes to `~/.claude/projects/*/*.jsonl`. Those are the only durable record of what happened, and Claude Code already deletes them `cleanupPeriodDays` after their last write (default 30, configurable). The test suite asserts this on both content and mtime rather than trusting code review.
 
 **Redaction is counted, not just applied.** `secrets_redacted` is a number. "No secret appears in the output" is also true of an extractor that produced nothing, so absence alone proves nothing — the count is what shows the filter ran.
 
@@ -480,7 +480,7 @@ python -m scribe run --live           # then re-summarize
 It joins on `transcript_path`. A session whose transcript has been deleted is reopened from
 its **event log** instead: `load_eventlog` reads the persisted log back into the same
 `EventLog` the extractor would have produced, so a digest survives its source (vikunja#873).
-Transcripts age out at 30 days while `eventlogs/` has no cleanup policy, so the log is the
+Transcripts age out after `cleanupPeriodDays` (default 30) while `eventlogs/` has no cleanup policy, so the log is the
 durable copy. Only a session `recover` reopens is ever replayed — an orphaned log whose digest
 is already real is left alone. A session with neither input is still reported rather than
 reopened; there is genuinely nothing to summarize.

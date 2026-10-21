@@ -21,7 +21,7 @@ in `pipeline.py` rather than living inside the extractor.
 
 **2. Transcripts are read-only.**
 Never write to `~/.claude/projects/*/*.jsonl`. They are the only durable record of what
-happened and Claude Code already expires them after 30 days. `test_extract_never_writes_to_the_transcript`
+happened and Claude Code already deletes them `cleanupPeriodDays` after their last write (default 30, configurable). `test_extract_never_writes_to_the_transcript`
 asserts this on content *and* mtime; if it becomes inconvenient, the code is wrong.
 
 **3. Every string entering the event log goes through `Redactor`.**
@@ -191,8 +191,8 @@ via the pipeline, and `recover`'s anchor stamping. A writer that skips this turn
 on correct data. `sha256` hashes the **block**: a file hash goes stale on every later append.
 
 **18. Event logs are kept indefinitely. That is a decision, not a missing feature.**
-Decided by the operator on 2026-09-24 (vikunja#954). Claude Code deletes a transcript 30 days
-after its last write, and after that the event log is the **only** source a digest can be
+Decided by the operator on 2026-09-24 (vikunja#954). Claude Code deletes a transcript
+`cleanupPeriodDays` after its last write (default 30, configurable), and after that the event log is the **only** source a digest can be
 re-summarized from (vikunja#873). `recover` exits `3`, needs a human, for exactly the session
 that has lost both. A retention setting that pruned event logs would turn a recoverable loss
 into that one, silently, on a timer.

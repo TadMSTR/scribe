@@ -125,7 +125,7 @@ def orphaned(cfg: Config, store: Store) -> list[SessionRow]:
     """Sessions whose transcript is gone but whose event log survives (vikunja#873).
 
     `scan` cannot reach these: it discovers from the filesystem, and the file it discovers by
-    no longer exists. Transcripts age out at 30 days (`cleanupPeriodDays` is unset, #778)
+    no longer exists. Transcripts age out after `cleanupPeriodDays` (default 30, configurable)
     while `eventlogs/` has no cleanup policy at all, so this is the set that grows.
 
     **Replay is opt-in, and the gate is the status.** Only rows a deliberate

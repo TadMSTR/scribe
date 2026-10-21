@@ -1,7 +1,10 @@
 # Every path in this repo is owned by @TadMSTR, who is automatically requested
 # for review on any pull request.
 #
-# This file is also an OSSF Scorecard check (Code-Review): Scorecard treats a
-# present CODEOWNERS as evidence that changes have a defined reviewer, so the
-# single line below is doing more work than it looks like.
+# OpenSSF Scorecard does not credit this file on its own. Its Code-Review check
+# looks at whether merged changes were reviewed, not at CODEOWNERS. CODEOWNERS
+# counts toward Branch-Protection, and only at Tier 4, when the branch rule
+# also requires review from code owners (ossf/scorecard docs/checks.md,
+# "Branch-Protection"). Without that rule, the line below only routes review
+# requests.
 * @TadMSTR
