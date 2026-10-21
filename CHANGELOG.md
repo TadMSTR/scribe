@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-21
+
+**Minor.** Three behaviour changes and one new exit code. scribe now corrects the wrong ticket
+refs it already detects, before they reach disk. A provider outage now delays digests without
+spending their retry budget. And `scribe run` exits `69` when that happens, so the cron's
+health check goes red instead of staying silent. No schema change (`SCHEMA_VERSION` stays at
+2), and `record_version` stays at 1 because the new run-record field is additive. One new
+config key, which defaults on, so existing configs need no edit.
+
+### Added
+
+- **The id-conflation rewrite** (#1188 (id 1271) item 2a). A `#N` that the QC gate rejected
+  because the log holds `N` only as an internal id (`task_id=N`, `"id": N`, `/tasks/N`) is
+  rewritten to `id N` before the block is written. Over 14 days, 60 of 61 ticket findings
+  were this. Every one checked against the tracker named nothing, or an unrelated ticket,
+  and those refs were reaching every agent's SessionStart injection.
+  - It runs strictly AFTER grading, so QC and the run record still measure the model's own
+    output.
+  - Grounded refs, `coincidental-number` and `absent` claims, and scribe's own markers are
+    left alone. `#N (id N)` collapses to `id N`.
+  - Counted as `ticket_refs_rewritten` in the session result, the run record (`null` on
+    backfill), the `scribe.qc.ticket_refs_rewritten` span attribute and the sweep totals,
+    and printed in the sweep summary.
+  - Off switch: `[qc] rewrite_id_conflations = false`, for a tracker whose `#N` IS its id.
+  - Historical digests are not rewritten.
+- **`EXIT_PROVIDER_UNAVAILABLE = 69`** for `scribe run` (sysexits `EX_UNAVAILABLE`), returned
+  when a sweep found the provider down. It is clear of 0, 1, 2 and 75. A wrapper that treats
+  only `0` and its lock-skip code as success reports it as a failure with no change.
+  Documented in the README, under "When the provider is down", and in AGENTS.md invariant 19.
+
+### Changed
+
+- **A provider outage leaves sessions pending** (#1188 (id 1271) item 4). There is no
+  fallback provider; a late digest is acceptable. If a session's last attempt failed with
+  `ProviderError.unavailable` (a transport error or timeout, a 429, a 5xx, or a `claude-cli`
+  timeout or exit 124/142), scribe writes no placeholder, makes no state write and spends none
+  of `MAX_PROVISIONAL_ATTEMPTS`. The session is re-offered next sweep. After the first
+  deferral the sweep stops calling the provider, and the summary prints
+  `!! provider unavailable: N deferred, M not attempted`. An unparseable envelope, or any other
+  4xx, still goes provisional and spends the budget, because either can be the input's fault.
+- **The system prompt teaches `#N (id M)`.** When the log shows both, write `#N (id M)`. When
+  it shows only an id, write `id M`. **`prompt_sha256` changes** from `110d550b…` to
+  `98a39128…`, so `qc-report --by prompt` separates the populations before and after.
+- **A backticked path whose root the log never names is no longer grounded by token
+  co-occurrence** (#908 (id 991) option 2). `~/claude/...` used to ground against a log
+  holding `~/.claude/...`. Over the 980-block corpus this is +2 findings, both wrong paths,
+  and 0 removed. Option 1 (rerouting backticked paths to the path rule) was re-measured at
+  +3 net and is still not done.
+- **An escaped JSON id is recognised as an id context.** `{\"id\": 1079}` inside a
+  serialized tool result used to fall through to `coincidental-number`; all 7 findings in that
+  bucket were this shape. They are now `id-conflation`, and are rewritten.
+- **`suffix` and `id-conflation` are no longer called gate artefacts** in the `qc_report`,
+  `runrecord` and `qc_survey` docstrings. Measured: `id-conflation` is a true finding, and
+  `suffix` is a mix. Of 35 hand-graded `suffix` findings, 26 were true claims the gate cannot
+  ground and 9 were true positives, mostly a real file under the wrong directory. Widening
+  `ADJACENCY_WINDOW` prices below invariant 16's bar (1.17 true per false at 200), so no
+  tolerance changed.
+
+### Fixed
+
+- **The default-budget guard no longer depends on a transcript that expires** (#966 (id 1049)).
+  `test_budget` now runs on a synthetic transcript built from
+  `tests/fixtures/budget-profile.json`, which holds the reference session's sizes and no
+  content. It reproduces the real ladder at every rung. The real-transcript test stays as a
+  second check, and fails instead of skipping where `SCRIBE_REQUIRE_BUDGET_REFERENCE` is set.
+- **Docs overstated two things** (#968 (id 1051)).
+  - The `.github/CODEOWNERS` header credited the file to Scorecard's Code-Review check. It
+    counts toward Branch-Protection, at Tier 4, with "require review from code owners".
+  - AGENTS.md invariants 2 and 18 and the README stated a fixed 30-day transcript expiry. It
+    is `cleanupPeriodDays`, whose default is 30. The 0.11.0 entry below says the same and is
+    left as written.
+
 ## [0.12.1] — 2026-10-06
 
 Dependency release. No application code changed.
