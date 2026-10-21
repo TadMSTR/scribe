@@ -29,10 +29,10 @@ so existing configs need no edit.
     the backup fails, the file is not touched.
   - Every changed block gets an `index.jsonl` line, so `scribe index --check` stays clean.
   - Idempotent: a second apply changes nothing and writes nothing.
-  - Skipped and counted: provisional blocks, torn blocks, and blocks with a missing or
-    unloadable event log.
-  - Exit codes: `0` nothing to do or applied, `1` corrections pending (dry run), `2` usage or
-    config error, `4` the tool failed, `75` locked. Documented in the README and in AGENTS.md
+  - Skipped and counted: provisional blocks, torn blocks, blocks with a missing or
+    unloadable event log, and files that are not valid UTF-8.
+  - Exit codes: `0` nothing to do or all applied, `1` corrections pending (a dry run, or a
+    file `--apply` left alone), `2` usage or config error, `4` the tool failed, `75` locked. Documented in the README and in AGENTS.md
     invariant 20.
 - **`corrections.jsonl`**, the corrections ledger. It gets one line per block edited after the
   model wrote it, with `reason`, `source` (`live` or `correct`), `digest`, `session_id`,
@@ -52,6 +52,24 @@ so existing configs need no edit.
 - `pipeline._after_write` is now a shared `after_write`: frontmatter, the manifest line, the
   ledger record and the hook, in that order, for one or many blocks in a file. The sweep and
   `correct` both call it, so the two writers cannot drift on what follows a write.
+
+### Security
+
+Fixes from this release's own pre-merge audit (scribe-digest-corrections-2026-10: 2 Low,
+1 Info), applied before it shipped.
+
+- **F-01 (Low): a digest containing a CR was skipped forever, and `--apply` exited 0.** The scan
+  read through `read_text`, which translates newlines, and the pre-write check compared that
+  with the raw bytes, so a CR-bearing file always looked changed on disk. `correct` now reads
+  and writes exact bytes. A file `--apply` does leave alone now exits `1` (corrections pending)
+  instead of `0`.
+- **F-02 (Low): a failure partway through `--apply` threw the progress report away.** A replace
+  that failed (a full disk, say) reached `main`'s handler, and the operator got a traceback
+  with no count and no backup path. Failures are now caught per file: the run stops, exits
+  `4`, and prints what it corrected and where the backup is. A temp file left by the failed
+  replace is removed.
+- **F-03 (Info): invalid UTF-8 anywhere in a corrected file became U+FFFD**, unrecorded by the
+  ledger. Such a file is now skipped and counted (`undecodable_files`).
 
 ### Notes
 

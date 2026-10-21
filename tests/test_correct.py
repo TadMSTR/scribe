@@ -217,7 +217,13 @@ def test_json_lists_every_edit(cfg, tmp_path, capsys) -> None:
     assert _run(cfg, tmp_path, "--json") == EXIT_PENDING
     payload = json.loads(capsys.readouterr().out)
     assert payload["blocks_to_change"] == 2
-    assert payload["skipped"] == {"no_eventlog": 1, "bad_eventlog": 0, "provisional": 1, "torn": 1}
+    assert payload["skipped"] == {
+        "no_eventlog": 1,
+        "bad_eventlog": 0,
+        "provisional": 1,
+        "torn": 1,
+        "undecodable_files": 0,
+    }
     assert sorted(e["before"] for e in payload["edits"]) == ["#541", "#655"]
     assert all(e["line"] == 2 for e in payload["edits"])
 
@@ -360,6 +366,77 @@ def test_a_file_changed_after_the_scan_is_left_alone(cfg, tmp_path) -> None:
     assert done.skipped_changed == ["research/2026-09-23.md"]
     assert "#541 today" in md.read_text()
     assert done.files == 1
+
+
+def test_a_digest_with_carriage_returns_is_corrected_and_keeps_them(cfg, tmp_path) -> None:
+    """Audit F-01. `read_text` translates `\r`, so a scan through it never matched the bytes
+    re-read before the write: the file was skipped as changed on disk on every run, with exit 0."""
+    md = _research(cfg)
+    with md.open("ab") as fh:
+        fh.write(b"\nmodel prose with a CRLF\r\nand a lone CR\r here\n")
+    write(cfg, rebuild(cfg))
+    assert _run(cfg, tmp_path, "--apply", "--no-lock") == EXIT_OK
+    data = md.read_bytes()
+    assert b"id 541 today" in data
+    assert b"CRLF\r\n" in data and b"CR\r here" in data
+    assert check(cfg).clean
+    (rec,) = [r for r in _ledger(cfg) if r["session_id"] == "s-conflated"]
+    manifest = [json.loads(ln) for ln in cfg.manifest_file().read_text().splitlines()]
+    assert any(m["sha256"] == rec["sha256_after"] for m in manifest)
+    assert _run(cfg, tmp_path) == EXIT_OK
+
+
+def test_a_file_left_alone_makes_apply_exit_pending(cfg, tmp_path, monkeypatch, capsys) -> None:
+    """Audit F-01, second half: a skipped file is a correction still pending, not a success."""
+    real_scan = correct_cli.scan
+
+    def scan_then_touch(c):
+        found = real_scan(c)
+        md = _research(c)
+        md.write_text(md.read_text() + "\n")
+        return found
+
+    monkeypatch.setattr(correct_cli, "scan", scan_then_touch)
+    assert _run(cfg, tmp_path, "--apply", "--no-lock") == EXIT_PENDING
+    assert "changed on disk after the scan" in capsys.readouterr().out
+
+
+def test_a_failed_replace_still_reports_progress(cfg, tmp_path, monkeypatch, capsys) -> None:
+    """Audit F-02. The second file's replace fails: the first stays corrected and recorded,
+    and the operator is told so, with the backup path, rather than handed a bare traceback."""
+    real = correct_cli.atomic_replace
+    calls = []
+
+    def failing(path, text):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        real(path, text)
+
+    monkeypatch.setattr(correct_cli, "atomic_replace", failing)
+    assert _run(cfg, tmp_path, "--apply", "--no-lock") == EXIT_INTERNAL
+    out = capsys.readouterr().out
+    (run,) = list(cfg.backup_root().iterdir())
+    assert str(run) in out
+    assert "1 block(s) corrected" in out
+    assert "replace of research/2026-09-23.md failed" in out
+    assert "#541 today" in _research(cfg).read_text()
+    assert not list(Path(cfg.output_dir).rglob("*.tmp"))
+    assert len(_ledger(cfg)) == 1
+    assert check(cfg).clean
+
+
+def test_a_file_that_is_not_utf8_is_skipped_and_counted(cfg, tmp_path, capsys) -> None:
+    """Audit F-03. Decoding with `errors="replace"` and writing back would rewrite the bad byte
+    in a block `correct` never meant to touch, and the ledger could not say so."""
+    md = _research(cfg)
+    with md.open("ab") as fh:
+        fh.write(b"\nstray byte \xff here\n")
+    before = md.read_bytes()
+    assert _run(cfg, tmp_path, "--apply", "--no-lock") == EXIT_OK
+    assert md.read_bytes() == before
+    assert "1 file(s) not valid UTF-8" in capsys.readouterr().out
+    assert scan(cfg).undecodable == 1
 
 
 def test_with_the_rewrite_off_correct_does_nothing(cfg, tmp_path) -> None:

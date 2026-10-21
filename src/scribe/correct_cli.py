@@ -16,7 +16,15 @@ the live path would. Nothing else:
   * provisional blocks are skipped (the next sweep replaces them anyway);
   * torn blocks are skipped, as `manifest.rebuild` skips them: their extent is unknown;
   * a block whose event log is missing or unloadable is skipped and COUNTED, never guessed.
-    The gate needs the log to know a number is an id; without it, the ref stays as written.
+    The gate needs the log to know a number is an id; without it, the ref stays as written;
+  * a file that is not valid UTF-8 is skipped and counted (audit F-03). Decoding it with
+    `errors="replace"` and writing it back would turn every bad byte, in blocks this never
+    meant to touch, into U+FFFD -- an edit the ledger could not describe.
+
+**Bytes in, bytes out.** A file is read as bytes and decoded strictly, with no newline
+translation, and that exact text is what is spliced and written back. A `\r` a model put in a
+digest survives. `Path.read_text` translates newlines, so comparing its result with the bytes
+before the write made every CR-bearing file look changed on disk, forever (audit F-01).
 
 **`--apply` needs the sweep's lock.** scribe has no lock of its own: the cron line's `flock -n
 -E 75 <lock>` is the only mutual exclusion. A `correct --apply` racing the sweep would
@@ -31,7 +39,9 @@ for a corpus no sweep writes to.
 `writeback.atomic_replace`; then `pipeline.after_write`, the sequence the sweep runs -- a
 manifest line per changed block (invariant 17: without it `scribe index --check` goes red on
 correct data), a `source: correct` ledger record per changed block, and the hook once. A file
-whose backup cannot be written is not touched, and the run stops there.
+whose backup cannot be written is not touched, and the run stops there. So does any failure
+after that, in the replace or in `after_write`; the report still prints what was done before it
+and where the backup is (audit F-02).
 
 **Idempotent.** `id 1258` is not a ticket claim, so a second `--apply` finds nothing, writes no
 ledger line, makes no backup directory and exits 0.
@@ -43,14 +53,15 @@ report fewer id conflations after an apply. That is this command, not the prompt
 ## Exit codes
 
 ===  ========================================================================
-  0  Nothing to correct, or `--apply` completed.
-  1  Dry run: corrections are pending. The same contract as `recover`'s dry run, so
-     a monitor can alert on it.
+  0  Nothing to correct, or `--apply` corrected everything it found.
+  1  Corrections are pending: a dry run found some, or `--apply` left a file alone
+     because it changed on disk after the scan. The same contract as `recover`'s dry
+     run, so a monitor can alert on it.
   2  Usage or config error, including `--apply` with neither `--lock` nor
      `--no-lock`, and a lock file that cannot be opened.
   4  The tool FAILED (as `recover`'s `EXIT_INTERNAL`): a bug, an environment failure,
-     or a backup that could not be written. Files corrected before the failure stay
-     corrected and recorded; the report says how far it got.
+     or a backup or replace that could not be written. Files corrected before the
+     failure stay corrected and recorded; the report says how far it got.
  75  The lock is held -- a sweep is running. Nothing was written. Re-run later.
 ===  ========================================================================
 
@@ -62,6 +73,7 @@ parses digest text and that note's premise does not hold here.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -74,9 +86,9 @@ from pathlib import Path
 from . import corrections
 from .config import Config, ConfigError, load
 from .eventlog import EventLogError, load_eventlog, session_eventlog
-from .manifest import _record
+from .manifest import record_for_turn
 from .paths import DIR_MODE, FILE_MODE, secure_dir
-from .pipeline import after_write
+from .pipeline import AfterWrite, after_write
 from .qc import check_digest, id_conflation_edits
 from .writeback import ANCHOR_RE, atomic_replace, paired_blocks
 
@@ -119,9 +131,11 @@ class Scan:
     bad_eventlog: int = 0
     provisional: int = 0
     torn: int = 0
+    #: Files skipped whole because they are not valid UTF-8.
+    undecodable: int = 0
     changes: list[Change] = field(default_factory=list)
-    #: path -> the text the changes were computed against.
-    texts: dict[Path, str] = field(default_factory=dict)
+    #: path -> the exact bytes the changes were computed against.
+    raws: dict[Path, bytes] = field(default_factory=dict)
 
     @property
     def refs(self) -> int:
@@ -140,7 +154,12 @@ def scan(cfg: Config) -> Scan:
     for md in sorted(root.rglob("*.md")):
         if not md.is_file():
             continue
-        text = md.read_text(encoding="utf-8", errors="replace")
+        raw = md.read_bytes()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            out.undecodable += 1
+            continue
         pairs = paired_blocks(text)
         out.torn += len(list(ANCHOR_RE.finditer(text))) - len(pairs)
         for a, c in pairs:
@@ -164,7 +183,10 @@ def scan(cfg: Config) -> Scan:
             new_body, edits = id_conflation_edits(body, check_digest(body, log), first_line=1)
             if not edits:
                 continue
-            rec = _record(cfg, md, text, a, c)
+            # The hash `index.jsonl` holds for this block, derived by the manifest's own code, so
+            # `sha256_before` and `sha256_after` are the same kind of hash however the file
+            # spells its newlines.
+            rec = record_for_turn(cfg, md, turn_uuid)
             out.changes.append(
                 Change(
                     path=md,
@@ -178,7 +200,7 @@ def scan(cfg: Config) -> Scan:
                     edits=edits,
                 )
             )
-            out.texts[md] = text
+            out.raws[md] = raw
     return out
 
 
@@ -251,20 +273,25 @@ def apply(cfg: Config, found: Scan, *, now: datetime | None = None) -> Applied:
         by_file.setdefault(ch.path, []).append(ch)
     for path in sorted(by_file):
         changes = by_file[path]
-        raw = path.read_bytes()
-        if raw.decode("utf-8", errors="replace") != found.texts[path]:
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            done.aborted = f"re-read of {path.relative_to(root)} failed: {exc}"
+            break
+        if raw != found.raws[path]:
             # Not under a held lock, or something other than scribe wrote it. The spans are
             # stale and splicing them would land the edit somewhere arbitrary.
             done.skipped_changed.append(str(path.relative_to(root)))
             continue
-        text = found.texts[path]
+        original = raw.decode("utf-8")
+        text = original
         # Reverse order, so each splice cannot shift the spans not yet applied.
         for ch in sorted(changes, key=lambda c: c.span, reverse=True):
             start, end = ch.span
             text = text[:start] + ch.body + text[end:]
         # The rename proves the write was whole, not that the content is right (FW-13). A
         # splice must leave every block where it was: same turns, same order, same count.
-        before_turns = [a.group(2) for a, _c in paired_blocks(found.texts[path])]
+        before_turns = [a.group(2) for a, _c in paired_blocks(original)]
         if [a.group(2) for a, _c in paired_blocks(text)] != before_turns:
             done.aborted = f"{path.relative_to(root)}: the splice moved a block, file not touched"
             break
@@ -276,28 +303,24 @@ def apply(cfg: Config, found: Scan, *, now: datetime | None = None) -> Applied:
         except (OSError, CorrectError) as exc:
             done.aborted = f"backup of {path.relative_to(root)} failed, file not touched: {exc}"
             break
-        atomic_replace(path, text)
+        rel = str(path.relative_to(root))
+        try:
+            atomic_replace(path, text)
+        except OSError as exc:
+            # Earlier files are corrected and recorded, and the backup exists: the report has
+            # to survive this, so it is recorded here rather than raised (audit F-02).
+            with contextlib.suppress(OSError):
+                path.with_name(path.name + ".tmp").unlink(missing_ok=True)
+            done.aborted = f"replace of {rel} failed, file not touched: {type(exc).__name__}: {exc}"
+            break
         done.files += 1
         done.blocks += len(changes)
         done.refs += sum(len(c.edits) for c in changes)
-        written = after_write(
-            cfg,
-            path,
-            [
-                (
-                    ch.turn_uuid,
-                    {
-                        "source": corrections.SOURCE_CORRECT,
-                        "session_id": ch.session_id,
-                        "turn_uuid": ch.turn_uuid,
-                        "edits": ch.edits,
-                        "sha256_before": ch.sha256_before,
-                    },
-                )
-                for ch in changes
-            ],
-        )
-        rel = str(path.relative_to(root))
+        try:
+            written = _after_write(cfg, path, changes)
+        except Exception as exc:  # `after_write` counts its own failures; this is a bug's net
+            done.aborted = f"{rel} was corrected, then its post-write steps failed: {exc!r}"
+            break
         done.corrections_appended += written.corrections_appended
         done.manifest_errors += [f"{rel} turn:{t}: {e}" for t, e in written.manifest_errors.items()]
         done.correction_errors += [
@@ -310,6 +333,27 @@ def apply(cfg: Config, found: Scan, *, now: datetime | None = None) -> Applied:
         elif written.hook == "failed":
             done.hook_failed.append(f"{rel}: {written.hook_error}")
     return done
+
+
+def _after_write(cfg: Config, path: Path, changes: list[Change]) -> AfterWrite:
+    """`pipeline.after_write` for every changed block in one file, as `source: correct`."""
+    return after_write(
+        cfg,
+        path,
+        [
+            (
+                ch.turn_uuid,
+                {
+                    "source": corrections.SOURCE_CORRECT,
+                    "session_id": ch.session_id,
+                    "turn_uuid": ch.turn_uuid,
+                    "edits": ch.edits,
+                    "sha256_before": ch.sha256_before,
+                },
+            )
+            for ch in changes
+        ],
+    )
 
 
 def _edits(found: Scan) -> list[dict]:
@@ -338,6 +382,7 @@ def _report(found: Scan) -> dict:
             "bad_eventlog": found.bad_eventlog,
             "provisional": found.provisional,
             "torn": found.torn,
+            "undecodable_files": found.undecodable,
         },
     }
 
@@ -351,7 +396,8 @@ def _print_scan(found: Scan, mode: str) -> None:
     )
     print(
         f"  skipped: {s['no_eventlog']} without an event log, {s['bad_eventlog']} with an "
-        f"unloadable event log, {s['provisional']} provisional, {s['torn']} torn"
+        f"unloadable event log, {s['provisional']} provisional, {s['torn']} torn, "
+        f"{s['undecodable_files']} file(s) not valid UTF-8"
     )
 
 
@@ -432,7 +478,10 @@ def main(argv: list[str] | None = None) -> int:
             _print_applied(cfg, done)
 
     if done is not None:
-        return EXIT_INTERNAL if done.aborted else EXIT_OK
+        if done.aborted:
+            return EXIT_INTERNAL
+        # A file left alone is a correction still pending, not a completed apply (audit F-01).
+        return EXIT_PENDING if done.skipped_changed else EXIT_OK
     return EXIT_PENDING if found.changes and not args.apply else EXIT_OK
 
 

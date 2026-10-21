@@ -666,15 +666,17 @@ python -m scribe correct --config scribe.toml --apply --lock ~/.local/state/scri
 - **The manifest stays clean.** Every changed block gets an `index.jsonl` line, through the
   same post-write sequence the sweep runs, so `scribe index --check` passes afterwards.
 - **Idempotent.** `id 1258` is not a ticket claim, so a second `--apply` finds nothing.
-- Skipped and counted, never guessed: provisional blocks, torn blocks, and blocks whose event
-  log is missing or unloadable.
+- Skipped and counted, never guessed: provisional blocks, torn blocks, blocks whose event
+  log is missing or unloadable, and whole files that are not valid UTF-8. Rewriting one of
+  those would replace every bad byte with U+FFFD, an edit the ledger could not describe.
+- Files are read and written as exact bytes, so a `\r` in a digest survives the correction.
 
 | code | meaning |
 |---:|---|
-| `0` | nothing to correct, or `--apply` completed |
-| `1` | dry run: corrections are pending (as `recover`'s dry run, so a monitor can alert on it) |
+| `0` | nothing to correct, or `--apply` corrected everything it found |
+| `1` | corrections are pending: a dry run found some, or `--apply` left a file alone because it changed on disk after the scan (as `recover`'s dry run, so a monitor can alert on it) |
 | `2` | usage or config error, including `--apply` with neither `--lock` nor `--no-lock` |
-| `4` | **the tool failed**, or a backup could not be written; the report says how far it got |
+| `4` | **the tool failed**, or a backup or replace could not be written; the report still prints what was corrected and where the backup is |
 | `75` | the lock is held: a sweep is running and nothing was written |
 
 **After an apply, `qc-survey` reports fewer id conflations.** It grades what is on disk. That is

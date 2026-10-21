@@ -253,9 +253,17 @@ and a read-modify-replace racing `append_block` drops the block the sweep just a
 it is held, or refuses with `2` unless `--no-lock` says no sweep writes this corpus. A file is
 replaced only after its original bytes are in `<backup_dir>/correct-<UTC>/`; a failed backup
 stops the run with `4` and leaves the file alone. The exit codes are a contract, like
-`recover`'s: `0` nothing to do or applied, `1` the dry run found corrections pending, `2` usage
-or config, `4` the tool failed, `75` locked. The dry run's `1` is deliberate, so a monitor can
-alert on pending corrections. Mutation-proven at 0.14.0: neutering the manifest append fails 10
+`recover`'s: `0` nothing to do or everything applied, `1` corrections pending (a dry run found
+some, or `--apply` left a changed file alone), `2` usage or config, `4` the tool failed, `75`
+locked. The `1` is deliberate, so a monitor can alert on pending corrections, and a skipped
+file never reads as success. A failure partway through `--apply` is caught per file, so the
+report of what was corrected, and where the backup is, survives it.
+
+**`correct` reads and writes exact bytes.** It decodes strictly, with no newline translation,
+and skips (and counts) a file that is not UTF-8. `Path.read_text` translates `\r`, and
+comparing that with the bytes before the write made every CR-bearing file look changed
+forever; `errors="replace"` would have rewritten bad bytes in blocks it never meant to touch
+(scribe-digest-corrections-2026-10 audit F-01, F-03). Mutation-proven at 0.14.0: neutering the manifest append fails 10
 tests, the backup 1, the lock 2.
 
 `correct` takes no free-form edits and has one `reason`. Add a reason when a second
