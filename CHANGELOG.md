@@ -67,6 +67,9 @@ config key, which defaults on, so existing configs need no edit.
 
 ### Fixed
 
+- **certifi 2026.7.22 → 2026.10.19** in `uv.lock` (PYSEC-2026-4320, published during this
+  build; it turned the dependency-audit gate red on `main` as well). The lock does not govern
+  what forge installs, so the deploy re-resolves it independently.
 - **The default-budget guard no longer depends on a transcript that expires** (#966 (id 1049)).
   `test_budget` now runs on a synthetic transcript built from
   `tests/fixtures/budget-profile.json`, which holds the reference session's sizes and no
