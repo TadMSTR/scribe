@@ -65,6 +65,37 @@ config key, which defaults on, so existing configs need no edit.
   `ADJACENCY_WINDOW` prices below invariant 16's bar (1.17 true per false at 200), so no
   tolerance changed.
 
+### Security
+
+Fixes from this release's own pre-merge audit (scribe-qc-integrity-2026-10, 1 Medium, 3 Low,
+1 Info), applied before it shipped.
+
+- **F-01 (Medium): one bad session could stall the sweep forever and blame the provider.**
+  The first cut of the outage path marked *every* exception from `httpx.post` as "provider
+  unavailable" and tripped the breaker on one deferral. A session whose own request could not
+  be encoded was deferred every sweep, spent nothing, and every session behind it was never
+  attempted.
+  - `unavailable` now means the endpoint did not answer: `ConnectError`, `ConnectTimeout`,
+    `PoolTimeout`, `RemoteProtocolError`, a 429 or a 5xx.
+  - Read and write timeouts and dropped streams stay retryable but are not an outage.
+  - A request that cannot be built or encoded is not retried.
+  - The breaker trips on **two** consecutive deferrals. If the provider answers the session
+    after a deferral, the deferred one is re-run onto the provisional path, so its budget
+    bounds it.
+- **F-03 (Low, pre-existing): a lone surrogate in a transcript crashed every sweep.** Valid
+  JSON can carry `\ud83d` with no low half. `write_eventlog` raised an uncaught
+  `UnicodeEncodeError`, so `scribe run` exited 1 on every sweep, and each crash left a 0600
+  temp file behind. Lone surrogates are now replaced with U+FFFD where a transcript record is
+  decoded. `write_eventlog` and its caller also catch `ValueError` and remove the temp file.
+- **F-02 (Low): a quadratic alternative in `_ID_CONTEXT`.** `\bid\s*[:=]?\s*` cost
+  O(n²) on `id` followed by n spaces, and the rewrite searched again. The alternative is now
+  `\bid(?:\s*[:=])?\s*`. The conflation verdict is carried on `Finding.id_conflation`, so
+  `rewrite_id_conflations(text, report)` no longer searches the corpus at all. The verdicts
+  are unchanged across the whole corpus.
+- **F-04 (Low): certifi floor `>=2026.10.19,<2028`** in `[project.dependencies]`, so a wheel
+  deploy upgrades the CA bundle instead of keeping an installed vulnerable one.
+- **F-05 (Info):** `#N (ID N)` now collapses like `#N (id N)`.
+
 ### Fixed
 
 - **certifi 2026.7.22 → 2026.10.19** in `uv.lock` (PYSEC-2026-4320, published during this

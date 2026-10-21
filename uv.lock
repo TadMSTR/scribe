@@ -481,6 +481,7 @@ name = "scribe"
 version = "0.13.0"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "httpx" },
 ]
 
@@ -498,6 +499,7 @@ telemetry = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2026.10.19,<2028" },
     { name = "httpx", specifier = ">=0.27,<0.29" },
     { name = "opentelemetry-api", marker = "extra == 'telemetry'", specifier = ">=1.45.0,<2" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'telemetry'", specifier = ">=1.42,<2" },
