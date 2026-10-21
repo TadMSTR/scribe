@@ -751,10 +751,35 @@ def span_grounded(claim: str, kind: str, allowed: dict[str, set[str]], corpus: s
 
     What these routes actually needed was `_CMD_RE`: its delimiter mis-pairing was manufacturing
     22 of their 65 findings out of prose no model ever wrote.
+
+    **One narrowing, for a backticked PATH (#908 (id 991) option 2).** `_TOKEN_RE` drops `.`,
+    `~` and `/`, so `~/claude/comms/...` tokenizes exactly like `~/.claude/comms/...`. A
+    one-character difference that names a different directory was grounded by co-occurrence.
+    So a path-shaped span may not be grounded by co-occurrence unless its root (`_path_root`) is
+    in the log as written. Measured 2026-10-21 over 980 blocks: of 102 path-shaped spans grounded
+    only by co-occurrence, this fails 2, `~/claude/...` and `~/memory/...`. Both are wrong paths,
+    checked against the filesystem, and no true claim is lost. Rerouting these spans to
+    `path_grounded` instead, #908's option 1, is still net positive (8 findings removed, 11
+    added), so it is not done.
     """
     if kind == CLAIM_COMMAND and _in_category(claim, allowed["commands"]):
         return True
-    return claim in corpus or _tokens_co_occur(claim, corpus)
+    if claim in corpus:
+        return True
+    if _PATH_RE.fullmatch(claim) and _path_root(claim) not in corpus:
+        return False
+    return _tokens_co_occur(claim, corpus)
+
+
+def _path_root(claim: str) -> str:
+    """A path claim's first `MIN_PREFIX_SEGMENTS` segments, with its leading `/` if absolute.
+
+    `~/.claude` for `~/.claude/comms/x.md`, `/home/user` for `/home/user/repos/x`. It is the part
+    of a path that says WHICH tree it is in, and the part co-occurrence cannot check. The same
+    floor as composition's prefix, for the same reason: one segment (`/home`, `~`) says nothing.
+    """
+    lead = "/" if claim.startswith("/") else ""
+    return lead + "/".join(path_segments(claim)[:MIN_PREFIX_SEGMENTS])
 
 
 def _ticket_in_corpus(claim: str, corpus: str) -> bool:

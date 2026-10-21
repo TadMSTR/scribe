@@ -73,6 +73,9 @@ HOME_EXPANSION = "home-expansion"
 COMPOSED = "composed"
 #: Some trailing run of segments is present, but no split of the claim has *both* halves
 #: present. Weaker evidence than `COMPOSED`, and the bucket where a floor has to do real work.
+#: **Mixed, measured.** 35 hand-graded on 2026-10-21: 26 true claims the gate cannot ground
+#: (mostly the directory and the filename both logged, but beyond `ADJACENCY_WINDOW`), and 9
+#: true positives (mostly a real filename under the wrong directory). Neither half is noise.
 SUFFIX = "suffix"
 #: Not even the basename appears anywhere in the corpus. **The control set.** Whatever
 #: tolerance lands, every member of this bucket must still fail — a gate that passes

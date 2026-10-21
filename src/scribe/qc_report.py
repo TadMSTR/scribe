@@ -13,9 +13,22 @@ Two statistics are reported and they are **not** the same number:
 
 Neither is wrong. Comparing one against the other is.
 
-Findings are broken out by kind and by bucket, never only pooled. Most of today's findings are
-gate artefacts (`suffix`, `id-conflation`), and a pooled count moves every time the gate is
-tuned. `absent` is the bucket that says the model invented something.
+Findings are broken out by kind and by bucket, never only pooled, because the two largest
+buckets mean different things and a pooled count moves every time the gate is tuned. Both were
+once called "gate artefacts", and measured 2026-10-21 neither is (#1188 (id 1271) items 2a/2b):
+
+  * `id-conflation` is a TRUE finding. The model wrote a tracker's internal id as a `#number`.
+    6 of 6 checked against the tracker named nothing or an unrelated ticket. 0.13.0 rewrites
+    these to `id N` on disk, AFTER grading, so the bucket still counts what the model wrote
+    and is how the prompt's `#N (id M)` rule is judged.
+  * `suffix` is MIXED. Of 35 hand-graded over 14 days, 26 were true claims the gate cannot
+    ground: 21 had the directory and the filename both in the log, more than
+    `ADJACENCY_WINDOW` apart; 5 were reconstructed through a glob or a brace expansion. 9 were
+    true positives, 6 of them a real filename filed under the wrong directory. Widening the
+    window does not clear invariant 16's bar (1.17 true per false at 200, 0.87 unbounded), so
+    the bucket is left as it is.
+
+`absent` is the bucket that says the model invented something outright.
 
 A sudden move in `absent` per session with no change in `scribe_version` or `prompt_sha256`
 is the practical signal of an upstream model change. `model_resolved` will not show it on a

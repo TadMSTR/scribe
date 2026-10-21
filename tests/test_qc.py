@@ -1180,3 +1180,43 @@ def test_the_conflation_predicate_is_the_one_the_gate_and_survey_use() -> None:
     assert is_id_conflation("#73", corpus) is False
     assert classify_ticket_claim("#541", corpus) == ID_CONFLATION
     assert "internal id" in _ticket_detail("#541", corpus)
+
+
+# --- #908 (id 991) option 2: co-occurrence cannot invent the root of a path ------------------
+
+
+def _dotted_log() -> EventLog:
+    return _ticket_log("wrote ~/.claude/comms/artifacts/build-plans/x/handoff.md")
+
+
+def test_a_backticked_path_missing_its_leading_dot_is_not_grounded() -> None:
+    """`~/claude/...` and `~/.claude/...` share every `_TOKEN_RE` token and name different trees."""
+    report = check_digest(
+        "- Wrote `~/claude/comms/artifacts/build-plans/x/handoff.md`\n", _dotted_log()
+    )
+    assert [f.claim for f in report.findings] == [
+        "~/claude/comms/artifacts/build-plans/x/handoff.md"
+    ]
+
+
+def test_the_same_path_with_its_dot_still_grounds() -> None:
+    report = check_digest(
+        "- Wrote `~/.claude/comms/artifacts/build-plans/x/handoff.md`\n", _dotted_log()
+    )
+    assert report.findings == []
+
+
+def test_a_path_with_a_real_root_still_grounds_by_co_occurrence() -> None:
+    """The narrowing touches the root only: a compressed path under a root the log names keeps
+    the co-occurrence route it had."""
+    log = _ticket_log("cd ~/.claude/comms && ls artifacts/build-plans/x and then handoff.md")
+    corpus = log.grounding_text().lower()
+    claim = "~/.claude/comms/artifacts/build-plans/x/handoff.md"
+    assert claim not in corpus
+    assert span_grounded(claim, CLAIM_IDENTIFIER, grounding_terms(log), corpus) is True
+
+
+def test_the_root_rule_does_not_touch_spans_that_are_not_paths() -> None:
+    log = _ticket_log("the stage runs mistral small latest")
+    corpus = log.grounding_text().lower()
+    assert span_grounded("mistral small latest", CLAIM_IDENTIFIER, grounding_terms(log), corpus)
