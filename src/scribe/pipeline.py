@@ -868,6 +868,8 @@ def run_once(
     # suspect still pending when the loop ends is re-run if it did. The cost, accepted: an
     # outage that starts just before the last session spends one provisional attempt on it.
     #
+    # SECURITY[accepted]: two adjacent suspects trip the breaker.
+    # Audit: 2026-10-21/scribe-qc-integrity-2026-10 R2-01.
     # **Residual, accepted (Ted, 2026-10-21):** two suspects in a row with no answered session
     # before them still trip the breaker. Telling that from an outage would need a per-session
     # deferral count in the state DB. It takes two sessions whose own requests each make the
