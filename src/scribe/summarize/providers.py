@@ -77,6 +77,13 @@ class Provider:
         raise NotImplementedError
 
 
+def _endpoint_down_errors() -> tuple[type[BaseException], ...]:
+    """The httpx errors that mean the endpoint did not answer at all."""
+    import httpx
+
+    return (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.RemoteProtocolError)
+
+
 class OpenAICompatibleProvider(Provider):
     """Chat-completions over HTTP. Covers Mistral and Ollama.
 
@@ -97,6 +104,7 @@ class OpenAICompatibleProvider(Provider):
     def complete(self, system: str, user: str, *, timeout: float = 120.0) -> Completion:
         import httpx
 
+        endpoint_down = _endpoint_down_errors()
         headers = {"Content-Type": "application/json"}
         # Resolved HERE, not at construction and not at config load.
         key = self.cfg.resolve_api_key()
@@ -120,9 +128,26 @@ class OpenAICompatibleProvider(Provider):
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
         try:
             resp = httpx.post(url, json=payload, headers=headers, timeout=timeout)
-        except Exception as exc:  # httpx.TransportError and friends
+        except endpoint_down as exc:
             raise ProviderError(
-                f"{self.name}: transport error: {exc}", retryable=True, unavailable=True
+                f"{self.name}: endpoint unreachable: {type(exc).__name__}: {exc}",
+                retryable=True,
+                unavailable=True,
+            ) from exc
+        except httpx.TransportError as exc:
+            # Reached the endpoint, or might have, and then failed: a read/write timeout or a
+            # dropped stream. Worth retrying, and NOT an outage, because a slow answer can be a
+            # property of the input -- a session big enough that the model always needs more
+            # than `timeout` would otherwise be deferred forever (audit F-01).
+            raise ProviderError(
+                f"{self.name}: transport error: {type(exc).__name__}: {exc}", retryable=True
+            ) from exc
+        except Exception as exc:
+            # Raised before the request left: the payload could not be built or encoded. That
+            # is determined by the input, so retrying buys the same error (audit F-01).
+            raise ProviderError(
+                f"{self.name}: request could not be sent: {type(exc).__name__}: {exc}",
+                retryable=False,
             ) from exc
 
         if resp.status_code == 429:

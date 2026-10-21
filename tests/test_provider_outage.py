@@ -24,7 +24,7 @@ from scribe.config import Config, ProviderConfig, StageConfig
 from scribe.pipeline import output_root, run_once, summarize_run
 from scribe.run_cli import EXIT_PROVIDER_UNAVAILABLE
 from scribe.run_cli import main as run_main
-from scribe.state import STATUS_PROVISIONAL, Store
+from scribe.state import MAX_PROVISIONAL_ATTEMPTS, STATUS_PROVISIONAL, Store
 from scribe.summarize.providers import Completion, Provider, ProviderError
 from scribe.summarize.runner import summarize_log
 
@@ -101,17 +101,18 @@ def _sweep(cfg, store, provider):
     return run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: provider)
 
 
-def test_an_outage_defers_the_first_session_and_skips_the_rest(env) -> None:
+def test_an_outage_is_confirmed_by_a_second_session_then_skips_the_rest(env) -> None:
     cfg, store, _paths = env
     down = Down()
     results = _sweep(cfg, store, down)
 
     assert len(results) == 3
     totals = summarize_run(results)
-    assert totals["deferred"] == 1
-    assert totals["not_attempted"] == 2
-    # The breaker: one session's 3 attempts, and nothing after it.
-    assert down.calls == 3
+    assert totals["deferred"] == 2
+    assert totals["not_attempted"] == 1
+    # The breaker: two sessions' 3 attempts each -- the suspect and its confirming probe --
+    # and nothing after them.
+    assert down.calls == 6
     # No block of any kind, placeholder included.
     assert not list(output_root(cfg).rglob("*.md"))
     assert totals["placeholders"] == 0
@@ -145,13 +146,78 @@ def test_the_next_healthy_sweep_summarizes_everything_with_no_budget_spent(env) 
 
 
 def test_an_outage_mid_sweep_keeps_the_sessions_already_done(env) -> None:
-    """The breaker trips on the session that found the provider down, not before it."""
+    """The breaker trips on the sessions that found the provider down, not before them."""
     cfg, store, _paths = env
-    results = _sweep(cfg, store, Stub(GOOD, outage(), outage(), outage()))
+    results = _sweep(cfg, store, Stub(GOOD, *[outage()] * 6))
     assert [r.summarized for r in results] == [True, False, False]
-    assert [r.deferred for r in results] == [False, True, False]
-    assert [r.not_attempted for r in results] == [False, False, True]
+    assert [r.deferred for r in results] == [False, True, True]
     assert len(list(output_root(cfg).rglob("*.md"))) == 1
+
+
+def _order(cfg, store) -> list[str]:
+    """The session ids in the order a sweep offers them. A dry run observes and processes
+    nothing (invariant 8), so asking does not change what the live sweep sees."""
+    return [r.session_id for r in run_once(cfg, store, dry_run=True, now=1_000_000.0)]
+
+
+class Poison(Stub):
+    """Up for everyone except one session, whose request always fails as if it were down --
+    the shape a session-specific fault takes once it is misread as an outage (audit F-01)."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__()
+        self.session_id = session_id
+
+    def complete(self, system, user, *, timeout=120.0) -> Completion:
+        if self.session_id in user:
+            self.calls += 1
+            raise outage()
+        return super().complete(system, user, timeout=timeout)
+
+
+def test_one_poison_session_cannot_starve_the_sessions_behind_it(env) -> None:
+    """The deferral is a suspicion until the next session confirms it. Here the provider
+    answers the next session, so the suspect is re-run onto the provisional path, where its
+    retry budget bounds it, and the sessions behind it are summarized."""
+    cfg, store, _paths = env
+    first, *rest = _order(cfg, store)
+    results = _sweep(cfg, store, Poison(first))
+    by_id = {r.session_id: r for r in results}
+
+    assert summarize_run(results)["deferred"] == 0
+    assert summarize_run(results)["not_attempted"] == 0
+    assert by_id[first].placeholder is True
+    assert all(by_id[s].summarized for s in rest)
+    poisoned = store.get(by_id[first].transcript_path)
+    assert poisoned.status == STATUS_PROVISIONAL
+    assert poisoned.attempts == 1
+
+
+def test_a_poison_session_is_retired_by_its_budget_not_retried_forever(env) -> None:
+    cfg, store, _paths = env
+    first, *_rest = _order(cfg, store)
+    for _ in range(MAX_PROVISIONAL_ATTEMPTS):
+        _sweep(cfg, store, Poison(first))
+    assert [r.session_id for r in _sweep(cfg, store, Poison(first))] == []
+
+
+def test_a_lone_surrogate_in_a_transcript_does_not_stop_the_sweep(env) -> None:
+    """Audit F-01/F-03, reproduced: valid JSON carrying `\\ud83d` with no low half used to
+    crash `write_eventlog` on every sweep (exit 1) and, once that was caught, made httpx fail
+    to encode the request -- which read as an outage."""
+    cfg, store, paths = env
+    target = paths[0]
+    text = target.read_text().replace("First real question", "First \\ud83d question", 1)
+    assert "\\ud83d" in text
+    target.write_text(text)
+    # Back past the quiet period: the rewrite moved the mtime to now, and a session that is
+    # not idle is not offered at all -- which made the first version of this test pass vacuously.
+    old = 1_000_000.0 - 3600
+    os.utime(target, (old, old))
+    results = _sweep(cfg, store, Stub())
+    assert str(target) in [r.transcript_path for r in results]
+    assert all(r.summarized for r in results), [r.errors for r in results]
+    assert all(r.eventlog_path for r in results), [r.errors for r in results]
 
 
 def test_a_provider_that_recovers_within_the_retries_is_not_an_outage(env) -> None:
@@ -266,7 +332,7 @@ def test_scribe_run_exits_with_the_documented_code_on_an_outage(cli, capsys) -> 
     with_provider(Down())
     assert run_main(["--config", str(toml), "--live"]) == EXIT_PROVIDER_UNAVAILABLE
     out = capsys.readouterr().out
-    assert "!! provider unavailable: 1 deferred, 2 not attempted" in out
+    assert "!! provider unavailable: 2 deferred, 1 not attempted" in out
 
 
 def test_the_exit_code_holds_in_json_mode(cli, capsys) -> None:
@@ -274,7 +340,7 @@ def test_the_exit_code_holds_in_json_mode(cli, capsys) -> None:
     with_provider(Down())
     assert run_main(["--config", str(toml), "--live", "--json"]) == EXIT_PROVIDER_UNAVAILABLE
     totals = json.loads(capsys.readouterr().out)["totals"]
-    assert (totals["deferred"], totals["not_attempted"]) == (1, 2)
+    assert (totals["deferred"], totals["not_attempted"]) == (2, 1)
 
 
 def test_a_healthy_sweep_still_exits_zero(cli) -> None:

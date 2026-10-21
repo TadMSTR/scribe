@@ -210,14 +210,25 @@ nothing is indistinguishable from one that pruned nothing.
 before 0.13.0 a provider outage was charged against it as if it were one. An outage of 2–3
 hours retired every pending session until someone ran `scribe recover --apply`, and
 `scribe run` exited `0` throughout (#1188 (id 1271) item 4). Now a run that ended on a
-`ProviderError` with `unavailable=True` (transport or timeout, 429, 5xx, a `claude-cli`
-timeout) returns from `process_session` **before** the block and before any store write. The
-offset does not move, so `scan` (or `orphaned`) re-offers the session at no cost. `run_once`
-stops calling the provider after the first deferral, and `run_cli` returns
-`EXIT_PROVIDER_UNAVAILABLE` (`69`).
+`ProviderError` with `unavailable=True` returns from `process_session` **before** the block and
+before any store write. The offset does not move, so `scan` (or `orphaned`) re-offers the
+session at no cost. `unavailable` means the endpoint did not answer: httpx `ConnectError`,
+`ConnectTimeout`, `PoolTimeout` or `RemoteProtocolError`, a 429, a 5xx, or a `claude-cli`
+timeout. `run_once` stops calling the provider after **two** consecutive deferrals, and
+`run_cli` returns `EXIT_PROVIDER_UNAVAILABLE` (`69`).
 
-`unavailable` is deliberately narrower than `retryable`. An unparseable envelope is retryable
-and is **not** an outage, because it can be the input's fault. Widening `unavailable` to cover
+**Why two, and why the classes are that narrow** (scribe-qc-integrity-2026-10 audit F-01). The
+first version marked *every* exception from `httpx.post` as unavailable and tripped on one
+deferral. A session whose own request could not be encoded (a lone surrogate) was then
+deferred on every sweep forever, and every session behind it was never attempted, while the
+run blamed the provider. A read timeout can be input-driven the same way. So a deferral is a
+suspicion until the next session confirms it, and a suspect the provider then answers for is
+re-run with `allow_defer=False`, onto the provisional path. Widening `unavailable` again, or
+tripping on one deferral, re-opens that.
+
+`unavailable` is deliberately narrower than `retryable`. An unparseable envelope, a read or
+write timeout and a dropped stream are retryable and are **not** an outage, because each can be
+the input's fault. Widening `unavailable` to cover
 it would defer such a session on every sweep forever, which is the 12-attempt burn `state.py`
 documents, by another route. The exit code is a contract: `0` ok, `2` config, `69` outage.
 Do not reuse `1` (an uncaught crash) or `75` (the cron's `flock -E 75` skip, which forge's

@@ -197,20 +197,28 @@ regardless of its status.
 
 A provider outage delays digests; it does not lose them and it does not spend their retry
 budget. Each call is still tried 3 times with backoff. If the session's last attempt failed
-because the provider could not be reached (a transport error or timeout, a 429, or a 5xx; for
-`claude-cli`, a timeout), scribe writes no block, touches no state, and leaves the session
-pending. Its read offset has not moved, so the next sweep offers it again. The sweep then stops
-calling the provider: the remaining sessions are counted as *not attempted* and are also left
-pending.
+because the provider did not answer at all, scribe writes no block, touches no state, and leaves
+the session pending. "Did not answer" is narrow on purpose: a connection refused or timed out
+(`ConnectError`, `ConnectTimeout`, `PoolTimeout`), a connection closed mid-protocol
+(`RemoteProtocolError`), a 429, a 5xx, or for `claude-cli` a timeout. Its read offset has not
+moved, so the next sweep offers it again.
+
+**One deferral is a suspicion; two in a row is an outage.** The next session is the probe. If
+it also finds the provider down, the sweep stops calling the provider, and the remaining
+sessions are counted as *not attempted* and left pending. If the provider answers it, the first
+session's failure was its own, so that session is re-run onto the provisional path and its
+retry budget bounds it. One bad session cannot stall the queue behind it.
 
 ```
 live: 8 session(s), ...
-  !! provider unavailable: 1 deferred, 7 not attempted -- left pending, no retry budget spent; the next sweep retries them
+  !! provider unavailable: 2 deferred, 6 not attempted -- left pending, no retry budget spent; the next sweep retries them
 ```
 
-An unparseable response envelope, or a 4xx other than 429, is **not** an outage: the provider
-answered, and the failure can be a property of the input. Those still become a placeholder and
-spend one of `state.MAX_PROVISIONAL_ATTEMPTS`, as before.
+Everything else spends one of `state.MAX_PROVISIONAL_ATTEMPTS`, as before, because the
+failure can be a property of the input. That covers an unparseable response envelope, a 4xx
+other than 429, and a read or write timeout or dropped stream (the provider was reached and was
+slow or cut off). A request that could not even be built or encoded fails at once and is not
+retried.
 
 There is no fallback provider. A late digest is acceptable; a lost or silent one is not. That
 is why the exit code changes:

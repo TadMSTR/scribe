@@ -384,3 +384,50 @@ def test_claude_cli_env_and_the_hook_share_one_base_set() -> None:
     from scribe import childenv, pipeline
 
     assert pipeline.HOOK_BASE_ENV is childenv.BASE_ENV
+
+
+# --- audit F-01: only an endpoint that did not answer is an outage -------------------------
+
+
+def _raising(monkeypatch, exc: BaseException) -> ProviderError:
+    import httpx
+
+    def boom(*a, **k):
+        raise exc
+
+    monkeypatch.setenv("SCRIBE_TEST_KEY", "k")
+    monkeypatch.setattr(httpx, "post", boom)
+    with pytest.raises(ProviderError) as raised:
+        OpenAICompatibleProvider(MISTRAL).complete("sys", "user")
+    return raised.value
+
+
+@pytest.mark.parametrize(
+    "name", ["ConnectError", "ConnectTimeout", "PoolTimeout", "RemoteProtocolError"]
+)
+def test_an_endpoint_that_did_not_answer_is_an_outage(monkeypatch, name) -> None:
+    import httpx
+
+    err = _raising(monkeypatch, getattr(httpx, name)("x"))
+    assert (err.retryable, err.unavailable) == (True, True)
+
+
+@pytest.mark.parametrize("name", ["ReadTimeout", "WriteTimeout", "ReadError", "WriteError"])
+def test_a_slow_or_dropped_answer_is_retryable_but_not_an_outage(monkeypatch, name) -> None:
+    """A session big enough that the model always needs longer than `timeout` would be
+    deferred forever if a read timeout counted as an outage."""
+    import httpx
+
+    err = _raising(monkeypatch, getattr(httpx, name)("x"))
+    assert (err.retryable, err.unavailable) == (True, False)
+
+
+def test_a_request_that_cannot_be_encoded_is_not_retried(monkeypatch) -> None:
+    """Raised before the request leaves, and determined by the input: the lone-surrogate
+    reproduction in the audit. Retrying it buys the same error, and deferring it starved the
+    queue."""
+    err = _raising(
+        monkeypatch, UnicodeEncodeError("utf-8", "\ud83d", 0, 1, "surrogates not allowed")
+    )
+    assert (err.retryable, err.unavailable) == (False, False)
+    assert "could not be sent" in str(err)
