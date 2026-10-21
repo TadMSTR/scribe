@@ -1099,7 +1099,7 @@ def _ticket_log(text: str) -> EventLog:
 
 
 def _rewrite(digest: str, log: EventLog) -> tuple[str, int]:
-    return rewrite_id_conflations(digest, check_digest(digest, log), log)
+    return rewrite_id_conflations(digest, check_digest(digest, log))
 
 
 def test_an_id_conflated_ref_is_rewritten_to_the_id() -> None:
@@ -1167,9 +1167,36 @@ def test_scribe_markers_are_never_rewritten() -> None:
 
 def test_the_rewrite_reads_the_report_and_does_not_regrade() -> None:
     """A report with no findings rewrites nothing, whatever the text holds -- the verdict is
-    the gate's, taken once, and the rewrite never second-guesses it."""
-    log = _ticket_log("task_id=541")
-    assert rewrite_id_conflations("- Closed #541\n", Report(), log) == ("- Closed #541\n", 0)
+    the gate's, taken once, and the rewrite never second-guesses it (audit F-02)."""
+    assert rewrite_id_conflations("- Closed #541\n", Report()) == ("- Closed #541\n", 0)
+    report = Report()
+    report.add("groundedness", "x", kind="ticket", claim="#541", id_conflation=False)
+    assert rewrite_id_conflations("- Closed #541\n", report) == ("- Closed #541\n", 0)
+    report.findings[0].id_conflation = True
+    assert rewrite_id_conflations("- Closed #541\n", report) == ("- Closed id 541\n", 1)
+
+
+def test_the_gate_records_the_conflation_verdict_on_the_finding() -> None:
+    report = check_digest("- Closed #541 and #73\n", _ticket_log("task_id=541, ran 73 jobs"))
+    verdicts = {f.claim: f.id_conflation for f in report.findings if f.kind == "ticket"}
+    assert verdicts == {"#541": True, "#73": False}
+
+
+def test_a_self_annotation_collapses_whatever_its_case() -> None:
+    """Audit F-05: `#541 (ID 541)` was left as `id 541 (ID 541)`."""
+    text, n = _rewrite("- Filed #541 (ID 541)\n", _ticket_log("task_id=541"))
+    assert (text, n) == ("- Filed id 541\n", 1)
+
+
+@pytest.mark.parametrize("pad", [" ", "\t", " \n "])
+def test_the_id_context_is_linear_in_a_whitespace_run(pad) -> None:
+    """Audit F-02. `\\bid\\s*[:=]?\\s*` split one whitespace run two ways: `id` + 32k spaces
+    took 1.8 s per search, and the rewrite repeated the search. Linear, 60k spaces is
+    milliseconds; the bound is loose so a slow runner cannot flake it."""
+    corpus = "id" + pad * 60_000
+    start = time.perf_counter()
+    assert is_id_conflation("#541", corpus) is False
+    assert time.perf_counter() - start < 0.5
 
 
 def test_the_conflation_predicate_is_the_one_the_gate_and_survey_use() -> None:

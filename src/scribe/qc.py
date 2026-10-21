@@ -231,7 +231,11 @@ _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{2,}|\d{2,}")
 #: the alternative stays free of unbounded quantifiers.
 _ID_CONTEXT = (
     r'(?:\\?"\w{0,32}id\\?"\s*:\s*\\?"?'  # {"id": 417}, {"task_id": "417"}, {\"id\": 417}
-    r"|\bid\s*[:=]?\s*"  # id 417, id: 417, id=417
+    # `(?:\s*[:=])?\s*`, never `\s*[:=]?\s*`: with the separator optional, two adjacent `\s*`
+    # can split one whitespace run n ways, so `id` + n spaces cost O(n^2) per search -- 1.8 s at
+    # 32k spaces, and a user message keeps such a run intact (scribe-qc-integrity-2026-10
+    # audit F-02). Grouping the separator with its leading space leaves one way to match.
+    r"|\bid(?:\s*[:=])?\s*"  # id 417, id: 417, id=417
     r'|_id\s*[:=]\s*"?'  # task_id=417  <- the commonest miss
     r'|"target"\s*:\s*"'  # {"target": "417"} in an MCP event's args digest
     r"|/)"  # .../tasks/417
@@ -296,6 +300,10 @@ class Finding:
     kind: str = ""
     #: The claim itself, exactly as the gate tested it -- already normalized and lowercased.
     claim: str = ""
+    #: For a `ticket` finding: the corpus holds the number only as an internal id. Decided
+    #: once, when the gate rejects the claim, so `rewrite_id_conflations` reads the verdict
+    #: instead of searching the corpus again (audit F-02).
+    id_conflation: bool = False
 
 
 @dataclass
@@ -313,8 +321,18 @@ class Report:
     def ok(self) -> bool:
         return not self.findings
 
-    def add(self, check: str, detail: str, *, kind: str = "", claim: str = "") -> None:
-        self.findings.append(Finding(check, detail, kind=kind, claim=claim))
+    def add(
+        self,
+        check: str,
+        detail: str,
+        *,
+        kind: str = "",
+        claim: str = "",
+        id_conflation: bool = False,
+    ) -> None:
+        self.findings.append(
+            Finding(check, detail, kind=kind, claim=claim, id_conflation=id_conflation)
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -818,7 +836,7 @@ def is_id_conflation(claim: str, corpus: str) -> bool:
     return re.search(_ID_CONTEXT + re.escape(number) + r"\b", corpus) is not None
 
 
-def _ticket_detail(claim: str, corpus: str) -> str:
+def _ticket_detail(claim: str, corpus: str, *, conflated: bool | None = None) -> str:
     """The message for an ungrounded `#N`, naming the id-vs-identifier conflation by name.
 
     This is the finding the whole gate earns its keep on. On the live run a digest wrote
@@ -829,7 +847,7 @@ def _ticket_detail(claim: str, corpus: str) -> str:
     context we say so.
     """
     number = claim.lstrip("#")
-    if is_id_conflation(claim, corpus):
+    if is_id_conflation(claim, corpus) if conflated is None else conflated:
         return (
             f"ticket {claim!r} is not in the event log, which contains {number!r} only as an "
             f"internal id -- a Vikunja id is not its #identifier, so this points at a "
@@ -875,8 +893,13 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     # `#417` (written only as `id 417`, and false).
     for claim in sorted(claimed["tickets"]):
         if claim not in allowed["tickets"] and not _ticket_in_corpus(claim, corpus):
+            conflated = is_id_conflation(claim, corpus)
             report.add(
-                "groundedness", _ticket_detail(claim, corpus), kind=CLAIM_TICKET, claim=claim
+                "groundedness",
+                _ticket_detail(claim, corpus, conflated=conflated),
+                kind=CLAIM_TICKET,
+                claim=claim,
+                id_conflation=conflated,
             )
 
     # No category set exists for `code` or `identifier`, and none should be invented: there is
@@ -899,11 +922,12 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
 #: scribe, not asserted by the model, so nothing in them is a claim to correct.
 _MARKER_RES = (ANCHOR_RE, TERMINATOR_RE, TRUNCATION_RE)
 #: `#N (id N)` -- a conflated ref the model already annotated with the same number. Rewriting
-#: only the `#N` would leave `id N (id N)`, so the pair collapses to one `id N`.
+#: only the `#N` would leave `id N (id N)`, so the pair collapses to one `id N`. Matched
+#: case-insensitively, so `(ID N)` collapses too (audit F-05).
 _SELF_ANNOTATED = r"[ \t]*\(id[ \t]+{n}\)"
 
 
-def rewrite_id_conflations(text: str, report: Report, log: EventLog) -> tuple[str, int]:
+def rewrite_id_conflations(text: str, report: Report) -> tuple[str, int]:
     """Rewrite every `#N` the gate rejected as an id conflation to `id N`. Returns `(text, n)`.
 
     **Call this AFTER grading, never before.** `report` is the verdict on the model's own output,
@@ -928,13 +952,12 @@ def rewrite_id_conflations(text: str, report: Report, log: EventLog) -> tuple[st
 
     The match is `_TICKET_RE`, the pattern the gate extracted the claim with, so `#65` never
     rewrites inside `#655` and a ref the gate never saw is never rewritten.
+
+    It reads `Finding.id_conflation` and never searches the corpus itself: the verdict was
+    reached once, while grading, and a second search doubled the gate's worst-case regex cost
+    on a hostile session (audit F-02).
     """
-    corpus = log.grounding_text().lower()
-    conflated = {
-        f.claim
-        for f in report.findings
-        if f.kind == CLAIM_TICKET and is_id_conflation(f.claim, corpus)
-    }
+    conflated = {f.claim for f in report.findings if f.kind == CLAIM_TICKET and f.id_conflation}
     if not conflated:
         return text, 0
     protected = [m.span() for rx in _MARKER_RES for m in rx.finditer(text)]
@@ -948,7 +971,7 @@ def rewrite_id_conflations(text: str, report: Report, log: EventLog) -> tuple[st
             continue
         number = m.group(1)
         end = m.end()
-        dup = re.compile(_SELF_ANNOTATED.format(n=re.escape(number))).match(text, end)
+        dup = re.compile(_SELF_ANNOTATED.format(n=re.escape(number)), re.I).match(text, end)
         if dup:
             end = dup.end()
         out.append(text[pos : m.start()])
