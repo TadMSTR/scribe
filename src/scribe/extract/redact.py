@@ -105,14 +105,17 @@ _ASSIGNMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # JSON: "api_key": "v"
     (
         "json",
-        re.compile(rf"(?ix)(\"[a-z0-9_\-]*{_SENSITIVE_KEY}\"\s*:\s*)(\"(?!«)[^\"\n]{{4,}}\")"),
+        re.compile(
+            rf"(?ix)(\"[a-z0-9_\-]*{_SENSITIVE_KEY}\"\s*:\s*)"
+            r"(\"(?!«)(?=[^\"\n]*[^\W_])[^\"\n]{4,}\")"
+        ),
     ),
     # TOML/YAML: api_key = "v"  /  password: v
     (
         "keyval",
         re.compile(
             rf"(?ixm)^(\s*[\"']?[a-z0-9_\-]*{_SENSITIVE_KEY}[\"']?\s*[:=]\s*)"
-            r"(?!\s*(?:\{|\[|«|$))([^\n]+)$"
+            r"(?!\s*(?:\{|\[|«|$))(?=[^\n]*[^\W_])([^\n]+)$"
         ),
     ),
     # Shell/env: export FOO_TOKEN=v  /  FOO_TOKEN=v  (also docker inspect "Env" entries)
@@ -120,10 +123,23 @@ _ASSIGNMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "envvar",
         re.compile(
             rf"(?ix)\b((?:export\s+)?[A-Z0-9_]*{_SENSITIVE_KEY}\s*=\s*)"
-            r"(?!\s*$)(?!«)([^\s\"',\]\}}]+|\"[^\"\n]*\"|'[^'\n]*')"
+            r"(?!\s*$)(?!«)((?=[^\s\"',\]\}]*[^\W_])[^\s\"',\]\}]+"
+            r"|\"(?=[^\"\n]*[^\W_])[^\"\n]*\""
+            r"|'(?=[^'\n]*[^\W_])[^'\n]*')"
         ),
     ),
 )
+
+# The `(?=...[^\W_])` lookahead on the `json`, `keyval` and `envvar` values (vikunja#1196,
+# security's verdict in its comment 1576): at least one letter or digit, in any script, so
+# `PASSWORD=ñçåß` is still a value. A value made only of punctuation is not a secret,
+# and before this a prose mention of a directive, "`LoadCredential=` for secrets", captured
+# the closing backtick as the "value". The lookahead sits inside each `envvar` alternative,
+# because the quoted forms start with a quote that the bare class excludes. The backtick is
+# deliberately still IN every value class. A real value with a backtick in the middle (a
+# shell password) must be redacted whole, and removing it would end the match there and
+# write the rest of the secret to the digest. Over-redacting a stray backtick is the safe
+# side; `Redactor._record` trims the edges of what it captures instead.
 
 # Which capture group holds the VALUE, per assignment rule — used only when a `Redactor` is
 # built with `capture=True`. Derived from `_ASSIGNMENT_REPL` above: the group that is NOT
@@ -146,6 +162,25 @@ _ASSIGNMENT_REPL: dict[str, str] = {
     "keyval": r"\g<1>" + REDACTED,
     "envvar": r"\g<1>" + REDACTED,
 }
+
+
+def _strip_edges(value: str) -> str:
+    """Peel matching quotes and any edge backticks off a captured value until it is stable.
+
+    Moves two indices and slices once, so alternately nested delimiters are linear rather than
+    one copy of the value per layer (audit F-05: 0.48 s at 200k characters before).
+    """
+    lo, hi = 0, len(value)
+    while True:
+        before = (lo, hi)
+        if hi - lo > 1 and value[lo] == value[hi - 1] and value[lo] in "\"'":
+            lo, hi = lo + 1, hi - 1
+        while lo < hi and value[lo] == "`":
+            lo += 1
+        while lo < hi and value[hi - 1] == "`":
+            hi -= 1
+        if (lo, hi) == before:
+            return value[lo:hi]
 
 
 class Redactor:
@@ -193,6 +228,17 @@ class Redactor:
         wrong answer in the reassuring direction: it says "the model invented this, extraction
         is fine" about a value extraction genuinely leaked. Measured before the strip was
         added — `contains_value` returned False for a value demonstrably present in the log.
+
+        **Edge backticks are stripped for the same reason** (vikunja#1196). Agents write
+        identifiers in backticks, so a digest saying `` `API_TOKEN=<tok>` `` gives `envvar` a
+        value of `<tok>` plus the closing backtick, the leaf holds `<tok>` bare, and the verdict
+        is the same reassuring wrong `model-output`. Quotes and backticks are peeled in turn
+        until nothing changes, so `` `"abc"` `` reduces to `abc`. Only the edges: a backtick
+        inside a value is part of it.
+
+        Neither strip changes what is redacted. The substitution in `scrub` runs on the regex
+        match and never sees this copy; it only changes what `classify_post_render` compares
+        against the event log.
         """
         if not self._capture:
             return
@@ -201,8 +247,7 @@ class Redactor:
             value = m.group(group)
             if not value:
                 continue
-            if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
-                value = value[1:-1]
+            value = _strip_edges(value)
             # A value that is already a redaction marker is residue, not a secret: an earlier
             # rule replaced it and a later one matched the leftover shape. `Bearer «redacted»`
             # is the concrete case. Recording it would add a verdict that is always False

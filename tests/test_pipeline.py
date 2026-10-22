@@ -21,8 +21,10 @@ from scribe.extract.models import EventLog
 from scribe.pipeline import (
     _CAUSE_DETAIL,
     CAUSE_EXTRACTION,
+    CAUSE_INCONCLUSIVE,
     CAUSE_MODEL,
     CAUSE_UNKNOWN,
+    CAUSES,
     classify_post_render,
     output_root,
     process_session,
@@ -511,7 +513,9 @@ def test_an_absent_event_log_yields_no_cause_at_all(env) -> None:
     """The third answer. Before #852 there was no log, and the code asserted a cause anyway;
     with no evidence the honest output is "undetermined", not a guess."""
     assert classify_post_render("", ["ghp_FAKE1234567890abcdefgh"]) == CAUSE_UNKNOWN
-    assert classify_post_render("/nonexistent/eventlog.json", ["x"]) == CAUSE_UNKNOWN
+    # Non-trivial on purpose: a value too short to be evidence is `inconclusive` before the
+    # log is ever opened (vikunja#1196), and this test is about the missing log.
+    assert classify_post_render("/nonexistent/eventlog.json", ["xyzzy-plugh-42"]) == CAUSE_UNKNOWN
 
 
 def test_the_guard_stays_quiet_on_a_clean_digest(env) -> None:
@@ -1443,3 +1447,64 @@ def test_no_temp_storage_for_the_hook_is_a_hook_failure_not_a_crash(env, tmp_pat
     assert r.written is True
     assert r.hook == "failed" and "No space left" in r.hook_error
     assert _identity_holds([r])
+
+
+# --- vikunja#1196: trivial matches are not evidence, and a backticked value is ------------
+
+
+def _fire_log(tmp_path: Path, *leaves: str) -> str:
+    """A persisted event log holding exactly `leaves`, every one containing a backtick, which
+    is what made a one-backtick capture read as present."""
+    path = tmp_path / "eventlog.json"
+    path.write_text(json.dumps({"turns": [{"user_text": leaf} for leaf in leaves]}))
+    return str(path)
+
+
+def test_the_2026_10_21_fire_is_inconclusive_not_an_extraction_miss(tmp_path) -> None:
+    """R2. 0.14.0's `envvar` captured the closing backtick of "`LoadCredential=` for secrets".
+    The lookahead now stops that capture (test_redact R1), so this feeds the classifier what
+    the old rule captured, against a log where a backtick is everywhere."""
+    from scribe.eventlog import contains_value
+
+    log = _fire_log(tmp_path, "ran `ls`", "see `LoadCredential=«redacted»`")
+    # Non-vacuity: the substring test really does say True, which is what 0.14.0 reported on.
+    assert contains_value(log, "`") is True
+    assert classify_post_render(log, ["`"]) == CAUSE_INCONCLUSIVE
+    for trivial in ("none", "set", "ab12", "--------------"):
+        assert classify_post_render(log, [trivial]) == CAUSE_INCONCLUSIVE
+
+
+def test_a_backticked_value_in_the_log_is_an_extraction_miss(tmp_path) -> None:
+    """R3, end to end. Before the edge strip the capture kept its closing backtick, the log holds
+    the value bare, and the verdict was the reassuring wrong `model-output`."""
+    from scribe.extract.redact import Redactor
+
+    secret = "FAKEtok1234567890"
+    guard = Redactor(capture=True)
+    guard.scrub(f"exported `API_TOKEN={secret}` first")
+    assert guard.count == 1
+    log = _fire_log(tmp_path, f"curl -H x {secret} https://api")
+    assert classify_post_render(log, guard.captured) == CAUSE_EXTRACTION
+
+
+def test_a_real_miss_next_to_a_trivial_match_is_still_reported(tmp_path) -> None:
+    """R5. Trivial values are dropped from the evidence, not allowed to decide the fire."""
+    log = _fire_log(tmp_path, "uses `FAKEtok1234567890` here")
+    assert classify_post_render(log, ["`", "FAKEtok1234567890"]) == CAUSE_EXTRACTION
+    assert classify_post_render(log, ["FAKEtok1234567890", "none"]) == CAUSE_EXTRACTION
+
+
+def test_non_trivial_values_absent_from_the_log_are_still_model_output(tmp_path) -> None:
+    """R6, unchanged, including when a trivial value rides along."""
+    log = _fire_log(tmp_path, "ran `ls`")
+    assert classify_post_render(log, ["FAKEinvented12345"]) == CAUSE_MODEL
+    assert classify_post_render(log, ["`", "FAKEinvented12345"]) == CAUSE_MODEL
+
+
+def test_inconclusive_claims_neither_cause() -> None:
+    """Its detail must not say what `model-output`'s does: a trivial value supports neither."""
+    detail = _CAUSE_DETAIL[CAUSE_INCONCLUSIVE]
+    assert "redact.py is not the file to look at" not in detail
+    assert "investigate redact.py" not in detail
+    assert "too short or generic" in detail and "redacted either way" in detail
+    assert set(_CAUSE_DETAIL) == set(CAUSES)

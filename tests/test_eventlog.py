@@ -208,16 +208,24 @@ def test_field_level_and_whole_file_scrubbing_disagree_and_field_level_is_right(
     evidence it is auditing is self-evidently the wrong pass.
 
     This is why `eventlog.contains_value` walks string leaves instead of searching raw text.
+
+    **0.15.0 closed one route and not the trap** (vikunja#1196). The value rules now need a
+    letter or digit, so the two punctuation-only fixtures this test used to run on stopped
+    firing, and the first is asserted below as closed: a bare `", "` between two leaves is no
+    longer a "value". Serialization still manufactures letters and digits, though. With
+    `ensure_ascii` non-ASCII punctuation becomes `\\u2014`, the match runs through it and on
+    into the backslash of an escaped quote, and the escape is destroyed. Checked before
+    retargeting, as the assertion message below asks.
     """
-    # Two shapes, both clean field-by-field: an unescaped structural boundary, and the
-    # escaped-quote form a tool-argument blob actually takes.
+    closed = {"cmd": "export API_TOKEN=", "next": "plain prose that follows"}
+    route = Redactor()
+    route.scrub(json.dumps(closed))
+    assert route.count == 0, "a punctuation-only span between two leaves is not a value"
+
+    # Two escaped-quote shapes a tool-argument blob actually takes, both clean field-by-field.
     for payload in (
-        {
-            "cmd": "export API_TOKEN=",
-            "next": "plain prose that follows",
-            "third": "more ordinary text",
-        },
-        {"cmd": 'sh -c "export API_TOKEN=" && echo done', "note": "tail"},
+        {"cmd": 'sh -c "export API_TOKEN=\u2014" && echo done', "note": "tail"},
+        {"cmd": "curl -d 'x' password=\u00b7\"", "next": "plain prose that follows"},
     ):
         serialized = json.dumps(payload)
 

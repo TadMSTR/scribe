@@ -304,6 +304,10 @@ class Finding:
     #: once, when the gate rejects the claim, so `rewrite_id_conflations` reads the verdict
     #: instead of searching the corpus again (audit F-02).
     id_conflation: bool = False
+    #: For an id-conflation `#N` the digest wrote as `#N (id M)`: `M`, when `#M` grounds as
+    #: written. The two numbers were swapped, and `#M (id N)` is the true pair (vikunja#1195).
+    #: Decided while grading, for the same reason as `id_conflation`. `None` otherwise.
+    swap_identifier: str | None = None
 
 
 @dataclass
@@ -329,9 +333,17 @@ class Report:
         kind: str = "",
         claim: str = "",
         id_conflation: bool = False,
+        swap_identifier: str | None = None,
     ) -> None:
         self.findings.append(
-            Finding(check, detail, kind=kind, claim=claim, id_conflation=id_conflation)
+            Finding(
+                check,
+                detail,
+                kind=kind,
+                claim=claim,
+                id_conflation=id_conflation,
+                swap_identifier=swap_identifier,
+            )
         )
 
     def to_dict(self) -> dict:
@@ -819,6 +831,29 @@ def _ticket_in_corpus(claim: str, corpus: str) -> bool:
     return re.search(re.escape(claim) + r"\b", corpus) is not None
 
 
+def _ticket_grounds(claim: str, allowed: dict[str, set[str]], corpus: str) -> bool:
+    """Whether a `#N` claim grounds as written: in the ticket category set, or in the corpus."""
+    return claim in allowed["tickets"] or _ticket_in_corpus(claim, corpus)
+
+
+def _annotated_numbers(text: str) -> dict[str, str]:
+    """For each `#N` written as `#N (id M)` with M != N, the FIRST such `M` in text order.
+
+    Only the first, so a swap costs the gate at most one more corpus search per conflated claim
+    however many annotations a hostile digest stacks on it (the bound audit F-02 was about). A
+    later `#N (id M2)` is rewritten the ordinary way. Read from the text `_claims` reads, with
+    scribe's markers stripped, so a pair inside one is never a candidate. The annotation is
+    `_SELF_ANNOTATED`'s shape with the number captured.
+    """
+    text = strip_scribe_markers(text)
+    out: dict[str, str] = {}
+    for m in _TICKET_RE.finditer(text):
+        note = _ANNOTATION_RE.match(text, m.end())
+        if note and note.group(1) != m.group(1):
+            out.setdefault(f"#{m.group(1)}", note.group(1))
+    return out
+
+
 def is_id_conflation(claim: str, corpus: str) -> bool:
     """Whether the corpus holds `#N`'s bare number only in an id-shaped context.
 
@@ -873,6 +908,7 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     allowed = grounding_terms(log)
     corpus = log.grounding_text().lower()
     claimed = _claims(digest_text)
+    annotated = _annotated_numbers(digest_text)
 
     for claim in sorted(claimed["paths"]):
         if not path_grounded(claim, allowed["paths"], corpus):
@@ -891,15 +927,27 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     # `#` is part of the identifier, so the corpus check is for the sigil form too -- which
     # is exactly what separates `#639` (written as `#655/#639` in the log, and true) from
     # `#417` (written only as `id 417`, and false).
+    #
+    # A conflated `#N` written as `#N (id M)` is a swapped pair when `#M` grounds: the log has
+    # N as an id and M as an identifier, so the true pair is `#M (id N)` (vikunja#1195). Asked
+    # here, at most once per claim and only of one already rejected as a conflation, so the
+    # rewrite can read the answer instead of searching the corpus again (audit F-02).
     for claim in sorted(claimed["tickets"]):
-        if claim not in allowed["tickets"] and not _ticket_in_corpus(claim, corpus):
+        if not _ticket_grounds(claim, allowed, corpus):
             conflated = is_id_conflation(claim, corpus)
+            # SECURITY[deferred]: each half is grounded (`#M` as written, N as an id), but not
+            # the pairing: nothing checks that #M's id is N. Ticket vikunja#1204. Audit:
+            # 2026-10-22/scribe-redaction-guard-2026-10 F-03.
+            swap = annotated.get(claim) if conflated else None
+            if swap and not _ticket_grounds(f"#{swap}", allowed, corpus):
+                swap = None
             report.add(
                 "groundedness",
                 _ticket_detail(claim, corpus, conflated=conflated),
                 kind=CLAIM_TICKET,
                 claim=claim,
                 id_conflation=conflated,
+                swap_identifier=swap,
             )
 
     # No category set exists for `code` or `identifier`, and none should be invented: there is
@@ -925,6 +973,9 @@ _MARKER_RES = (ANCHOR_RE, TERMINATOR_RE, TRUNCATION_RE)
 #: only the `#N` would leave `id N (id N)`, so the pair collapses to one `id N`. Matched
 #: case-insensitively, so `(ID N)` collapses too (audit F-05).
 _SELF_ANNOTATED = r"[ \t]*\(id[ \t]+{n}\)"
+#: The same annotation with its number captured, for `#N (id M)` with any M: the swapped-pair
+#: candidates `check_groundedness` tests. The number shape is `_TICKET_RE`'s.
+_ANNOTATION_RE = re.compile(r"[ \t]*\(id[ \t]+([1-9]\d{0,5})\)", re.I)
 
 
 def rewrite_id_conflations(text: str, report: Report) -> tuple[str, int]:
@@ -952,6 +1003,17 @@ def rewrite_id_conflations(text: str, report: Report) -> tuple[str, int]:
         at all (`absent`). Neither is an id, so `id N` would be a fabrication of its own;
       * anything inside scribe's anchor, terminator or truncation markers.
 
+    One case is repaired rather than rewritten: a swapped pair. `#608 (id 525)`, where the log
+    holds 608 as an id and grounds `#525`, becomes `#525 (id 608)`. Rewriting only the `#N`
+    would leave `id 608 (id 525)`, which reads as two ids (vikunja#1195). An annotation whose
+    `#M` does not ground is left as today, `id 608 (id 525)`: the gate cannot say which half
+    is right.
+
+    **The repair grounds each half, not the pairing** (audit F-03). `#M` must ground as written
+    and N must appear as an id, but nothing checks that ticket #M's id is N. A log that ties N
+    to a different ticket still yields a well-formed `#M (id N)`, which is wrong. vikunja-mcp
+    refuses a mismatched pair, and the ledger keeps `before`.
+
     The match is `_TICKET_RE`, the pattern the gate extracted the claim with, so `#65` never
     rewrites inside `#655` and a ref the gate never saw is never rewritten.
 
@@ -972,13 +1034,19 @@ def id_conflation_edits(
     1-based and counted from `first_line`, so a caller holding a block BODY can number lines
     within the whole block (the anchor is the block's line 1). `before` is the exact span
     replaced -- `#1258`, or `#1258 (id 1258)` for a self-annotated pair -- and `after` is
-    `id 1258`. Tokens only, never the surrounding line: this is what `corrections` records,
-    and a ledger of whole lines would be a second copy of digest prose.
+    `id 1258`. For a swapped pair `before` is `#608 (id 525)` and `after` is `#525 (id 608)`.
+    Tokens only, never the surrounding line: this is what `corrections` records, and a ledger
+    of whole lines would be a second copy of digest prose.
 
     The live path and `scribe correct` both call this, so what the ledger says changed is
     what was changed, whichever of the two did it.
     """
     conflated = {f.claim for f in report.findings if f.kind == CLAIM_TICKET and f.id_conflation}
+    swaps = {
+        f.claim: f.swap_identifier
+        for f in report.findings
+        if f.kind == CLAIM_TICKET and f.id_conflation and f.swap_identifier
+    }
     if not conflated:
         return text, []
     protected = [m.span() for rx in _MARKER_RES for m in rx.finditer(text)]
@@ -992,16 +1060,23 @@ def id_conflation_edits(
             continue
         number = m.group(1)
         end = m.end()
-        dup = re.compile(_SELF_ANNOTATED.format(n=re.escape(number)), re.I).match(text, end)
-        if dup:
-            end = dup.end()
+        after = f"id {number}"
+        swap = swaps.get(f"#{number}")
+        pair = swap and re.compile(_SELF_ANNOTATED.format(n=re.escape(swap)), re.I).match(text, end)
+        if pair:
+            end = pair.end()
+            after = f"#{swap} (id {number})"
+        else:
+            dup = re.compile(_SELF_ANNOTATED.format(n=re.escape(number)), re.I).match(text, end)
+            if dup:
+                end = dup.end()
         out.append(text[pos : m.start()])
-        out.append(f"id {number}")
+        out.append(after)
         edits.append(
             {
                 "line": first_line + text.count("\n", 0, m.start()),
                 "before": text[m.start() : end],
-                "after": f"id {number}",
+                "after": after,
             }
         )
         pos = end
