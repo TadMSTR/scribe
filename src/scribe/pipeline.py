@@ -265,6 +265,18 @@ CAUSE_EXTRACTION = "extraction-miss"
 CAUSE_MODEL = "model-output"
 #: No event log to consult, so neither cause is supported by evidence.
 CAUSE_UNKNOWN = "undetermined"
+#: Every matched value was too short or generic to be evidence (vikunja#1196). A one-character
+#: backtick, or a word like `none`, is somewhere in nearly any event log, so finding it there
+#: proves nothing, and neither of the two causes above is supported.
+CAUSE_INCONCLUSIVE = "inconclusive"
+
+#: Every value `classify_post_render` can return, in the order reports list them.
+CAUSES: tuple[str, ...] = (CAUSE_EXTRACTION, CAUSE_MODEL, CAUSE_UNKNOWN, CAUSE_INCONCLUSIVE)
+
+#: Below this length a matched value is not evidence either way. Security's threshold in
+#: vikunja#1196 comment 1576: in the log that fired, every 1-2 character alphanumeric value and
+#: all common punctuation occurred somewhere.
+_MIN_EVIDENCE_LEN = 8
 
 _CAUSE_DETAIL: dict[str, str] = {
     CAUSE_EXTRACTION: (
@@ -280,7 +292,16 @@ _CAUSE_DETAIL: dict[str, str] = {
         "this session's event log is absent or unreadable, so the cause cannot be "
         "determined — re-run with the event log present to tell the two apart"
     ),
+    CAUSE_INCONCLUSIVE: (
+        "every matched value was too short or generic to tell an extraction miss from model "
+        "output, so no cause is claimed — the digest was redacted either way"
+    ),
 }
+
+
+def _is_evidence(value: str) -> bool:
+    """Whether a captured value is specific enough for its presence in the log to mean anything."""
+    return len(value) >= _MIN_EVIDENCE_LEN and any(c.isalnum() for c in value)
 
 
 def classify_post_render(eventlog_path: str, values: list[str]) -> str:
@@ -290,8 +311,18 @@ def classify_post_render(eventlog_path: str, values: list[str]) -> str:
     symmetric. One value found in the log proves extraction missed something regardless of
     how many others were not; a clean "not present" is only meaningful once the log has
     actually been read; and no log at all proves nothing either way.
+
+    Trivial values (`_is_evidence`) are dropped before the log is consulted, never tested: a
+    substring test on a backtick cannot come out False, which is how a prose mention of
+    `LoadCredential=` was reported as a leak (vikunja#1196). Dropping them does not weaken the
+    order above, because a real miss next to a trivial match is still tested and still wins.
+    Only when *every* value was trivial is the answer `inconclusive` — not `model-output`,
+    whose detail claims extraction is fine, which a trivial value cannot support either.
     """
-    verdicts = [contains_value(eventlog_path, value) for value in values]
+    evidence = [value for value in values if _is_evidence(value)]
+    if values and not evidence:
+        return CAUSE_INCONCLUSIVE
+    verdicts = [contains_value(eventlog_path, value) for value in evidence]
     if any(v is True for v in verdicts):
         return CAUSE_EXTRACTION
     if any(v is False for v in verdicts):
@@ -888,6 +919,9 @@ def _run_record(
         "truncated_fields": result.truncated_fields,
         "secrets_redacted": result.secrets_redacted,
         "post_render_redactions": result.post_render_redactions,
+        # The cause LABEL only, "" when nothing fired. Never a value, a length or a shape: the
+        # guard's captured plaintext is cleared before this record is built (vikunja#1196).
+        "post_render_cause": result.post_render_cause,
         "errors": len(result.errors),
         **qc,
         "ticket_refs_rewritten": result.ticket_refs_rewritten,

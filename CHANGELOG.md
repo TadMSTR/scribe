@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-10-22
+
+**Minor.** The post-render redaction guard no longer reports prose as a leak, and no longer
+reports a real backticked leak as model output. Its cause now reaches the run record
+(#1196 (id 1279)). The id-conflation rewrite repairs a swapped `#N (id M)` pair instead of
+half-rewriting it (#1195 (id 1278)). No schema change, no config change, and no change to the
+digest format.
+
+### Changed
+
+- **A value made only of punctuation is no longer redacted.** The `envvar`, `keyval` and
+  `json` rules now need at least one letter or digit in the value. Before this,
+  "`` `LoadCredential=` `` for secrets" took the closing backtick as the value and redacted it.
+  This applies at extraction time as well as to the post-render guard; it loses nothing,
+  because a value with no letters or digits is not a secret. The backtick stays in every value
+  class, so a value with a backtick in the middle is still redacted whole.
+- **Captured values are trimmed of edge backticks** before the guard checks the event log,
+  the same way surrounding quotes already were. `` `API_TOKEN=<tok>` `` used to capture `<tok>`
+  plus the closing backtick, which is never in the log, so a real extraction miss was reported
+  as `model-output`. This changes only what is compared, never what is redacted.
+- **`qc-report` breaks post-render redactions down by cause.** Records without a cause (before
+  0.15.0) count as `unrecorded`. The `!!` line is kept only for `extraction-miss`. Any other
+  cause is reported on a plain line.
+- **A swapped pair is repaired.** `#608 (id 525)`, where the log holds 608 as an id and
+  grounds `#525`, is rewritten to `#525 (id 608)`. The gate decides this while grading and
+  stores it on the finding (`Finding.swap_identifier`). The rewrite still never searches the
+  corpus, and grading tests at most one annotation per claim. Without a grounding `#M` the
+  rewrite is unchanged (`id 608 (id 525)`). It is still an `id-conflation` finding and an
+  `id-conflation` ledger reason. `scribe correct` applies the same repair, since it re-grades
+  with the current gate.
+
+### Added
+
+- **`inconclusive`, a fourth post-render cause.** A captured value shorter than 8 characters,
+  or with no letter or digit, is not used as evidence. If every value is like that, the cause
+  is `inconclusive`, never `extraction-miss` or `model-output`. A real miss in the same fire is
+  still tested and still wins.
+- **`post_render_cause` in the run record**, next to `post_render_redactions`. It holds the
+  label only (`""` when nothing fired) and never a value, length or shape. Backfilled records
+  carry `null`. `record_version` is unchanged, because additive keys have not bumped it before
+  (`ticket_refs_rewritten`, 0.13.0).
+
+### Notes
+
+- No historical correction. The one real swapped pair on disk was already rewritten to
+  `id 608 (id 525)` on 2026-10-21, and the gate no longer extracts it.
+- `tests/test_eventlog.py`'s whole-file-scrubbing trap test was retargeted, not deleted. Its
+  two fixtures had punctuation-only values, which no longer fire. The trap itself was
+  re-checked and still exists: `json.dumps` writes a non-ASCII character as `\uXXXX`, the
+  match runs through it into an escaped quote, and the document is corrupted.
+
 ## [0.14.0] — 2026-10-21
 
 **Minor.** A new command corrects id-conflated ticket refs in digests written before 0.13.0. A

@@ -72,6 +72,7 @@ LIVE_FIELDS = {
     "truncated_fields",
     "secrets_redacted",
     "post_render_redactions",
+    "post_render_cause",
     "errors",
     "qc_ok",
     "qc_coverage",
@@ -363,3 +364,27 @@ def test_backfill_counts_a_block_whose_event_log_is_gone(env) -> None:
         Path(cfg.state_path).parent / "b.jsonl", cfg.output_dir, cfg.eventlog_dir
     )
     assert (stats.blocks, stats.no_log, stats.appended) == (1, 1, 0)
+
+
+# --- vikunja#1196: the post-render cause reaches the record, as a label only ---------------
+
+
+def test_the_record_carries_the_post_render_cause_and_never_the_value(env) -> None:
+    """R7. 0.14.0 put the cause on the cron log line only, so `qc-report` could not tell three
+    prose fires from a real miss."""
+    cfg, store = env
+    secret = "ghp_FAKE1234567890abcdefgh"
+    leaky = json.dumps({"asked": "x", "done": [f"token is {secret}"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(leaky))
+    (rec,) = _records(cfg)
+    assert rec["post_render_redactions"] >= 1
+    assert rec["post_render_cause"] == r.post_render_cause == "model-output"
+    raw = Path(cfg.qc_run_record).read_text()
+    assert secret not in raw and "FAKE" not in raw
+
+
+def test_a_clean_run_records_an_empty_cause(env) -> None:
+    cfg, store = env
+    run_once(cfg, store, now=1_000_000.0, provider_factory=Stub)
+    (rec,) = _records(cfg)
+    assert rec["post_render_redactions"] == 0 and rec["post_render_cause"] == ""

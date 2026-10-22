@@ -245,10 +245,15 @@ def _section(label: str, s: dict) -> list[str]:
     if s["discarded"]:
         lines.append(f"  !! {s['discarded']} digest(s) produced but not written")
     if s["post_render_redactions"]:
-        lines.append(
-            f"  !! {s['post_render_redactions']} post-render redaction(s): a secret-shaped "
-            f"string reached a rendered digest"
-        )
+        # Only `extraction-miss` means the model was shown a secret. Any other cause is a
+        # secret-shaped string the write-time guard caught, so it is reported but not flagged.
+        by_cause = s.get("post_render_by_cause", {})
+        causes = ", ".join(f"{c} {n}" for c, n in by_cause.items())
+        missed = by_cause.get("extraction-miss", 0)
+        line = f"{s['post_render_redactions']} post-render redaction(s) by cause: {causes}"
+        if missed:
+            line = f"!! {line} -- {missed} matched a value in the event log the model was shown"
+        lines.append(f"  {line}")
     return lines
 
 

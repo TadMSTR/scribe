@@ -285,3 +285,82 @@ def test_stripping_is_required_for_keyval_not_just_json_and_envvar() -> None:
         "if this ever captures '\"abc123secret\"' again, the keyval strip has been removed "
         "and vikunja#856's inverted verdict is back for this rule"
     )
+
+
+# --- vikunja#1196: a punctuation-only "value" is not a secret, and edges are not a value ------
+
+#: The sentence the 2026-10-21 post-render guard fired on, as the model wrote it.
+PROSE_1196 = "with systemd `LoadCredential=` for secrets, to enforce"
+
+
+def test_a_directive_named_in_prose_is_not_redacted() -> None:
+    """R1. The `envvar` value class took the closing backtick as the value, the digest lost it,
+    and the cause was reported as an extraction miss. No value was ever written."""
+    r = Redactor(capture=True)
+    assert r.scrub(PROSE_1196) == PROSE_1196
+    assert r.count == 0 and r.by_kind == {} and r.captured == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "export API_TOKEN=`",
+        "API_TOKEN=--",
+        'API_TOKEN=""',
+        "API_TOKEN='..'",
+        "password: ``",
+        '{"api_key": "````"}',
+    ],
+)
+def test_punctuation_only_values_are_not_redacted_by_any_value_rule(text: str) -> None:
+    """The lookahead on `envvar` (all three alternatives), `keyval` and `json`."""
+    r = Redactor()
+    assert r.scrub(text) == text
+    assert r.count == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["export API_TOKEN=`FAKEtok123`", "password: `FAKEhunter2`", '{"api_key": "`FAKEk3y`"}'],
+)
+def test_a_backticked_value_with_letters_is_still_redacted(text: str) -> None:
+    """The lookahead must not cost a real value its redaction just for being in backticks."""
+    r = Redactor()
+    out = r.scrub(text)
+    assert r.count == 1
+    assert "FAKE" not in out
+
+
+def test_a_backticked_value_is_captured_without_its_backticks() -> None:
+    """R3, capture half. `` `API_TOKEN=<tok>` `` used to capture `<tok>` plus the closing
+    backtick, which is never in the log, so a real extraction miss read as `model-output`."""
+    r = Redactor(capture=True)
+    out = r.scrub("set `API_TOKEN=FAKEtok1234567890` before the call")
+    assert "FAKEtok" not in out
+    assert r.captured == ["FAKEtok1234567890"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('export FOO_TOKEN="`FAKEquoted99`"', "FAKEquoted99"),
+        ("export FOO_TOKEN=``FAKEdouble99``", "FAKEdouble99"),
+        ("password: `'FAKEnested99'`", "FAKEnested99"),
+    ],
+)
+def test_edge_quotes_and_backticks_are_peeled_until_stable(text: str, expected: str) -> None:
+    r = Redactor(capture=True)
+    r.scrub(text)
+    assert r.captured == [expected]
+
+
+def test_a_backtick_inside_a_value_is_part_of_it_and_the_whole_value_goes() -> None:
+    """R4. Security's point 2 on vikunja#1196: removing the backtick from the value class would
+    end the match mid-secret and write the rest to the digest."""
+    r = Redactor(capture=True)
+    # Mid-line, so this is `envvar`'s value class: at line start `keyval` takes the whole line.
+    out = r.scrub("ran with TOKEN=FAKEab`cd`efNOTREALtail and then prose")
+    assert out == f"ran with TOKEN={REDACTED} and then prose"
+    assert "cd" not in out and "NOTREAL" not in out
+    # Only the edges are trimmed for the classifier; the inner backticks stay in the capture.
+    assert r.captured == ["FAKEab`cd`efNOTREALtail"]

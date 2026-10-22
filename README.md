@@ -589,6 +589,14 @@ It also records up to 20 ungrounded claims, redacted, and the attribution that m
 explainable: `scribe_version`, `prompt_sha256` and `model_resolved`. A dry run never writes
 it. A failed write is counted (`run_record_errors`) and never fails the sweep.
 
+Since 0.15.0 the line also has `post_render_cause`, which says why the write-time redaction
+guard fired. It is a label only, never the value: `""` (it did not fire), `extraction-miss`
+(the value is in the event log, so the model was shown it), `model-output` (it is not),
+`undetermined` (no event log to check), or `inconclusive` (every match was too short or generic
+to tell). The digest is redacted in every case. `qc-report` breaks post-render redactions down
+by cause. Records from before 0.15.0 count as `unrecorded`, and only `extraction-miss` is
+flagged with `!!`.
+
 `prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
 cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.
 `model_resolved` is whatever the provider's response said, or `null`. Some providers, Mistral
@@ -643,6 +651,8 @@ which is not the same as a broken tool.
 #### Correcting digests already written: `scribe correct`
 
 Since 0.13.0 the sweep rewrites an id-conflated `#N` to `id N` before the block is written.
+Since 0.15.0 it also repairs a swapped pair: `#608 (id 525)`, where the log holds 608 as an id
+and `#525` as written, becomes `#525 (id 608)` rather than `id 608 (id 525)`.
 Blocks written before that still carry the wrong ref. `scribe correct` applies the same
 rewrite to them: it re-grades every complete, final block against its own event log with the
 current gate, and makes exactly the edit the live path would.

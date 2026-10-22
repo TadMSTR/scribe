@@ -248,12 +248,44 @@ def test_grouping_and_new_model_values(record, capsys) -> None:
 
 
 def test_the_text_report_labels_both_statistics(record, capsys) -> None:
-    write(record, [rec(post_render_redactions=1)] + [rec() for _ in range(24)])
+    write(
+        record,
+        [rec(post_render_redactions=1, post_render_cause="extraction-miss")]
+        + [rec() for _ in range(24)],
+    )
     assert main(["--run-record", str(record), "--until", UNTIL]) == EXIT_OK
     out = capsys.readouterr().out
     assert "per session, all checks" in out and "per block" in out
-    assert "!! 1 post-render redaction" in out
+    assert "!! 1 post-render redaction(s) by cause: extraction-miss 1" in out
     assert "report-only" in out
+
+
+def test_post_render_fires_are_broken_down_by_cause(record, capsys) -> None:
+    """R8 (vikunja#1196). A record without the key predates 0.15.0 and counts as `unrecorded`,
+    never as a guessed cause, and only `extraction-miss` earns the `!!`."""
+    rows = [
+        rec(post_render_redactions=1),  # pre-0.15.0: no post_render_cause key at all
+        rec(post_render_redactions=2, post_render_cause="inconclusive"),
+        rec(post_render_redactions=1, post_render_cause="model-output"),
+        rec(post_render_redactions=0, post_render_cause=""),
+    ] + [rec() for _ in range(21)]
+    write(record, rows)
+    current = stats([json.loads(line) for line in record.read_text().splitlines()])
+    by_cause = current["post_render_by_cause"]
+    assert by_cause == {"inconclusive": 2, "model-output": 1, "unrecorded": 1}
+    assert sum(current["post_render_by_cause"].values()) == current["post_render_redactions"]
+
+    assert main(["--run-record", str(record), "--until", UNTIL]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "4 post-render redaction(s) by cause: inconclusive 2, model-output 1, unrecorded 1" in (
+        out
+    )
+    assert "!!" not in out
+
+    rows.append(rec(post_render_redactions=1, post_render_cause="extraction-miss"))
+    write(record, rows)
+    assert main(["--run-record", str(record), "--until", UNTIL]) == EXIT_OK
+    assert "!! 5 post-render redaction(s) by cause: extraction-miss 1," in capsys.readouterr().out
 
 
 # --- backfill through the CLI ---------------------------------------------------------

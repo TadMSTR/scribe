@@ -177,14 +177,35 @@ def stats(records: list[dict]) -> dict:
         "placeholders": len(placeholders),
         "suppressed": sum(1 for r in records if r.get("suppressed")),
         "discarded": sum(1 for r in records if r.get("discarded")),
-        # Should always be 0. Any other value is loud in the text report.
+        # A fire is not a leak by itself: it is loud in the text report only when its cause is
+        # `extraction-miss`. See `_post_render_by_cause`.
         "post_render_redactions": int(sum(_num(r.get("post_render_redactions")) for r in records)),
+        "post_render_by_cause": _post_render_by_cause(records),
         "input_tokens": int(sum(_num(r.get("input_tokens")) for r in records)),
         "output_tokens": int(sum(_num(r.get("output_tokens")) for r in records)),
         "models_resolved": dict(sorted(models.items())),
         "lag_s_p50": _percentile(lags, 0.50),
         "lag_s_p95": _percentile(lags, 0.95),
     }
+
+
+#: The bucket for a fire whose record predates `post_render_cause` (scribe < 0.15.0).
+CAUSE_UNRECORDED = "unrecorded"
+
+
+def _post_render_by_cause(records: list[dict]) -> dict[str, int]:
+    """Post-render redactions summed per recorded cause, so a real miss stands out from noise.
+
+    The cause was reported only on the cron log line before 0.15.0 and never reached the
+    record (vikunja#1196), so an older fire has no key and is counted as `unrecorded` rather
+    than guessed at. The figures sum to `post_render_redactions`.
+    """
+    out: Counter[str] = Counter()
+    for r in records:
+        n = int(_num(r.get("post_render_redactions")))
+        if n > 0:
+            out[r.get("post_render_cause") or CAUSE_UNRECORDED] += n
+    return dict(sorted(out.items()))
 
 
 def group(records: list[dict], by: list[str]) -> dict[tuple, list[dict]]:

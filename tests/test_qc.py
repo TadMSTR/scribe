@@ -1256,3 +1256,91 @@ def test_an_id_inside_an_escaped_json_string_is_a_conflation() -> None:
     assert '\\"id\\": 1079' in log.grounding_text()
     text, n = _rewrite("- Closed #1079\n", log)
     assert (text, n) == ("- Closed id 1079\n", 1)
+
+
+# --- #1195 (id 1278): a swapped `#N (id M)` pair is repaired, not half-rewritten -----------
+
+
+def test_a_swapped_pair_is_repaired_to_the_true_pair() -> None:
+    """S1. The 2026-08-25 digest wrote `#608 (id 525)` for #525 (id 608). The gate already knew
+    `#608` was a conflation and `#525` grounds, but rewrote only the `#N`: `id 608 (id 525)`."""
+    from scribe.qc import id_conflation_edits
+
+    log = _ticket_log("ticket #525, updated task_id=608")
+    digest = "- Ticket #608 (id 525) has no REST reference\n"
+    report = check_digest(digest, log)
+    (finding,) = [f for f in report.findings if f.kind == "ticket"]
+    # Still an id-conflation finding, so grading counts are unchanged by the repair.
+    assert (finding.claim, finding.id_conflation, finding.swap_identifier) == ("#608", True, "525")
+
+    text, edits = id_conflation_edits(digest, report)
+    assert text == "- Ticket #525 (id 608) has no REST reference\n"
+    assert edits == [{"line": 1, "before": "#608 (id 525)", "after": "#525 (id 608)"}]
+
+
+def test_a_pair_whose_other_half_does_not_ground_is_rewritten_as_before() -> None:
+    """S2. Without `#525` in the log the gate cannot say which half is right."""
+    log = _ticket_log("updated task_id=608")
+    report = check_digest("- Ticket #608 (id 525)\n", log)
+    assert [f.swap_identifier for f in report.findings if f.kind == "ticket"] == [None]
+    assert _rewrite("- Ticket #608 (id 525)\n", log) == ("- Ticket id 608 (id 525)\n", 1)
+
+
+def test_a_self_annotated_pair_still_collapses() -> None:
+    """S3. `(id N)` with the same number is not a swap."""
+    log = _ticket_log("ticket #525, updated task_id=608")
+    report = check_digest("- Ticket #608 (id 608)\n", log)
+    assert [f.swap_identifier for f in report.findings if f.kind == "ticket"] == [None]
+    assert _rewrite("- Ticket #608 (id 608)\n", log) == ("- Ticket id 608\n", 1)
+
+
+def test_a_swapped_pair_inside_a_scribe_marker_is_never_touched() -> None:
+    """S4. A truncation note is scribe's, not the model's, so its pair is not a claim, and it
+    is not a swap candidate either: the bare `#608` in prose gets the ordinary rewrite."""
+    from scribe.summarize.render import TRUNCATION_MARKER
+
+    log = _ticket_log("ticket #525, updated task_id=608")
+    note = f"{TRUNCATION_MARKER} dropped #608 (id 525)_"
+    head = anchor(session_id="#608", turn_uuid="u1", transcript_path="/t.jsonl")
+    digest = f"{head}\n- Closed #608\n{note}\n{terminator('u1')}\n"
+    report = check_digest(digest, log)
+    assert [f.swap_identifier for f in report.findings if f.kind == "ticket"] == [None]
+    text, n = rewrite_id_conflations(digest, report)
+    assert head in text and note in text
+    assert "- Closed id 608\n" in text
+    assert n == 1
+
+
+def test_only_the_annotated_occurrence_is_swapped() -> None:
+    """The verdict is per claim, the repair per occurrence: a bare `#608` elsewhere in the same
+    digest is still a conflation and still becomes `id 608`."""
+    log = _ticket_log("ticket #525, updated task_id=608")
+    text, n = _rewrite("- Ticket #608 (id 525)\n- Later #608 again\n", log)
+    assert text == "- Ticket #525 (id 608)\n- Later id 608 again\n"
+    assert n == 2
+
+
+def test_the_swap_is_read_off_the_finding_and_never_regraded() -> None:
+    """Audit F-02 holds: given only a report, the rewrite repairs the pair with no log at all."""
+    report = Report()
+    report.add(
+        "groundedness", "x", kind="ticket", claim="#608", id_conflation=True, swap_identifier="525"
+    )
+    assert rewrite_id_conflations("- #608 (ID 525)\n", report) == ("- #525 (id 608)\n", 1)
+    # An annotation naming a different number than the recorded swap is not repaired.
+    assert rewrite_id_conflations("- #608 (id 700)\n", report) == ("- id 608 (id 700)\n", 1)
+
+
+def test_only_the_first_annotation_on_a_claim_is_tested_as_a_swap(monkeypatch) -> None:
+    """The bound on the gate's added cost: one grounding test per conflated claim, however many
+    `(id M)` a digest stacks on it (audit F-02)."""
+    import scribe.qc as qc
+
+    calls: list[str] = []
+    real = qc._ticket_grounds
+    monkeypatch.setattr(qc, "_ticket_grounds", lambda c, a, k: calls.append(c) or real(c, a, k))
+    digest = "".join(f"- #608 (id {n})\n" for n in range(700, 760)) + "- #608 (id 525)\n"
+    report = check_digest(digest, _ticket_log("ticket #525, updated task_id=608"))
+    (finding,) = [f for f in report.findings if f.kind == "ticket"]
+    assert finding.swap_identifier is None  # #700 does not ground, and #525 is never asked
+    assert calls.count("#700") == 1 and "#525" not in calls
