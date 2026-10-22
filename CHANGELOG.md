@@ -17,12 +17,14 @@ digest format.
 
 ### Changed
 
-- **A value made only of punctuation is no longer redacted.** The `envvar`, `keyval` and
+- **A value with no letter or digit is no longer redacted.** The `envvar`, `keyval` and
   `json` rules now need at least one letter or digit, in any script, in the value. Before this,
   "`` `LoadCredential=` `` for secrets" took the closing backtick as the value and redacted it.
-  This applies at extraction time as well as to the post-render guard; it loses nothing,
-  because a value with no letters or digits is not a secret. The backtick stays in every value
-  class, so a value with a backtick in the middle is still redacted whole.
+  This applies at extraction time as well as to the post-render guard. A value with no letter
+  or digit in any script (punctuation, symbols, emoji) is no longer redacted; such values are
+  judged not to be credentials in practice, and `SECURITY.md` lists this under "Known
+  limitations". The backtick stays in every value class, so a value with a backtick in the
+  middle is still redacted whole.
 - **Captured values are trimmed of edge backticks** before the guard checks the event log,
   the same way surrounding quotes already were. `` `API_TOKEN=<tok>` `` used to capture `<tok>`
   plus the closing backtick, which is never in the log, so a real extraction miss was reported

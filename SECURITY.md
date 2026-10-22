@@ -31,6 +31,11 @@ security property is therefore that **no credential survives extraction**.
   string in no assignment context — will not be caught. Generic entropy detection was
   considered and rejected: it also matches git SHAs and image digests, which are exactly the
   facts the event log exists to preserve.
+- Since 0.15.0 an assigned value with no letter or digit in any script (punctuation, symbols,
+  emoji: `PASSWORD=!@#$%^&*`) is not redacted, at extraction or at write time. Such values
+  are judged not to be credentials in practice, and redacting them redacted prose: a
+  directive named in backticks lost its closing backtick. A value with at least one letter or
+  digit is redacted whole, punctuation included.
 - Test fixtures contain synthetic credentials by necessity. They carry a `FAKE` or `NOTREAL`
   marker and `.gitleaks.toml` allowlists on that marker, not on path.
 
