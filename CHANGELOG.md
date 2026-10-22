@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Minor.** The post-render redaction guard no longer reports prose as a leak, and no longer
 reports a real backticked leak as model output. Its cause now reaches the run record
-(#1196 (id 1279)). The id-conflation rewrite repairs a swapped `#N (id M)` pair instead of
-half-rewriting it (#1195 (id 1278)). No schema change, no config change, and no change to the
+(vikunja#1196). The id-conflation rewrite repairs a swapped `#N (id M)` pair instead of
+half-rewriting it (vikunja#1195). No schema change, no config change, and no change to the
 digest format.
 
 ### Changed
@@ -65,7 +65,7 @@ digest format.
 
 **Minor.** A new command corrects id-conflated ticket refs in digests written before 0.13.0. A
 new append-only ledger records every edit scribe makes to a digest after the model wrote it,
-whether live or after the fact (#1194 (id 1277)). There is no schema change and no change to
+whether live or after the fact (vikunja#1194). There is no schema change and no change to
 the run record or the digest format. Two new optional config keys default outside both trees,
 so existing configs need no edit.
 
@@ -142,7 +142,7 @@ config key, which defaults on, so existing configs need no edit.
 
 ### Added
 
-- **The id-conflation rewrite** (#1188 (id 1271) item 2a). A `#N` that the QC gate rejected
+- **The id-conflation rewrite** (vikunja#1188 item 2a). A `#N` that the QC gate rejected
   because the log holds `N` only as an internal id (`task_id=N`, `"id": N`, `/tasks/N`) is
   rewritten to `id N` before the block is written. Over 14 days, 60 of 61 ticket findings
   were this. Every one checked against the tracker named nothing, or an unrelated ticket,
@@ -163,7 +163,7 @@ config key, which defaults on, so existing configs need no edit.
 
 ### Changed
 
-- **A provider outage leaves sessions pending** (#1188 (id 1271) item 4). There is no
+- **A provider outage leaves sessions pending** (vikunja#1188 item 4). There is no
   fallback provider; a late digest is acceptable. If a session's last attempt failed with
   `ProviderError.unavailable` (the endpoint refused or dropped the connection, or answered 429
   or 5xx; see *Security* below for the exact list), scribe writes no placeholder, makes no
@@ -176,7 +176,7 @@ config key, which defaults on, so existing configs need no edit.
   it shows only an id, write `id M`. **`prompt_sha256` changes** from `110d550b…` to
   `98a39128…`, so `qc-report --by prompt` separates the populations before and after.
 - **A backticked path whose root the log never names is no longer grounded by token
-  co-occurrence** (#908 (id 991) option 2). `~/claude/...` used to ground against a log
+  co-occurrence** (vikunja#908 option 2). `~/claude/...` used to ground against a log
   holding `~/.claude/...`. Over the 980-block corpus this is +2 findings, both wrong paths,
   and 0 removed. Option 1 (rerouting backticked paths to the path rule) was re-measured at
   +3 net and is still not done.
@@ -236,12 +236,12 @@ Fixes from this release's own pre-merge audit (scribe-qc-integrity-2026-10, 1 Me
 - **certifi 2026.7.22 → 2026.10.19** in `uv.lock` (PYSEC-2026-4320, published during this
   build; it turned the dependency-audit gate red on `main` as well). The lock does not govern
   what forge installs, so the deploy re-resolves it independently.
-- **The default-budget guard no longer depends on a transcript that expires** (#966 (id 1049)).
+- **The default-budget guard no longer depends on a transcript that expires** (vikunja#966).
   `test_budget` now runs on a synthetic transcript built from
   `tests/fixtures/budget-profile.json`, which holds the reference session's sizes and no
   content. It reproduces the real ladder at every rung. The real-transcript test stays as a
   second check, and fails instead of skipping where `SCRIBE_REQUIRE_BUDGET_REFERENCE` is set.
-- **Docs overstated two things** (#968 (id 1051)).
+- **Docs overstated two things** (vikunja#968).
   - The `.github/CODEOWNERS` header credited the file to Scorecard's Code-Review check. It
     counts toward Branch-Protection, at Tier 4, with "require review from code owners".
   - AGENTS.md invariants 2 and 18 and the README stated a fixed 30-day transcript expiry. It
