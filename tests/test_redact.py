@@ -375,3 +375,20 @@ def test_a_value_whose_letters_are_not_ascii_is_still_redacted(text: str) -> Non
     r = Redactor()
     r.scrub(text)
     assert r.count == 1
+
+
+def test_edge_stripping_is_linear_in_nesting_depth() -> None:
+    """Audit F-05. Re-slicing per layer made alternately nested delimiters quadratic: 0.48 s
+    for a 200k-character capture. At 800k characters the old loop took 2.1 s and this takes
+    0.04 s, so the 0.5 s bound separates them with room for a slow runner."""
+    import time
+
+    from scribe.extract.redact import _strip_edges
+
+    depth = 200_000
+    nested = "`'" * depth + "FAKEcore" + "'`" * depth
+    start = time.perf_counter()
+    assert _strip_edges(nested) == "FAKEcore"
+    assert time.perf_counter() - start < 0.5
+    for raw, expected in (('"abc"', "abc"), ("``x``", "x"), ("`\"'v'\"`", "v"), ("a`b", "a`b")):
+        assert _strip_edges(raw) == expected

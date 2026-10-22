@@ -165,14 +165,22 @@ _ASSIGNMENT_REPL: dict[str, str] = {
 
 
 def _strip_edges(value: str) -> str:
-    """Peel matching quotes and any edge backticks off a captured value until it is stable."""
+    """Peel matching quotes and any edge backticks off a captured value until it is stable.
+
+    Moves two indices and slices once, so alternately nested delimiters are linear rather than
+    one copy of the value per layer (audit F-05: 0.48 s at 200k characters before).
+    """
+    lo, hi = 0, len(value)
     while True:
-        before = value
-        if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        value = value.strip("`")
-        if value == before:
-            return value
+        before = (lo, hi)
+        if hi - lo > 1 and value[lo] == value[hi - 1] and value[lo] in "\"'":
+            lo, hi = lo + 1, hi - 1
+        while lo < hi and value[lo] == "`":
+            lo += 1
+        while lo < hi and value[hi - 1] == "`":
+            hi -= 1
+        if (lo, hi) == before:
+            return value[lo:hi]
 
 
 class Redactor:
