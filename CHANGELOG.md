@@ -18,7 +18,7 @@ digest format.
 ### Changed
 
 - **A value made only of punctuation is no longer redacted.** The `envvar`, `keyval` and
-  `json` rules now need at least one letter or digit in the value. Before this,
+  `json` rules now need at least one letter or digit, in any script, in the value. Before this,
   "`` `LoadCredential=` `` for secrets" took the closing backtick as the value and redacted it.
   This applies at extraction time as well as to the post-render guard; it loses nothing,
   because a value with no letters or digits is not a secret. The backtick stays in every value
@@ -55,7 +55,7 @@ digest format.
   `id 608 (id 525)` on 2026-10-21, and the gate no longer extracts it.
 - `tests/test_eventlog.py`'s whole-file-scrubbing trap test was retargeted, not deleted. Its
   two fixtures had punctuation-only values, which no longer fire. The trap itself was
-  re-checked and still exists: `json.dumps` writes a non-ASCII character as `\uXXXX`, the
+  re-checked and still exists: `json.dumps` writes non-ASCII punctuation as `\uXXXX`, the
   match runs through it into an escaped quote, and the document is corrupted.
 
 ## [0.14.0] — 2026-10-21

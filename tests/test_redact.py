@@ -364,3 +364,14 @@ def test_a_backtick_inside_a_value_is_part_of_it_and_the_whole_value_goes() -> N
     assert "cd" not in out and "NOTREAL" not in out
     # Only the edges are trimmed for the classifier; the inner backticks stay in the capture.
     assert r.captured == ["FAKEab`cd`efNOTREALtail"]
+
+
+@pytest.mark.parametrize(
+    "text", ["export PASSWORD=ñçåßFAKE", "PASSWORD=ñçåß", "password: пароль", '{"api_key": "ключ"}']
+)
+def test_a_value_whose_letters_are_not_ascii_is_still_redacted(text: str) -> None:
+    """The lookahead means "a letter or digit", in any script. An ASCII-only class would have
+    stopped redacting a password written entirely in non-Latin letters."""
+    r = Redactor()
+    r.scrub(text)
+    assert r.count == 1

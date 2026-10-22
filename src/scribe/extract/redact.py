@@ -107,7 +107,7 @@ _ASSIGNMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "json",
         re.compile(
             rf"(?ix)(\"[a-z0-9_\-]*{_SENSITIVE_KEY}\"\s*:\s*)"
-            r"(\"(?!«)(?=[^\"\n]*[A-Za-z0-9])[^\"\n]{4,}\")"
+            r"(\"(?!«)(?=[^\"\n]*[^\W_])[^\"\n]{4,}\")"
         ),
     ),
     # TOML/YAML: api_key = "v"  /  password: v
@@ -115,7 +115,7 @@ _ASSIGNMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "keyval",
         re.compile(
             rf"(?ixm)^(\s*[\"']?[a-z0-9_\-]*{_SENSITIVE_KEY}[\"']?\s*[:=]\s*)"
-            r"(?!\s*(?:\{|\[|«|$))(?=[^\n]*[A-Za-z0-9])([^\n]+)$"
+            r"(?!\s*(?:\{|\[|«|$))(?=[^\n]*[^\W_])([^\n]+)$"
         ),
     ),
     # Shell/env: export FOO_TOKEN=v  /  FOO_TOKEN=v  (also docker inspect "Env" entries)
@@ -123,15 +123,16 @@ _ASSIGNMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "envvar",
         re.compile(
             rf"(?ix)\b((?:export\s+)?[A-Z0-9_]*{_SENSITIVE_KEY}\s*=\s*)"
-            r"(?!\s*$)(?!«)((?=[^\s\"',\]\}]*[A-Za-z0-9])[^\s\"',\]\}]+"
-            r"|\"(?=[^\"\n]*[A-Za-z0-9])[^\"\n]*\""
-            r"|'(?=[^'\n]*[A-Za-z0-9])[^'\n]*')"
+            r"(?!\s*$)(?!«)((?=[^\s\"',\]\}]*[^\W_])[^\s\"',\]\}]+"
+            r"|\"(?=[^\"\n]*[^\W_])[^\"\n]*\""
+            r"|'(?=[^'\n]*[^\W_])[^'\n]*')"
         ),
     ),
 )
 
-# The `(?=...[A-Za-z0-9])` lookahead on the `json`, `keyval` and `envvar` values (vikunja#1196,
-# security's verdict in its comment 1576). A value made only of punctuation is not a secret,
+# The `(?=...[^\W_])` lookahead on the `json`, `keyval` and `envvar` values (vikunja#1196,
+# security's verdict in its comment 1576): at least one letter or digit, in any script, so
+# `PASSWORD=ñçåß` is still a value. A value made only of punctuation is not a secret,
 # and before this a prose mention of a directive, "`LoadCredential=` for secrets", captured
 # the closing backtick as the "value". The lookahead sits inside each `envvar` alternative,
 # because the quoted forms start with a quote that the bare class excludes. The backtick is

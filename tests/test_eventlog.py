@@ -213,7 +213,7 @@ def test_field_level_and_whole_file_scrubbing_disagree_and_field_level_is_right(
     letter or digit, so the two punctuation-only fixtures this test used to run on stopped
     firing, and the first is asserted below as closed: a bare `", "` between two leaves is no
     longer a "value". Serialization still manufactures letters and digits, though. With
-    `ensure_ascii` a non-ASCII character becomes `\\u2014`, the match runs through it and on
+    `ensure_ascii` non-ASCII punctuation becomes `\\u2014`, the match runs through it and on
     into the backslash of an escaped quote, and the escape is destroyed. Checked before
     retargeting, as the assertion message below asks.
     """
@@ -225,7 +225,7 @@ def test_field_level_and_whole_file_scrubbing_disagree_and_field_level_is_right(
     # Two escaped-quote shapes a tool-argument blob actually takes, both clean field-by-field.
     for payload in (
         {"cmd": 'sh -c "export API_TOKEN=\u2014" && echo done', "note": "tail"},
-        {"cmd": "curl -d 'x' password=\u00e9\"", "next": "plain prose that follows"},
+        {"cmd": "curl -d 'x' password=\u00b7\"", "next": "plain prose that follows"},
     ):
         serialized = json.dumps(payload)
 
