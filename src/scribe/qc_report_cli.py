@@ -245,14 +245,25 @@ def _section(label: str, s: dict) -> list[str]:
     if s["discarded"]:
         lines.append(f"  !! {s['discarded']} digest(s) produced but not written")
     if s["post_render_redactions"]:
-        # Only `extraction-miss` means the model was shown a secret. Any other cause is a
-        # secret-shaped string the write-time guard caught, so it is reported but not flagged.
+        # Only `model-output` positively says extraction was fine, so it alone goes unflagged.
+        # `extraction-miss` means the model was shown a secret, and `undetermined`,
+        # `inconclusive` and `unrecorded` cannot rule that out: `inconclusive` is what a real
+        # secret under 8 characters reports (audit F-02, scribe-redaction-guard-2026-10).
+        # SECURITY[deferred]: no cause changes the exit code, so even `extraction-miss` never
+        # reaches an alert route on its own. Ticket vikunja#1203. Audit:
+        # 2026-10-22/scribe-redaction-guard-2026-10 F-02.
         by_cause = s.get("post_render_by_cause", {})
         causes = ", ".join(f"{c} {n}" for c, n in by_cause.items())
         missed = by_cause.get("extraction-miss", 0)
+        open_ = s["post_render_redactions"] - missed - by_cause.get("model-output", 0)
         line = f"{s['post_render_redactions']} post-render redaction(s) by cause: {causes}"
+        notes = []
         if missed:
-            line = f"!! {line} -- {missed} matched a value in the event log the model was shown"
+            notes.append(f"{missed} matched a value in the event log the model was shown")
+        if open_:
+            notes.append(f"{open_} cannot rule a leak out")
+        if notes:
+            line = f"!! {line} -- " + "; ".join(notes)
         lines.append(f"  {line}")
     return lines
 

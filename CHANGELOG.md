@@ -30,8 +30,9 @@ digest format.
   plus the closing backtick, which is never in the log, so a real extraction miss was reported
   as `model-output`. This changes only what is compared, never what is redacted.
 - **`qc-report` breaks post-render redactions down by cause.** Records without a cause (before
-  0.15.0) count as `unrecorded`. The `!!` line is kept only for `extraction-miss`. Any other
-  cause is reported on a plain line.
+  0.15.0) count as `unrecorded`. The `!!` marker is dropped only for `model-output`, the one
+  cause that rules a leak out. `extraction-miss`, `undetermined`, `inconclusive` and
+  `unrecorded` keep it.
 - **A swapped pair is repaired.** `#608 (id 525)`, where the log holds 608 as an id and
   grounds `#525`, is rewritten to `#525 (id 608)`. The gate decides this while grading and
   stores it on the finding (`Finding.swap_identifier`). The rewrite still never searches the

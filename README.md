@@ -594,8 +594,8 @@ guard fired. It is a label only, never the value: `""` (it did not fire), `extra
 (the value is in the event log, so the model was shown it), `model-output` (it is not),
 `undetermined` (no event log to check), or `inconclusive` (every match was too short or generic
 to tell). The digest is redacted in every case. `qc-report` breaks post-render redactions down
-by cause. Records from before 0.15.0 count as `unrecorded`, and only `extraction-miss` is
-flagged with `!!`.
+by cause. Records from before 0.15.0 count as `unrecorded`. The line is flagged with `!!`
+unless every fire is `model-output`, the one cause that rules a leak out.
 
 `prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
 cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.
@@ -652,7 +652,9 @@ which is not the same as a broken tool.
 
 Since 0.13.0 the sweep rewrites an id-conflated `#N` to `id N` before the block is written.
 Since 0.15.0 it also repairs a swapped pair: `#608 (id 525)`, where the log holds 608 as an id
-and `#525` as written, becomes `#525 (id 608)` rather than `id 608 (id 525)`.
+and `#525` as written, becomes `#525 (id 608)` rather than `id 608 (id 525)`. Each half is
+checked against the log, but not the pairing: if the log ties 608 to a different ticket, the
+repaired pair is still wrong.
 Blocks written before that still carry the wrong ref. `scribe correct` applies the same
 rewrite to them: it re-grades every complete, final block against its own event log with the
 current gate, and makes exactly the edit the live path would.

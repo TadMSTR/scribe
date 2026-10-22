@@ -935,6 +935,9 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
     for claim in sorted(claimed["tickets"]):
         if not _ticket_grounds(claim, allowed, corpus):
             conflated = is_id_conflation(claim, corpus)
+            # SECURITY[deferred]: each half is grounded (`#M` as written, N as an id), but not
+            # the pairing: nothing checks that #M's id is N. Ticket vikunja#1204. Audit:
+            # 2026-10-22/scribe-redaction-guard-2026-10 F-03.
             swap = annotated.get(claim) if conflated else None
             if swap and not _ticket_grounds(f"#{swap}", allowed, corpus):
                 swap = None
@@ -1005,6 +1008,11 @@ def rewrite_id_conflations(text: str, report: Report) -> tuple[str, int]:
     would leave `id 608 (id 525)`, which reads as two ids (vikunja#1195). An annotation whose
     `#M` does not ground is left as today, `id 608 (id 525)`: the gate cannot say which half
     is right.
+
+    **The repair grounds each half, not the pairing** (audit F-03). `#M` must ground as written
+    and N must appear as an id, but nothing checks that ticket #M's id is N. A log that ties N
+    to a different ticket still yields a well-formed `#M (id N)`, which is wrong. vikunja-mcp
+    refuses a mismatched pair, and the ledger keeps `before`.
 
     The match is `_TICKET_RE`, the pattern the gate extracted the claim with, so `#65` never
     rewrites inside `#655` and a ref the gate never saw is never rewritten.

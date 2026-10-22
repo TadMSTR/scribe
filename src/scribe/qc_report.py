@@ -177,8 +177,8 @@ def stats(records: list[dict]) -> dict:
         "placeholders": len(placeholders),
         "suppressed": sum(1 for r in records if r.get("suppressed")),
         "discarded": sum(1 for r in records if r.get("discarded")),
-        # A fire is not a leak by itself: it is loud in the text report only when its cause is
-        # `extraction-miss`. See `_post_render_by_cause`.
+        # A fire is not a leak by itself: it is loud in the text report unless its cause is
+        # `model-output`, the one cause that rules a leak out. See `_post_render_by_cause`.
         "post_render_redactions": int(sum(_num(r.get("post_render_redactions")) for r in records)),
         "post_render_by_cause": _post_render_by_cause(records),
         "input_tokens": int(sum(_num(r.get("input_tokens")) for r in records)),

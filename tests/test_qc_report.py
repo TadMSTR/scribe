@@ -262,7 +262,8 @@ def test_the_text_report_labels_both_statistics(record, capsys) -> None:
 
 def test_post_render_fires_are_broken_down_by_cause(record, capsys) -> None:
     """R8 (vikunja#1196). A record without the key predates 0.15.0 and counts as `unrecorded`,
-    never as a guessed cause, and only `extraction-miss` earns the `!!`."""
+    never as a guessed cause. Only `model-output` loses the `!!`: every other cause either is
+    a leak or cannot rule one out (audit F-02)."""
     rows = [
         rec(post_render_redactions=1),  # pre-0.15.0: no post_render_cause key at all
         rec(post_render_redactions=2, post_render_cause="inconclusive"),
@@ -280,6 +281,13 @@ def test_post_render_fires_are_broken_down_by_cause(record, capsys) -> None:
     assert "4 post-render redaction(s) by cause: inconclusive 2, model-output 1, unrecorded 1" in (
         out
     )
+    assert "!! 4 post-render" in out and "-- 3 cannot rule a leak out" in out
+
+    only_model = [rec(post_render_redactions=1, post_render_cause="model-output")]
+    write(record, only_model + [rec() for _ in range(24)])
+    assert main(["--run-record", str(record), "--until", UNTIL]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "1 post-render redaction(s) by cause: model-output 1" in out
     assert "!!" not in out
 
     rows.append(rec(post_render_redactions=1, post_render_cause="extraction-miss"))
