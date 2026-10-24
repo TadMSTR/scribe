@@ -5,9 +5,9 @@ logic to be unified rather than triplicated, so **this copy is intended to be th
 one** — when scribe cuts over, the other copies should import it or be deleted, not diverge.
 
 Nothing here involves a model. The signals are: an unresolved `<...>` placeholder; bare
-template residue the angle-bracket pattern misses (count letters, `YYYY-MM-DD` date
-templates); a known skill/template structural signature; and several consecutive non-trivial
-lines reproduced verbatim from the source.
+template residue the angle-bracket pattern misses (count letters, but not the `#N (id M)`
+ticket notation; `YYYY-MM-DD` date templates); a known skill/template structural
+signature; and several consecutive non-trivial lines reproduced verbatim from the source.
 """
 
 from __future__ import annotations
@@ -61,6 +61,36 @@ _RESIDUE_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bYYYY(?:-MM(?:-(?:DD|XX))?)?\b|\b\d{4}-\d{2}-XX\b"),
 )
 
+#: The `_RESIDUE_RES` patterns whose `N`/`M` hits `_is_notation` may excuse. The date pattern
+#: and `XX` are never excused: neither is part of the ticket notation, and neither has
+#: produced a false positive.
+_NOTATION_EXEMPT = frozenset({0, 1})
+
+#: The fleet writes ticket references as `#N (id M)` (adopted 2026-10-21, fleet-wide via
+#: vikunja#1190), and every agent's CLAUDE.md now explains it. A faithful digest of a session
+#: *about* that convention has to say `#N`, `id M` and "N as an id", and `_RESIDUE_RES[0]`
+#: read every one of them as an unfilled count letter. Two sessions were suppressed on all
+#: nine attempts (vikunja#1216): the same defect as #868's placeholders, a guard keyed on
+#: surface syntax that cannot tell content *about* a form from content *in* it. The fix is
+#: the same too: key on **position**, and leave the letter patterns alone so `wrote N docs`
+#: still fires.
+#:
+#: A letter is notation when it is written as a ticket ref, `#N` or `id M` / `(id M)`, or
+#: when it sits inside inline code, `` `n/N` ``. Templates do not wrap their count letters
+#: in backticks, so the cost of that exemption is a digest that keeps an `N`; the cost of
+#: the false positive was a digest lost.
+_REF_BEFORE_RE = re.compile(r"(?:#|\bid\s+\(?)$", re.IGNORECASE)
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+#: A notation use earlier on the same line: `#N`, `id M`, or inline code holding a bare
+#: `N`/`M`. A bare letter *after* one of these is excused too (option ii of the build plan's
+#: C4/C5): in "`#M` as written, N as an id" the `N` names the notation the line just wrote,
+#: and nothing about the letter itself can tell it from "wrote N docs". Only what comes
+#: after counts, so "Closed N tickets" and "the N in #N" both still fire. A template line
+#: that pairs a count letter with a literal `#N` ("Closed N tickets: #N") also still fires,
+#: because its count comes first.
+_NOTATION_ANCHOR_RE = re.compile(r"#[NM]\b|\bid\s+\(?[NM]\b|`[^`\n]*\b[NM]\b[^`\n]*`")
+
 _MIN_OVERLAP_LINES = 3  # consecutive identical non-trivial lines that mean "copied"
 _MIN_OVERLAP_LEN = 20  # ignore short/generic lines when comparing
 
@@ -70,8 +100,10 @@ RETRY_REMINDER = (
     "tokens from the source. Also do NOT emit bare placeholder residue: use the ACTUAL "
     "numbers from the event log instead of count letters like N, M, or XX, and real dates "
     "instead of YYYY-MM-DD templates — if a value is unknown, omit it rather than leaving a "
-    "placeholder. Describe only what happened. If a skill or template was loaded, state "
-    "only that it was loaded and for what purpose — never its contents."
+    "placeholder. The ticket notation itself is not residue: if the session was about the "
+    "`#N (id M)` citation form, you may write it, in backticks. Describe only what "
+    "happened. If a skill or template was loaded, state only that it was loaded and for "
+    "what purpose — never its contents."
 )
 
 
@@ -108,15 +140,42 @@ def _scaffold_line(line: str) -> bool:
     return len(words) < _MIN_PROSE_WORDS
 
 
+def _is_notation(text: str, m: re.Match[str]) -> bool:
+    """True when the residue hit `m` in `text` is the ticket notation, not a count letter.
+
+    Judged on the hit's own line: a ref prefix right before it, an enclosing code span, or
+    an earlier notation use on the line. See `_REF_BEFORE_RE` and `_NOTATION_ANCHOR_RE`.
+    """
+    start = text.rfind("\n", 0, m.start()) + 1
+    end = text.find("\n", m.end())
+    line = text[start : end if end != -1 else len(text)]
+    pos = m.start() - start
+    if _REF_BEFORE_RE.search(line[:pos]):
+        return True
+    if any(c.start() < pos < c.end() for c in _CODE_SPAN_RE.finditer(line)):
+        return True
+    return bool(_NOTATION_ANCHOR_RE.search(line[:pos]))
+
+
+def _has_residue(text: str) -> bool:
+    """Whether `text` carries template residue. The detector and the fallback re-check
+    (F-05) share this, so they cannot disagree about what residue is."""
+    for i, res in enumerate(_RESIDUE_RES):
+        for m in res.finditer(text):
+            exemptable = i in _NOTATION_EXEMPT and "XX" not in m.group()
+            if not (exemptable and _is_notation(text, m)):
+                return True
+    return False
+
+
 def detect_contamination(summary: str, raw: str) -> str | None:
     """Return a short reason if `summary` looks like copied template text, else None."""
     if not summary or not summary.strip():
         return "empty"
     if any(_scaffold_line(line) for line in summary.splitlines()):
         return "placeholder_token"
-    for res in _RESIDUE_RES:
-        if res.search(summary):
-            return "residue_token"
+    if _has_residue(summary):
+        return "residue_token"
     for sig in _TEMPLATE_SIGNATURES:
         if sig.search(summary):
             return "template_signature"
@@ -165,7 +224,7 @@ def build_fallback_note(raw: str) -> str:
     if first_user and (
         _PLACEHOLDER_RE.search(first_user)
         or any(sig.search(first_user) for sig in _TEMPLATE_SIGNATURES)
-        or any(res.search(first_user) for res in _RESIDUE_RES)
+        or _has_residue(first_user)
     ):
         first_user = ""
     return f"- User turn: {first_user}\n{SUPPRESSION_MARKER}" if first_user else SUPPRESSION_MARKER

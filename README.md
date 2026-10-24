@@ -597,6 +597,13 @@ to tell). The digest is redacted in every case. `qc-report` breaks post-render r
 by cause. Records from before 0.15.0 count as `unrecorded`. The line is flagged with `!!`
 unless every fire is `model-output`, the one cause that rules a leak out.
 
+Since 0.16.0 it also has `contamination_signal`: the contamination guard's signal
+(`residue_token`, `placeholder_token`, `template_signature`, `verbatim_overlap`, `empty`) when
+the session was suppressed, `""` otherwise. `qc-report` breaks suppressions down by signal, and
+records from before 0.16.0 count as `unrecorded`. The guard does not treat the `#N (id M)`
+ticket notation as residue: an `N`/`M` written after `#` or `id`, inside inline code, or later
+on a line that already used the notation is excused. `XX` and date templates never are.
+
 `prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
 cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.
 `model_resolved` is whatever the provider's response said, or `null`. Some providers, Mistral

@@ -242,6 +242,9 @@ def _section(label: str, s: dict) -> list[str]:
     )
     models = ", ".join(f"{m} ({n})" for m, n in s["models_resolved"].items()) or "none recorded"
     lines.append(f"  models resolved {models}")
+    if s["suppressed"]:
+        signals = ", ".join(f"{c} {n}" for c, n in s.get("suppressed_by_signal", {}).items())
+        lines.append(f"  {s['suppressed']} suppressed by signal: {signals}")
     if s["discarded"]:
         lines.append(f"  !! {s['discarded']} digest(s) produced but not written")
     if s["post_render_redactions"]:

@@ -73,6 +73,7 @@ LIVE_FIELDS = {
     "secrets_redacted",
     "post_render_redactions",
     "post_render_cause",
+    "contamination_signal",
     "errors",
     "qc_ok",
     "qc_coverage",
@@ -388,3 +389,24 @@ def test_a_clean_run_records_an_empty_cause(env) -> None:
     run_once(cfg, store, now=1_000_000.0, provider_factory=Stub)
     (rec,) = _records(cfg)
     assert rec["post_render_redactions"] == 0 and rec["post_render_cause"] == ""
+
+
+# --- vikunja#1216: the contamination signal reaches the record ------------------------------
+
+
+def test_a_suppressed_record_carries_the_contamination_signal(env) -> None:
+    """R1. Before 0.16.0 the signal reached only SigNoz; the record said `errors: 3`."""
+    cfg, store = env
+    scaffold = json.dumps({"asked": "x", "done": ["- <specific step>"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(scaffold))
+    (rec,) = _records(cfg)
+    assert rec["suppressed"] is True
+    assert rec["contamination_signal"] == r.contamination_signal == "placeholder_token"
+
+
+def test_a_record_that_was_not_suppressed_has_an_empty_signal(env) -> None:
+    """R2."""
+    cfg, store = env
+    run_once(cfg, store, now=1_000_000.0, provider_factory=Stub)
+    (rec,) = _records(cfg)
+    assert rec["suppressed"] is False and rec["contamination_signal"] == ""

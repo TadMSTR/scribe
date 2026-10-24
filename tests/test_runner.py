@@ -147,6 +147,7 @@ def test_contamination_is_retried_with_a_reminder(slept) -> None:
     first_system, second_system = provider.calls[0][0], provider.calls[1][0]
     assert "IMPORTANT" not in first_system
     assert "IMPORTANT" in second_system, "the retry must carry the reminder"
+    assert out.contamination_signal == "", "a rescued run was not suppressed"
 
 
 def test_persistent_contamination_falls_back_to_a_suppression_note(slept) -> None:
@@ -156,6 +157,7 @@ def test_persistent_contamination_falls_back_to_a_suppression_note(slept) -> Non
     dirty = json.dumps({"asked": "did <specific step>", "done": ["a"]})
     out = summarize_log(_log(), Scripted(dirty, dirty, dirty), sleep=sleep, max_attempts=3)
     assert out.suppressed is True
+    assert out.contamination_signal == "placeholder_token"
     assert out.ok is False
     assert "contamination guard" in out.markdown
     assert "<specific step>" not in out.markdown

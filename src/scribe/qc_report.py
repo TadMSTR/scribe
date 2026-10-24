@@ -176,6 +176,7 @@ def stats(records: list[dict]) -> dict:
         },
         "placeholders": len(placeholders),
         "suppressed": sum(1 for r in records if r.get("suppressed")),
+        "suppressed_by_signal": _suppressed_by_signal(records),
         "discarded": sum(1 for r in records if r.get("discarded")),
         # A fire is not a leak by itself: it is loud in the text report unless its cause is
         # `model-output`, the one cause that rules a leak out. See `_post_render_by_cause`.
@@ -205,6 +206,19 @@ def _post_render_by_cause(records: list[dict]) -> dict[str, int]:
         n = int(_num(r.get("post_render_redactions")))
         if n > 0:
             out[r.get("post_render_cause") or CAUSE_UNRECORDED] += n
+    return dict(sorted(out.items()))
+
+
+def _suppressed_by_signal(records: list[dict]) -> dict[str, int]:
+    """Suppressed sessions counted per contamination signal; the figures sum to `suppressed`.
+
+    Same shape as `_post_render_by_cause`: a record older than 0.16.0 has no
+    `contamination_signal` and is counted as `unrecorded` rather than guessed at.
+    """
+    out: Counter[str] = Counter()
+    for r in records:
+        if r.get("suppressed"):
+            out[r.get("contamination_signal") or CAUSE_UNRECORDED] += 1
     return dict(sorted(out.items()))
 
 
