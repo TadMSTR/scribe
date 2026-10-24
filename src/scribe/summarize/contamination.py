@@ -252,10 +252,10 @@ class Detection:
     Before 0.17.0 the rejected render was thrown away, and three investigations of this
     detector started from a guess at what the model had written. `excerpt` is that answer.
 
-    **`excerpt` and `line` are unredacted model output** derived from the transcript. Neither
-    may be stored as they are: `runner` stores `redacted_excerpt(...)` instead, and puts
-    neither on a span nor in `Outcome.errors`. `line` is excluded from `repr` so a debug print
-    of a detection does not become the leak.
+    **`excerpt` and `source` are unredacted model output** derived from the transcript.
+    Neither may be stored as they are: `runner` stores `redacted_excerpt(...)` instead, and
+    puts neither on a span nor in `Outcome.errors`. Both are excluded from `repr`, so a debug
+    print of a detection does not become the leak.
     """
 
     #: The same strings `detect_contamination` returns.
@@ -265,9 +265,9 @@ class Detection:
     #: Which pattern fired: a `_RESIDUE_RULES` name for `residue_token`, else "".
     rule: str = ""
     #: The hit's line, whitespace-collapsed, cut to `EXCERPT_CHARS` around the hit.
-    excerpt: str = ""
-    #: The whole whitespace-collapsed line, for `redacted_excerpt`. In memory only.
-    line: str = field(default="", repr=False)
+    excerpt: str = field(default="", repr=False)
+    #: The whole text the detection was made on, for `redacted_excerpt`. In memory only.
+    source: str = field(default="", repr=False)
 
 
 def _collapse(text: str) -> str:
@@ -318,27 +318,28 @@ def _residue_detection(text: str) -> Detection | None:
         token=m.group(),
         rule=rule,
         excerpt=_window(line, start, start + len(m.group())),
-        line=line,
+        source=text,
     )
 
 
 def redacted_excerpt(detection: Detection, scrub: Callable[[str], str]) -> str:
-    """`detection`'s excerpt rebuilt from the line AFTER `scrub` has run over all of it.
+    """An excerpt taken from the detection's WHOLE source text after `scrub` has run over it.
 
     Scrubbing the 80-character window instead would let the cut split a secret, or drop the
-    key that tells the redactor the value next to it is one (`password=...`). So the whole
-    line is scrubbed first, the hit is found again in what is left, and the window is taken
-    from that. If the hit was inside something the redactor removed, the window starts at the
-    beginning of the line. The window is scrubbed once more on the way out; scrubbing is
-    idempotent, so that can only remove, never restore.
+    key that tells the redactor the value next to it is one (`password=...`). Scrubbing only
+    the hit's line is not enough either: the redactor has rules that span lines, such as a
+    PEM block whose BEGIN is in one item and whose body is in the next. The post-render
+    guard scrubs the whole digest, so this does too (pre-audit F-1). The first residue hit is
+    then found again in what is left, and the window is taken from that.
+
+    If no residue is left, the hit was inside something the redactor removed. The result is
+    then "", because there is nothing safe left to centre on. The window is scrubbed once
+    more on the way out; scrubbing is idempotent, so that can only remove, never restore.
     """
-    if not detection.line:
+    if not detection.source:
         return ""
-    clean = scrub(detection.line)
-    found = _residue_detection(clean)
-    if found is not None:
-        return scrub(found.excerpt)
-    return scrub(_window(clean, 0, 0))
+    found = _residue_detection(scrub(detection.source))
+    return scrub(found.excerpt) if found is not None else ""
 
 
 def explain_contamination(summary: str, raw: str) -> Detection | None:

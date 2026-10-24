@@ -428,3 +428,24 @@ def test_the_stored_excerpt_is_redacted(slept, monkeypatch) -> None:
         assert secret not in out.contamination_excerpt and "FAKE" not in out.contamination_excerpt
         assert REDACTED in out.contamination_excerpt
         assert not any(secret in e or REDACTED in e for e in out.errors)
+
+
+def test_a_lone_surrogate_in_the_excerpt_cannot_break_the_record(slept) -> None:
+    """Pre-audit F-2. The excerpt is model text, and provider JSON can decode to a lone
+    surrogate, which a strict UTF-8 write of the run record refuses."""
+    _delays, sleep = slept
+    out = summarize_log(
+        _log(), _three(_digest(asked="Close N tickets \ud83d now", done=CLEAN)), sleep=sleep
+    )
+    assert out.contamination_excerpt
+    out.contamination_excerpt.encode("utf-8")  # strict: raises if a surrogate survived
+
+
+@pytest.mark.parametrize(
+    "token,shown",
+    [("N", "N"), ("256/N", "256/N"), ("YYYY-MM-DD", "YYYY-MM-DD"), ("1234567890123456/N", "#/N")],
+)
+def test_the_span_token_masks_long_digit_runs(token: str, shown: str) -> None:
+    from scribe.summarize.runner import SPAN_TOKEN_CHARS, _span_token
+
+    assert _span_token(token) == shown and len(shown) <= SPAN_TOKEN_CHARS

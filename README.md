@@ -608,9 +608,9 @@ An `N/M` pair, `XX` and date templates are never excused that way.
 
 Since 0.17.0 the line also says what the guard matched: `contamination_rule` (`count_letter`,
 `ratio` or `date` for residue) and `contamination_excerpt`, the model's line around the hit,
-whitespace-collapsed, at most 80 characters, cut on word boundaries, and **redacted** before it
-is stored. The excerpt is in the run record only. The `memsearch.summarize_rejected` span gets
-`rule` and `token` (at most 16 characters), never the excerpt.
+whitespace-collapsed, at most 80 characters, cut on word boundaries, and **redacted** (the whole
+digest is scrubbed before the cut) before it is stored. The excerpt is in the run record only. The `memsearch.summarize_rejected` span gets
+`rule` and `token` (at most 16 characters, long digit runs masked), never the excerpt.
 
 When the last attempt is rejected only for `residue_token`, scribe writes the digest without the
 offending list items instead of suppressing the session. Each field that lost items gets a

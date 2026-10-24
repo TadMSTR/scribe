@@ -20,13 +20,14 @@ retry reminder: **`prompt_sha256` stays `94727aa7…`**. No schema change and no
   that fired (`count_letter`, `ratio`, `date`), by name rather than index so a reorder cannot
   relabel history. `contamination_excerpt` is the model's line around the hit: at most 80
   characters, centred on the match, cut on word boundaries, and passed through the redactor
-  before it is stored. The whole line is scrubbed before the cut, so a window can't split a
-  secret or drop the key that marks one. The excerpt is kept out of `errors` and off every
+  before it is stored. The whole digest is scrubbed before the cut, as the post-render guard
+  does, so a window can't split a secret, drop the key that marks one, or miss a PEM block
+  that spans two items. Lone surrogates are replaced so the record can always be written. The excerpt is kept out of `errors` and off every
   span. Before this the rejected render was thrown away, and every investigation of this
   detector started from a guess. Backfilled records carry `null`. `record_version` is
   unchanged.
 - **`rule` and `token` on `memsearch.summarize_rejected`**, with the token capped at 16
-  characters. The span name and the `signal`/`attempt`/`fallback` attributes are unchanged.
+  characters and digit runs of five or more masked. The span name and the `signal`/`attempt`/`fallback` attributes are unchanged.
 - **`explain_contamination(summary, raw)`** returns a `Detection` (signal, token, rule,
   excerpt). `detect_contamination` is now a thin wrapper over it and behaves the same.
   Residue is reported at its earliest position, so `N/M` reads as `ratio`.

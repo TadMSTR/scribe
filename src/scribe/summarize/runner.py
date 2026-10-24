@@ -20,6 +20,7 @@ summary is vikunja#386.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field, replace
 
@@ -46,6 +47,16 @@ RATE_LIMIT_MULTIPLIER = 3
 #: Longest `token` put on the rejected span. A residue token is a few characters (`N`, `n/N`,
 #: `YYYY-MM-DD`); the bound is there so the span can never become a channel for model text.
 SPAN_TOKEN_CHARS = 16
+
+#: A digit run this long or longer is masked in the span token. `\d+/[NM]` admits any
+#: number of digits, so without this a 16-digit secret could reach SigNoz as a "token".
+#: Four digits stay, so a `YYYY`-shaped year or a `256/N` still reads as written.
+_SPAN_DIGITS_RE = re.compile(r"\d{5,}")
+
+
+def _span_token(token: str) -> str:
+    return _SPAN_DIGITS_RE.sub("#", token)[:SPAN_TOKEN_CHARS]
+
 
 #: The only terminal signal that degrades per item rather than suppressing. It is line-based,
 #: so the offending text sits in identifiable items, and it is the only detector that has
@@ -127,7 +138,11 @@ def _record_detection(outcome: Outcome, detection: Detection) -> None:
     """Put the terminal detection on `outcome`, the excerpt redacted on the way in."""
     outcome.contamination_signal = detection.signal
     outcome.contamination_rule = detection.rule
-    outcome.contamination_excerpt = redacted_excerpt(detection, Redactor().scrub)
+    # Lone surrogates replaced: provider JSON can decode to one, and a strict UTF-8 write
+    # would then lose the whole run record, which is the record that explains the
+    # contamination (pre-audit F-2, the IV-61 shape).
+    excerpt = redacted_excerpt(detection, Redactor().scrub)
+    outcome.contamination_excerpt = excerpt.encode("utf-8", "replace").decode("utf-8")
 
 
 def summarize_log(
@@ -226,7 +241,7 @@ def summarize_log(
                 attempt=attempt,
                 fallback=attempt >= max_attempts,
                 rule=detection.rule,
-                token=detection.token[:SPAN_TOKEN_CHARS],
+                token=_span_token(detection.token),
             ):
                 pass
             outcome.errors.append(f"contamination: {contaminated}")

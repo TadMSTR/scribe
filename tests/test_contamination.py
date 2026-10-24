@@ -496,20 +496,37 @@ def test_the_redacted_excerpt_scrubs_the_whole_line_before_cutting() -> None:
     assert REDACTED in out and "wrote N docs" in out
 
 
-def test_the_line_is_not_in_the_repr() -> None:
+def test_model_text_is_not_in_the_repr() -> None:
     d = explain_contamination("- wrote N docs", raw="")
-    assert "line=" not in repr(d)
+    assert "wrote" not in repr(d) and "source=" not in repr(d) and "excerpt=" not in repr(d)
 
 
-def test_a_hit_the_redactor_swallowed_falls_back_to_the_start_of_the_clean_line() -> None:
-    """The hit is the assigned value, so the redactor removes it and there is nothing left to
-    centre on: the excerpt is the scrubbed line from its start."""
-    from scribe.extract.redact import REDACTED, Redactor
+def test_a_hit_the_redactor_swallowed_leaves_no_excerpt() -> None:
+    """The hit is the assigned value, so the redactor removes it and nothing is left to centre
+    on. Nothing is stored, rather than a guess at what was near it."""
+    from scribe.extract.redact import Redactor
 
     d = explain_contamination("- export TOKEN=N docs", raw="")
     assert d.token == "N"
-    assert redacted_excerpt(d, Redactor().scrub) == f"- export TOKEN={REDACTED} docs"
+    assert redacted_excerpt(d, Redactor().scrub) == ""
 
 
-def test_a_detection_with_no_line_has_no_excerpt() -> None:
+def test_the_excerpt_is_scrubbed_with_the_whole_digest_not_its_line() -> None:
+    """Pre-audit F-1. A PEM block opened in one item and continued in the next is caught only
+    by a scrub that sees both lines, as the post-render guard does. A per-line scrub stored
+    the key body."""
+    from scribe.extract.redact import Redactor
+
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
+    text = (
+        "**Asked:** x\n\n**Done:**\n- Printed -----BEGIN RSA PRIVATE KEY----- header\n"
+        f"- N files {body}\n"
+    )
+    d = explain_contamination(text, raw="")
+    assert d.token == "N" and body in d.excerpt, "the probe needs the body in the raw window"
+    out = redacted_excerpt(d, Redactor().scrub)
+    assert body not in out and "MIIE" not in out
+
+
+def test_a_detection_with_no_source_has_no_excerpt() -> None:
     assert redacted_excerpt(explain_contamination("## Configuration", raw=""), str) == ""
