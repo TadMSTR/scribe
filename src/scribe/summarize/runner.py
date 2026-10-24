@@ -32,6 +32,7 @@ from .contamination import (
     Detection,
     _has_residue,
     build_fallback_note,
+    echoes_source,
     explain_contamination,
     redacted_excerpt,
 )
@@ -254,7 +255,13 @@ def summarize_log(
             # re-check the reduced digest against EVERY detector, once. Anything it finds,
             # including residue that only shows once an item is gone, suppresses as before,
             # with that detection recorded. No loop and no second pruning pass.
-            reduced = _withhold_residue(digest) if contaminated == DEGRADABLE_SIGNAL else None
+            #
+            # A digest whose UNTRIMMED text copies the source verbatim, three items running,
+            # is a template echo with a few count letters in it, and trimming those letters
+            # would write the rest. Checked before the trim, because the trim breaks the run
+            # (audit F-01).
+            degradable = contaminated == DEGRADABLE_SIGNAL and not echoes_source(rendered, corpus)
+            reduced = _withhold_residue(digest) if degradable else None
             if reduced is not None:
                 smaller, withheld = reduced
                 degraded = render_digest(

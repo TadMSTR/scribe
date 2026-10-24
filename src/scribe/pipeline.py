@@ -952,8 +952,12 @@ def _run_record(
         "post_render_cause": result.post_render_cause,
         # The detector's signal name, "" unless suppressed or degraded (vikunja#1216).
         "contamination_signal": result.contamination_signal,
-        # The rule, and the excerpt the runner already redacted. On disk here only: the span
-        # carries the rule and the token, never the excerpt (0.17.0).
+        # The rule, and the excerpt the runner already redacted. On disk here and in the
+        # `--json` report only: the span carries the rule and the token, never the excerpt.
+        # SECURITY[accepted]: the record keeps a <= 80-char redacted quote of rejected model
+        # text indefinitely; the Redactor catches secret shapes only. Bounded, 0600, and
+        # less than the redacted event logs already kept. Audit:
+        # 2026-10-24/scribe-residue-degrade-2026-10 F-02.
         "contamination_rule": result.contamination_rule,
         "contamination_excerpt": result.contamination_excerpt,
         "withheld_items": result.withheld_items,

@@ -13,6 +13,7 @@ signature; and several consecutive non-trivial lines reproduced verbatim from th
 from __future__ import annotations
 
 import bisect
+import json
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -377,6 +378,35 @@ def detect_contamination(summary: str, raw: str) -> str | None:
     and the deploy replay one-liners call it, and its behaviour must not change."""
     d = explain_contamination(summary, raw)
     return d.signal if d else None
+
+
+def echoes_source(summary: str, raw: str) -> bool:
+    """Whether `summary` has `_MIN_OVERLAP_LINES` consecutive non-trivial lines that each
+    appear verbatim in `raw`. Used before the per-item degrade (audit F-01,
+    scribe-residue-degrade-2026-10).
+
+    `verbatim_overlap` cannot stand in for this. It looks for a three-line window inside a
+    line-structured `raw`, and scribe's corpus is `grounding_text()`, one JSON line, so it
+    never fires (vikunja#1217). And even with a line corpus, trimming one item out of a copied
+    run breaks the run it needs. So this tests line by line, on the UNTRIMMED digest, and
+    accepts either the line as written or its JSON-escaped form, which is how it sits in the
+    one-line corpus.
+
+    It gates only the degrade. A digest that fails it is suppressed exactly as 0.16.0 would
+    have suppressed it, so this cannot cost a session that 0.16.0 wrote.
+    """
+    run = 0
+    for line in summary.splitlines():
+        n = _normalize_line(line)
+        if len(n) < _MIN_OVERLAP_LEN:
+            continue
+        if n in raw or json.dumps(n, ensure_ascii=False)[1:-1] in raw:
+            run += 1
+            if run >= _MIN_OVERLAP_LINES:
+                return True
+        else:
+            run = 0
+    return False
 
 
 def build_fallback_note(raw: str) -> str:

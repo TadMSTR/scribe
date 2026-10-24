@@ -609,17 +609,20 @@ An `N/M` pair, `XX` and date templates are never excused that way.
 Since 0.17.0 the line also says what the guard matched: `contamination_rule` (`count_letter`,
 `ratio` or `date` for residue) and `contamination_excerpt`, the model's line around the hit,
 whitespace-collapsed, at most 80 characters, cut on word boundaries, and **redacted** (the whole
-digest is scrubbed before the cut) before it is stored. The excerpt is in the run record only. The `memsearch.summarize_rejected` span gets
-`rule` and `token` (at most 16 characters, long digit runs masked), never the excerpt.
+digest is scrubbed before the cut) before it is stored. The excerpt goes to two places: the run
+record, and the `--json` report of `scribe run` (one entry per session). It goes nowhere else.
+The `memsearch.summarize_rejected` span gets `rule` and `token` (at most 16 characters, long
+digit runs masked), never the excerpt.
 
 When the last attempt is rejected only for `residue_token`, scribe writes the digest without the
 offending list items instead of suppressing the session. Each field that lost items gets a
-non-bullet `_Withheld: N items dropped by the contamination guard (residue_token)._` line,
-which QC does not grade, and the record carries `withheld_items` and `withheld_fields` with
-`contamination_signal` still set. It suppresses as before when residue is in `Asked`, when
-more than half the list items (or all of them) would go, or when the reduced digest fails any
-detector on a re-check. `qc-report` prints a `degraded` line. Records from before 0.17.0 count
-as 0, since no earlier version could degrade.
+non-bullet `_Withheld: N items dropped by the contamination guard (residue_token)._` line, which
+QC does not grade, and the record carries `withheld_items` and `withheld_fields` with
+`contamination_signal` still set. It suppresses as before when residue is in `Asked`, when the
+untrimmed digest has three items running that appear verbatim in the session (a copied template
+with a few count letters in it), when more than half the list items (or all of them) would go,
+or when the reduced digest fails any detector on a re-check. `qc-report` prints a `degraded`
+line. Records from before 0.17.0 count as 0, since no earlier version could degrade.
 
 `prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
 cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.

@@ -22,7 +22,8 @@ retry reminder: **`prompt_sha256` stays `94727aa7…`**. No schema change and no
   characters, centred on the match, cut on word boundaries, and passed through the redactor
   before it is stored. The whole digest is scrubbed before the cut, as the post-render guard
   does, so a window can't split a secret, drop the key that marks one, or miss a PEM block
-  that spans two items. Lone surrogates are replaced so the record can always be written. The excerpt is kept out of `errors` and off every
+  that spans two items. Lone surrogates are replaced so the record can always be written.
+  The excerpt goes to the run record and to `scribe run --json`, and nowhere else. The excerpt is kept out of `errors` and off every
   span. Before this the rejected render was thrown away, and every investigation of this
   detector started from a guess. Backfilled records carry `null`. `record_version` is
   unchanged.
@@ -32,7 +33,9 @@ retry reminder: **`prompt_sha256` stays `94727aa7…`**. No schema change and no
   excerpt). `detect_contamination` is now a thin wrapper over it and behaves the same.
   Residue is reported at its earliest position, so `N/M` reads as `ratio`.
 - **Per-item degrade on a terminal `residue_token`.** On the last attempt only, when `Asked`
-  is clean, list items that carry residue are dropped and the reduced digest is re-checked
+  is clean and the untrimmed digest does not copy the session verbatim (three items running,
+  matched line by line so the one-line JSON corpus counts), list items that carry residue are
+  dropped and the reduced digest is re-checked
   against every detector, once. It is written when the re-check is clean and no more than
   half the list items went. Otherwise the session is suppressed as before, with whatever the
   re-check found recorded. Each field that lost items gets a non-bullet

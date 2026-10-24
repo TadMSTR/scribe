@@ -387,9 +387,11 @@ def test_other_terminal_signals_are_never_degraded(
 
 def test_a_recheck_that_finds_something_else_suppresses_and_records_it(slept, line_corpus) -> None:
     """G7. Dropping the residue item joins three source lines into a verbatim run, which the
-    first pass never got to because residue is checked before overlap."""
+    first pass never got to because residue is checked before overlap. The residue item is
+    long enough to count as a line, so the untrimmed digest has no run of three and the
+    echo gate (F-01) lets the trim go ahead; the re-check is what stops it."""
     _delays, sleep = slept
-    found = [SOURCE[0], SOURCE[1], "wrote N docs", SOURCE[2]]
+    found = [SOURCE[0], SOURCE[1], "Checked that wrote N docs still fires", SOURCE[2]]
     out = summarize_log(_log(), _three(_digest(found=found)), sleep=sleep)
     assert out.suppressed is True and out.ok is False and out.withheld_items == 0
     assert out.contamination_signal == "verbatim_overlap"
@@ -449,3 +451,69 @@ def test_the_span_token_masks_long_digit_runs(token: str, shown: str) -> None:
     from scribe.summarize.runner import SPAN_TOKEN_CHARS, _span_token
 
     assert _span_token(token) == shown and len(shown) <= SPAN_TOKEN_CHARS
+
+
+# --- audit F-01/F-04 (scribe-residue-degrade-2026-10) -------------------------------------------
+
+#: A skill template with count letters on two of its five steps, loaded into the session.
+TEMPLATE = [
+    "Read the plan and confirm every prerequisite",
+    "Run the suite and record N failures by name",
+    "Open the pull request against the main branch",
+    'Post the "ready for review" note in the room',
+    "Close N tickets that the change resolves",
+]
+
+
+def _template_log() -> EventLog:
+    """The template in the session text, so `grounding_text()` is the real one-line JSON."""
+    log = _log()
+    log.turns[0].user_text = "\n".join(TEMPLATE)
+    return log
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        TEMPLATE,  # the dropped items (2 and 5) sit between survivors: 1, 3, 4 are left
+        [TEMPLATE[1], TEMPLATE[0], TEMPLATE[2], TEMPLATE[3]],  # survivors consecutive
+    ],
+)
+def test_a_template_echo_is_not_laundered_by_the_trim(slept, items: list[str]) -> None:
+    """F-01. Before the fix both shapes were written, three copied steps and a marker,
+    because the re-check's overlap detector cannot fire on the one-line corpus and the trim
+    breaks the run it needs. The echo is judged on the untrimmed digest."""
+    _delays, sleep = slept
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.suppressed is True and out.ok is False and out.withheld_items == 0
+    assert out.contamination_signal == "residue_token"
+
+
+def test_two_copied_items_do_not_block_the_degrade(slept) -> None:
+    """The run is three, as for `verbatim_overlap`. A digest that quotes two steps and
+    reports its own work is not an echo."""
+    _delays, sleep = slept
+    items = [TEMPLATE[0], TEMPLATE[2], *CLEAN[:2], TEMPLATE[1]]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.ok is True and out.withheld_items == 1
+
+
+def test_echo_matching_sees_a_line_the_corpus_holds_json_escaped() -> None:
+    from scribe.summarize.contamination import echoes_source
+
+    corpus = _template_log().grounding_text()
+    assert TEMPLATE[3] not in corpus, "the probe needs a line that only matches escaped"
+    md = "\n".join(f"- {t}" for t in (TEMPLATE[2], TEMPLATE[3], TEMPLATE[0]))
+    assert echoes_source(md, corpus) is True
+    assert echoes_source("\n".join(f"- {t}" for t in CLEAN[:3]), corpus) is False
+
+
+def test_residue_in_asked_is_refused_by_the_trim_itself() -> None:
+    """F-04. Pinned on `_withhold_residue` directly: the full re-check would also suppress
+    this digest, which is why removing the guard passed every other test."""
+    from scribe.summarize.runner import _withhold_residue
+    from scribe.summarize.schema import Digest
+
+    d = Digest(asked="Close N tickets", done=[*CLEAN, "wrote N docs"])
+    assert _withhold_residue(d) is None
+    assert _withhold_residue(Digest(asked="Close the tickets", done=d.done)) is not None
