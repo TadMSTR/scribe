@@ -256,8 +256,11 @@ def test_a_real_run_emits_the_extract_and_rejected_spans(clean_provider, monkeyp
 
     # A provider whose output always trips the contamination guard, so the rejection path
     # runs for every attempt and falls back — the incumbent's attempt=1/attempt=2 shape.
+    from scribe.summarize.contamination import Detection
+
     monkeypatch.setattr(
-        "scribe.summarize.runner.detect_contamination", lambda rendered, corpus: "template"
+        "scribe.summarize.runner.explain_contamination",
+        lambda rendered, corpus: Detection(signal="template"),
     )
     log = EventLog(session_id="s9", agent="developer", transcript_path="/tmp/t.jsonl")
 
@@ -283,6 +286,47 @@ def test_a_real_run_emits_the_extract_and_rejected_spans(clean_provider, monkeyp
     assert len(rejected) == 2, "one span per rejected attempt, matching the incumbent"
     assert [s.attributes["attempt"] for s in rejected] == [1, 2]
     assert [s.attributes["fallback"] for s in rejected] == [False, True]
+
+
+def test_the_rejected_span_names_the_rule_and_token_but_never_the_excerpt(clean_provider) -> None:
+    """X2 (0.17.0). `rule` and a bounded `token` go on the span; no attribute holds the
+    excerpt or any other model text. The existing attributes are unchanged."""
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from scribe.extract.models import EventLog
+    from scribe.summarize.providers import Completion
+    from scribe.summarize.runner import SPAN_TOKEN_CHARS, summarize_log
+
+    exporter = InMemorySpanExporter()
+    assert telemetry.setup_tracing(exporter=exporter) is True
+    line = "values of N above 256 are still accepted by the subset parser"
+
+    class _Stub:
+        def complete(self, system, user, timeout=0):
+            text = json.dumps({"asked": "x", "done": ["Ran it", "Read it", line]})
+            return Completion(text=text, input_tokens=1, output_tokens=1, model="m", provider="p")
+
+    log = EventLog(session_id="s9", agent="developer", transcript_path="/tmp/t.jsonl")
+    out = summarize_log(log, _Stub(), max_attempts=2, sleep=lambda _s: None)
+    telemetry.shutdown_tracing()
+    assert out.ok is True and out.withheld_items == 1, "the probe must reach the degrade path"
+
+    rejected = [s for s in exporter.get_finished_spans() if s.name == SPAN_REJECTED]
+    assert len(rejected) == 2
+    for sp in rejected:
+        attrs = dict(sp.attributes)
+        assert attrs["signal"] == "residue_token" and attrs["rule"] == "count_letter"
+        assert attrs["token"] == "N" and len(attrs["token"]) <= SPAN_TOKEN_CHARS
+        assert set(attrs) == {
+            "session_id",
+            "agent",
+            "signal",
+            "attempt",
+            "fallback",
+            "rule",
+            "token",
+        }
+        assert not any(isinstance(v, str) and "above 256" in v for v in attrs.values())
 
 
 def test_setup_tracing_is_off_by_default_and_silent_about_it(

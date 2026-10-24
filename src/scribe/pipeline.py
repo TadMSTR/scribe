@@ -128,6 +128,17 @@ class SessionResult:
     #: more: finding that every suppression was `residue_token` took a span query
     #: (vikunja#1216).
     contamination_signal: str = ""
+    #: Which detector rule fired, and what the model wrote around the hit, REDACTED by the
+    #: runner before it got here (`runner._record_detection`). Set on a suppression and on a
+    #: degraded success. Since 0.17.0 (vikunja#1216): before it, nobody could say what had
+    #: matched, because the rejected render was discarded.
+    contamination_rule: str = ""
+    contamination_excerpt: str = ""
+    #: Items the contamination guard dropped from a WRITTEN digest (0.17.0). An annotation
+    #: on a success, like `truncated_items`, and not a fourth term in the identity above:
+    #: the session is summarized and written. `contamination_signal` says why.
+    withheld_items: int = 0
+    withheld_fields: dict[str, int] = field(default_factory=dict)
     #: Where this session's event log was persisted, or "" if it was not. Reported so a run
     #: says out loud whether the drill-down tier exists for each session rather than leaving
     #: it to be inferred from a directory listing.
@@ -202,6 +213,10 @@ class SessionResult:
             "post_render_redactions": self.post_render_redactions,
             "post_render_cause": self.post_render_cause,
             "contamination_signal": self.contamination_signal,
+            "contamination_rule": self.contamination_rule,
+            "contamination_excerpt": self.contamination_excerpt,
+            "withheld_items": self.withheld_items,
+            "withheld_fields": self.withheld_fields,
             "eventlog_path": self.eventlog_path,
             "replayed": self.replayed,
             "manifest_appended": self.manifest_appended,
@@ -672,6 +687,8 @@ def process_session(
         if outcome.digest is not None:
             result.truncated_fields = dict(outcome.digest.truncated)
             result.truncated_items = sum(result.truncated_fields.values())
+        result.withheld_fields = dict(outcome.withheld_fields)
+        result.withheld_items = outcome.withheld_items
         set_span_attributes(
             sp,
             input_tokens=outcome.input_tokens,
@@ -682,12 +699,16 @@ def process_session(
             # `full_read` rides along because the rate is only interpretable per population.
             truncated_items=result.truncated_items,
             full_read=result.full_read,
+            # Non-zero only when a terminal `residue_token` degraded rather than suppressed.
+            withheld_items=result.withheld_items,
         )
 
         result.input_tokens, result.output_tokens = outcome.input_tokens, outcome.output_tokens
         result.summarized = outcome.ok
         result.suppressed = outcome.suppressed
         result.contamination_signal = outcome.contamination_signal
+        result.contamination_rule = outcome.contamination_rule
+        result.contamination_excerpt = outcome.contamination_excerpt
         # The third state, and the one that was invisible: neither a digest nor a deliberate
         # suppression note, but `render_failure`'s marked placeholder. The session's summary is
         # gone. Recorded here so the run totals can say so out loud -- inferring it from
@@ -929,8 +950,14 @@ def _run_record(
         # The cause LABEL only, "" when nothing fired. Never a value, a length or a shape: the
         # guard's captured plaintext is cleared before this record is built (vikunja#1196).
         "post_render_cause": result.post_render_cause,
-        # The detector's signal name, "" unless suppressed (vikunja#1216).
+        # The detector's signal name, "" unless suppressed or degraded (vikunja#1216).
         "contamination_signal": result.contamination_signal,
+        # The rule, and the excerpt the runner already redacted. On disk here only: the span
+        # carries the rule and the token, never the excerpt (0.17.0).
+        "contamination_rule": result.contamination_rule,
+        "contamination_excerpt": result.contamination_excerpt,
+        "withheld_items": result.withheld_items,
+        "withheld_fields": result.withheld_fields,
         "errors": len(result.errors),
         **qc,
         "ticket_refs_rewritten": result.ticket_refs_rewritten,
@@ -1084,6 +1111,10 @@ def summarize_run(results: list[SessionResult]) -> dict:
         #: read hands the model a whole session and an incremental sweep hands it a growing
         #: one, so a rate pooled across the two describes neither.
         "truncated_full_read": sum(1 for r in results if r.truncated_items and r.full_read),
+        #: Sessions written with items withheld by the contamination guard, and how many.
+        #: Not `degraded`, which is already the extraction degradation count below.
+        "withheld": sum(1 for r in results if r.withheld_items),
+        "withheld_items": sum(r.withheld_items for r in results),
         "full_read": sum(1 for r in results if r.full_read),
         "events_total": sum(r.events for r in results),
         "secrets_redacted": sum(r.secrets_redacted for r in results),

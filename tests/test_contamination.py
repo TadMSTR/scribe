@@ -379,3 +379,137 @@ def test_an_unclosed_backtick_does_not_make_the_anchor_scan_quadratic() -> None:
     t = time.perf_counter()
     assert detect_contamination(line, raw="") == "residue_token"
     assert time.perf_counter() - t < 2.0
+
+
+# --- 0.17.0: what the guard matched (vikunja#1216) ---------------------------------------------
+#
+# The existing parametrised lists are read from their own tests' marks rather than copied, so
+# a case added to one of them is covered here too and nothing above is rewritten.
+
+from scribe.summarize.contamination import (  # noqa: E402
+    _RESIDUE_RES,
+    _RESIDUE_RULES,
+    EXCERPT_CHARS,
+    explain_contamination,
+    redacted_excerpt,
+)
+
+
+def _cases(test) -> list:
+    (mark,) = [m for m in test.pytestmark if m.name == "parametrize"]
+    return list(mark.args[1])
+
+
+_POSITIVES = [*_cases(test_contamination_signals)] + [
+    (line, "residue_token") for line in _cases(test_the_notation_exemption_is_bounded)
+]
+_NEGATIVES = [
+    *_cases(test_ordinary_prose_is_not_flagged),
+    *_cases(test_a_clean_first_line_still_survives_the_re_check),
+    *_PROSE_THAT_MENTIONS_PLACEHOLDERS,
+    *NOTATION_LINES,
+]
+
+
+@pytest.mark.parametrize("summary,reason", _POSITIVES)
+def test_explain_agrees_with_detect_on_every_positive_control(summary: str, reason: str) -> None:
+    """D1. Same signal; and for residue, a token that is really in the line plus a rule name."""
+    d = explain_contamination(summary, raw="")
+    assert d is not None and d.signal == reason == detect_contamination(summary, raw="")
+    if reason == "residue_token":
+        assert d.token and d.token in summary and d.token in d.excerpt
+        assert d.rule in _RESIDUE_RULES
+    else:
+        assert d.token == d.rule == d.excerpt == ""
+
+
+@pytest.mark.parametrize(
+    "summary,token,rule",
+    [
+        ("- wrote N docs", "N", "count_letter"),
+        ("- progress N/M complete", "N/M", "ratio"),
+        ("- dated YYYY-MM-DD", "YYYY-MM-DD", "date"),
+        ("- still accepts n/N with N above 256", "N", "count_letter"),
+        ("- filed on 2026-07-XX", "2026-07-XX", "date"),
+    ],
+)
+def test_explain_names_the_token_and_the_rule(summary: str, token: str, rule: str) -> None:
+    """D1, the named cases."""
+    d = explain_contamination(summary, raw="")
+    assert (d.token, d.rule) == (token, rule)
+    assert d.excerpt == summary
+
+
+def test_rule_names_are_one_per_pattern_and_distinct() -> None:
+    """Names, not indices, so a reorder cannot relabel history; one per pattern so none is
+    reported under another's name."""
+    assert len(_RESIDUE_RULES) == len(_RESIDUE_RES) == len(set(_RESIDUE_RULES))
+
+
+def test_the_excerpt_is_capped_and_centred_on_the_match() -> None:
+    """D2. A 300-character line: at most 80 characters, with the hit in the middle third."""
+    pad = "lorem ipsum dolor sit amet " * 6
+    line = f"- {pad}wrote N docs {pad}"[:300]
+    assert len(line) == 300
+    d = explain_contamination(line, raw="")
+    assert d.token == "N"
+    assert 0 < len(d.excerpt) <= EXCERPT_CHARS
+    at = d.excerpt.index("wrote N docs") + len("wrote ")
+    assert EXCERPT_CHARS // 3 <= at <= 2 * EXCERPT_CHARS // 3, d.excerpt
+
+
+def test_the_excerpt_never_ends_in_a_fragment_of_a_word() -> None:
+    """Whole words only: a cut through a long string must drop it, not keep a piece of it."""
+    tail = "x" * 200
+    d = explain_contamination(f"- wrote N docs and then {tail}", raw="")
+    assert "x" not in d.excerpt and "wrote N docs" in d.excerpt
+    head = "y" * 200
+    d = explain_contamination(f"- {head} wrote N docs", raw="")
+    assert "y" not in d.excerpt and d.excerpt.endswith("wrote N docs")
+
+
+def test_a_hit_inside_a_word_longer_than_the_window_reports_the_token_only() -> None:
+    d = explain_contamination("- " + "a" * 100 + "/N " + "b" * 100, raw="")
+    assert d is not None and d.excerpt == d.token
+
+
+def test_the_excerpt_is_the_hit_line_only() -> None:
+    d = explain_contamination("**Asked:** fine\n\n- clean line here\n- wrote N docs\n- after", "")
+    assert d.excerpt == "- wrote N docs"
+
+
+@pytest.mark.parametrize("summary", _NEGATIVES)
+def test_explain_is_none_on_every_negative_control(summary: str) -> None:
+    """D3."""
+    assert explain_contamination(summary, raw="") is None
+
+
+def test_the_redacted_excerpt_scrubs_the_whole_line_before_cutting() -> None:
+    """A secret near the hit is redacted, and a cut can never keep a piece of one."""
+    from scribe.extract.redact import REDACTED, Redactor
+
+    secret = "ghp_FAKE1234567890abcdefghijklmnop"
+    d = explain_contamination(f"- wrote N docs with token {secret} attached", raw="")
+    assert secret in d.excerpt, "the probe needs the secret inside the raw window"
+    out = redacted_excerpt(d, Redactor().scrub)
+    assert secret not in out and "FAKE" not in out
+    assert REDACTED in out and "wrote N docs" in out
+
+
+def test_the_line_is_not_in_the_repr() -> None:
+    d = explain_contamination("- wrote N docs", raw="")
+    assert "line=" not in repr(d)
+
+
+def test_a_hit_the_redactor_swallowed_falls_back_to_the_start_of_the_clean_line() -> None:
+    """The hit is the assigned value, so the redactor removes it and there is nothing left to
+    centre on: the excerpt is the scrubbed line from its start."""
+    from scribe.extract.redact import REDACTED, Redactor
+
+    d = explain_contamination("- export TOKEN=N docs", raw="")
+    assert d.token == "N"
+    assert redacted_excerpt(d, Redactor().scrub) == f"- export TOKEN={REDACTED} docs"
+
+
+def test_a_detection_with_no_line_has_no_excerpt() -> None:
+    assert redacted_excerpt(explain_contamination("## Configuration", raw=""), str) == ""

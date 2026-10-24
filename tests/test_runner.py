@@ -237,3 +237,194 @@ def test_a_retryable_schema_violation_still_gets_its_retries(slept) -> None:
     out = summarize_log(_log(), provider, sleep=sleep)
     assert len(provider.calls) == 2, "attempt 1 retried; attempt 2 hit the cap and stopped"
     assert out.ok is False
+
+
+# --- 0.17.0: degrade per item on a terminal `residue_token` (vikunja#1216) ----------------------
+
+from scribe.extract.redact import REDACTED  # noqa: E402
+from scribe.summarize.contamination import Detection, detect_contamination  # noqa: E402
+from scribe.summarize.render import WITHHELD_MARKER  # noqa: E402
+
+CLEAN = [
+    "Read the restic check flags",
+    "Confirmed the subset parser rejects zero",
+    "Ran the bats suite green",
+    "Tagged the release candidate",
+    "Opened the audit request",
+]
+#: Long enough to count for the overlap detector, and present in `_overlap_log`'s source.
+SOURCE = [
+    "The restic subset flag accepts a fraction of the packs",
+    "The parser rejects a denominator above the allowed bound",
+    "The bats suite covers both of the rejected input shapes",
+]
+
+
+def _digest(asked: str = "Check the release workflow", **fields) -> str:
+    """`done` is required by the schema; a short default stays out of the overlap window."""
+    return json.dumps({"asked": asked, "done": ["Listed the runs"], **fields})
+
+
+@pytest.fixture
+def line_corpus(monkeypatch):
+    """A multi-line corpus holding `SOURCE`. `grounding_text()` is one JSON line, which the
+    three-line overlap window can never match, so the overlap cases supply their own corpus
+    to reach the runner's handling of that signal at all."""
+    monkeypatch.setattr("scribe.summarize.runner.grounding_corpus", lambda log: "\n".join(SOURCE))
+
+
+def _three(text: str) -> Scripted:
+    return Scripted(text, text, text)
+
+
+def test_a_terminal_residue_item_is_withheld_not_the_session(slept) -> None:
+    """G1. Five clean items and one paraphrased `n/N` line: the five are written."""
+    _delays, sleep = slept
+    found = [*CLEAN, "values of N above 256 are still accepted"]
+    out = summarize_log(_log(), _three(_digest(found=found)), sleep=sleep)
+    assert out.ok is True and out.suppressed is False
+    assert out.digest.found == CLEAN
+    assert out.withheld_items == 1 and out.withheld_fields == {"found": 1}
+    assert out.contamination_signal == "residue_token" and out.contamination_rule == "count_letter"
+    assert "values of N above 256" in out.contamination_excerpt
+    assert f"{WITHHELD_MARKER} 1 item dropped by the contamination guard (residue_token)._" in (
+        out.markdown.splitlines()
+    )
+    assert "N above 256" not in out.markdown, "the marker must not quote the withheld text"
+    assert all(f"- {c}" in out.markdown for c in CLEAN)
+    assert detect_contamination(out.markdown, "") is None
+
+
+def test_the_guards_own_audit_shape_degrades(slept) -> None:
+    """G2. d2cbddef: an audit of the guard has to name its positive controls."""
+    _delays, sleep = slept
+    out = summarize_log(
+        _log(),
+        _three(_digest(done=[*CLEAN[:3], "Checked that wrote N docs still fires"])),
+        sleep=sleep,
+    )
+    assert out.ok is True and out.digest.done == CLEAN[:3] and out.withheld_items == 1
+
+
+def test_a_digest_that_is_mostly_residue_is_still_suppressed(slept) -> None:
+    """G3. Withholding more than half the items would launder a template echo."""
+    _delays, sleep = slept
+    dirty = _digest(done=[CLEAN[0], "Closed N tickets", "wrote N docs"])
+    out = summarize_log(_log(), _three(dirty), sleep=sleep)
+    assert out.suppressed is True and out.ok is False and out.withheld_items == 0
+    assert out.contamination_signal == "residue_token"
+    assert "contamination guard" in out.markdown
+
+
+@pytest.mark.parametrize(
+    "clean,dirty,degraded",
+    [
+        (2, 2, True),  # exactly half withheld: degraded
+        (1, 2, False),  # one clean item fewer: suppressed
+        (3, 3, True),
+        (2, 3, False),
+        (0, 1, False),  # nothing would be left
+    ],
+)
+def test_the_majority_floor_boundary(slept, clean: int, dirty: int, degraded: bool) -> None:
+    """G3, the boundary on both sides. Items are spread over two fields, because the floor
+    counts the digest's list items in total, not per field."""
+    _delays, sleep = slept
+    bad = [f"wrote N docs in batch {i}" for i in range(dirty)]
+    text = _digest(done=[*CLEAN[:clean], *bad[:1]], found=bad[1:])
+    out = summarize_log(_log(), _three(text), sleep=sleep)
+    assert out.ok is degraded and out.suppressed is not degraded
+    assert out.withheld_items == (dirty if degraded else 0)
+
+
+def test_a_field_emptied_by_the_guard_keeps_its_label_and_marker(slept) -> None:
+    _delays, sleep = slept
+    out = summarize_log(
+        _log(), _three(_digest(done=CLEAN[:2], found=["wrote N docs"])), sleep=sleep
+    )
+    assert out.ok is True and out.digest.found == []
+    lines = out.markdown.splitlines()
+    assert lines[lines.index("**Found:**") + 1].startswith(WITHHELD_MARKER)
+
+
+def test_residue_in_asked_always_suppresses(slept) -> None:
+    """G4. `asked` is one string, read first, with no partial form."""
+    _delays, sleep = slept
+    out = summarize_log(_log(), _three(_digest(asked="Close N tickets", done=CLEAN)), sleep=sleep)
+    assert out.suppressed is True and out.ok is False and out.withheld_items == 0
+
+
+def test_degrade_is_never_reached_before_the_last_attempt(slept) -> None:
+    """G5. The reminder gets its chance first."""
+    _delays, sleep = slept
+    dirty = _digest(found=[*CLEAN, "wrote N docs"])
+    provider = Scripted(dirty, GOOD)
+    out = summarize_log(_log(), provider, sleep=sleep)
+    assert out.ok is True and out.attempts == 2
+    assert out.withheld_items == 0 and out.contamination_signal == ""
+    assert WITHHELD_MARKER not in out.markdown
+    assert "IMPORTANT" in provider.calls[1][0]
+
+
+@pytest.mark.parametrize(
+    "fields,signal",
+    [
+        ({"done": [*CLEAN, "set <Env vars here"]}, "template_signature"),
+        ({"done": [*CLEAN, "did <specific step>", "wrote N docs"]}, "placeholder_token"),
+        ({"found": SOURCE}, "verbatim_overlap"),
+    ],
+)
+def test_other_terminal_signals_are_never_degraded(
+    slept, line_corpus, fields: dict, signal: str
+) -> None:
+    """G6."""
+    _delays, sleep = slept
+    out = summarize_log(_log(), _three(_digest(**fields)), sleep=sleep)
+    assert out.suppressed is True and out.ok is False
+    assert out.contamination_signal == signal and out.withheld_items == 0
+    assert WITHHELD_MARKER not in out.markdown
+
+
+def test_a_recheck_that_finds_something_else_suppresses_and_records_it(slept, line_corpus) -> None:
+    """G7. Dropping the residue item joins three source lines into a verbatim run, which the
+    first pass never got to because residue is checked before overlap."""
+    _delays, sleep = slept
+    found = [SOURCE[0], SOURCE[1], "wrote N docs", SOURCE[2]]
+    out = summarize_log(_log(), _three(_digest(found=found)), sleep=sleep)
+    assert out.suppressed is True and out.ok is False and out.withheld_items == 0
+    assert out.contamination_signal == "verbatim_overlap"
+    assert out.contamination_rule == "" and out.contamination_excerpt == ""
+    assert out.reason == "contamination: verbatim_overlap"
+
+
+def test_the_recheck_runs_the_full_detector_once(slept, monkeypatch) -> None:
+    """G7, mechanically: whatever the re-check returns is what is recorded, and there is no
+    second pruning pass."""
+    _delays, sleep = slept
+    calls: list[str] = []
+
+    def fake(rendered, corpus):
+        calls.append(rendered)
+        if WITHHELD_MARKER in rendered:
+            return Detection(signal="residue_token", token="M", rule="count_letter")
+        return Detection(signal="residue_token", token="N", rule="count_letter")
+
+    monkeypatch.setattr("scribe.summarize.runner.explain_contamination", fake)
+    out = summarize_log(_log(), _three(_digest(found=[*CLEAN, "wrote N docs"])), sleep=sleep)
+    assert out.suppressed is True and len(calls) == 4, "three attempts and one re-check"
+
+
+def test_the_stored_excerpt_is_redacted(slept, monkeypatch) -> None:
+    """X1 at the runner. Must FAIL with the scrub call removed: the secret sits inside the
+    raw 80-character window, so only the redactor can keep it out."""
+    _delays, sleep = slept
+    secret = "ghp_FAKE1234567890abcdefghijklmnop"
+    for text in (
+        _digest(asked=f"Close N tickets using {secret}", done=CLEAN),  # suppressed
+        _digest(found=[*CLEAN, f"wrote N docs with {secret}"]),  # degraded
+    ):
+        out = summarize_log(_log(), _three(text), sleep=sleep)
+        assert out.contamination_excerpt, "the probe must store an excerpt"
+        assert secret not in out.contamination_excerpt and "FAKE" not in out.contamination_excerpt
+        assert REDACTED in out.contamination_excerpt
+        assert not any(secret in e or REDACTED in e for e in out.errors)

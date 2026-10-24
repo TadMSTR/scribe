@@ -740,6 +740,26 @@ def test_the_truncation_note_is_stripped_before_anything_reads_it() -> None:
     assert "A real bullet" in strip_scribe_markers(f"- A real bullet\n{note}\n")
 
 
+def test_the_withheld_marker_is_stripped_before_anything_reads_it(bare_log) -> None:
+    """M1 (0.17.0). Asserted on `strip_scribe_markers` directly, for the truncation note's
+    reason: measured, the marker yields no claim even unstripped, so a groundedness-only test
+    would pass with the strip deleted. The `check_digest` half pins the outcome that matters,
+    no finding on a degraded digest, for when the wording changes."""
+    from scribe.summarize.render import WITHHELD_MARKER, render_digest
+    from scribe.summarize.schema import Digest
+
+    note = f"{WITHHELD_MARKER} 2 items dropped by the contamination guard (residue_token)._"
+    assert note not in strip_scribe_markers(f"- A real bullet\n{note}\n- Another bullet")
+    assert "A real bullet" in strip_scribe_markers(f"- A real bullet\n{note}\n")
+
+    md = render_digest(
+        Digest(asked="Please do the thing.", done=["Did the thing."]), withheld={"done": 2}
+    )
+    assert note in md
+    report = check_digest(md, bare_log, floor=0.0)
+    assert not [f for f in report.findings if "Withheld" in f.detail or "residue" in f.detail]
+
+
 def test_stripping_the_note_does_not_eat_an_ordinary_italic_line() -> None:
     """The pattern is anchored to the marker prefix, not to underscores in general. A digest
     bullet may legitimately contain emphasis, and a greedy pattern would silence real claims

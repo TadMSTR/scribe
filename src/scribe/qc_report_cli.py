@@ -245,6 +245,13 @@ def _section(label: str, s: dict) -> list[str]:
     if s["suppressed"]:
         signals = ", ".join(f"{c} {n}" for c, n in s.get("suppressed_by_signal", {}).items())
         lines.append(f"  {s['suppressed']} suppressed by signal: {signals}")
+    # Always printed, zero included: "degrade never fired" is the reading that says the
+    # contamination guard is quiet, and an absent line cannot be told from an old binary.
+    deg = s.get("degraded") or {"sessions": 0, "items": 0, "by_signal": {}}
+    line = f"  degraded {deg['sessions']} ({deg['items']} item(s) withheld)"
+    if deg["by_signal"]:
+        line += " by signal: " + ", ".join(f"{c} {n}" for c, n in deg["by_signal"].items())
+    lines.append(line)
     if s["discarded"]:
         lines.append(f"  !! {s['discarded']} digest(s) produced but not written")
     if s["post_render_redactions"]:

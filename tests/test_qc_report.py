@@ -320,6 +320,34 @@ def test_no_signal_line_without_suppressions(record, capsys) -> None:
     assert "suppressed by signal" not in capsys.readouterr().out
 
 
+def test_degraded_sessions_are_counted_and_old_records_count_as_zero(record, capsys) -> None:
+    """M3 (0.17.0). A record without `withheld_items` predates degrade and is a true zero,
+    not `unrecorded`; the suppressed-by-signal line is unchanged by it."""
+    rows = [
+        rec(withheld_items=2, contamination_signal="residue_token"),
+        rec(withheld_items=1, contamination_signal="residue_token"),
+        rec(withheld_items=0, contamination_signal=""),
+        rec(suppressed=True, contamination_signal="residue_token"),
+    ] + [rec() for _ in range(21)]  # pre-0.17.0: no withheld_items key at all
+    write(record, rows)
+    current = stats([json.loads(line) for line in record.read_text().splitlines()])
+    assert current["degraded"] == {"sessions": 2, "items": 3, "by_signal": {"residue_token": 2}}
+    assert current["suppressed_by_signal"] == {"residue_token": 1}
+
+    assert main(["--run-record", str(record), "--until", UNTIL]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "degraded 2 (3 item(s) withheld) by signal: residue_token 2" in out
+    assert "1 suppressed by signal: residue_token 1" in out
+
+
+def test_the_degraded_line_reads_zero_on_records_older_than_0_17_0(record, capsys) -> None:
+    write(record, [rec() for _ in range(25)])
+    current = stats([json.loads(line) for line in record.read_text().splitlines()])
+    assert current["degraded"] == {"sessions": 0, "items": 0, "by_signal": {}}
+    assert main(["--run-record", str(record), "--until", UNTIL]) == EXIT_OK
+    assert "degraded 0 (0 item(s) withheld)" in capsys.readouterr().out
+
+
 # --- backfill through the CLI ---------------------------------------------------------
 
 

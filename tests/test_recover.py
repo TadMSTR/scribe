@@ -552,3 +552,20 @@ def test_a_dry_run_recover_appends_nothing(corpus) -> None:
     cfg, store, _md, _paths = corpus
     recover(cfg, store, apply=False)
     assert not cfg.manifest_file().exists()
+
+
+def test_a_degraded_digest_is_not_counted_as_loss(corpus, tmp_path) -> None:
+    """M2 (0.17.0). `recover` keys on `SUPPRESSION_MARKER`/`PLACEHOLDER_MARKER`; a digest
+    written with items withheld carries neither and is a success, so it must not be found or
+    reopened. Checked, not assumed."""
+    from scribe.summarize.render import WITHHELD_MARKER, render_digest
+    from scribe.summarize.schema import Digest
+
+    cfg, store, md, paths = corpus
+    degraded = render_digest(
+        Digest(asked="A real question", done=["Ran the suite"]), withheld={"found": 1}
+    )
+    assert WITHHELD_MARKER in degraded
+    md.write_text("# 2026-08-19\n\n" + _legacy_block("u-good", paths["good"], degraded))
+    assert list(scan_corpus(Path(cfg.output_dir))) == []
+    assert _run(cfg, store, tmp_path) == EXIT_OK

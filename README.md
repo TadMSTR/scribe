@@ -599,12 +599,27 @@ unless every fire is `model-output`, the one cause that rules a leak out.
 
 Since 0.16.0 it also has `contamination_signal`: the contamination guard's signal
 (`residue_token`, `placeholder_token`, `template_signature`, `verbatim_overlap`, `empty`) when
-the session was suppressed, `""` otherwise. `qc-report` breaks suppressions down by signal, and
+the session was suppressed (or, since 0.17.0, degraded), `""` otherwise. `qc-report` breaks suppressions down by signal, and
 records from before 0.16.0 count as `unrecorded`. The guard does not treat the `#N (id M)`
 ticket notation as residue: an `N`/`M` written after `#` or lowercase `id`, or inside inline
 code, is excused, and so is a bare count letter later on a line that already wrote `#N`, `id M`
 or an inline-code `n/N` (a word-labelled `#N` such as `PR #N` counts only with `(id` after it).
 An `N/M` pair, `XX` and date templates are never excused that way.
+
+Since 0.17.0 the line also says what the guard matched: `contamination_rule` (`count_letter`,
+`ratio` or `date` for residue) and `contamination_excerpt`, the model's line around the hit,
+whitespace-collapsed, at most 80 characters, cut on word boundaries, and **redacted** before it
+is stored. The excerpt is in the run record only. The `memsearch.summarize_rejected` span gets
+`rule` and `token` (at most 16 characters), never the excerpt.
+
+When the last attempt is rejected only for `residue_token`, scribe writes the digest without the
+offending list items instead of suppressing the session. Each field that lost items gets a
+non-bullet `_Withheld: N items dropped by the contamination guard (residue_token)._` line,
+which QC does not grade, and the record carries `withheld_items` and `withheld_fields` with
+`contamination_signal` still set. It suppresses as before when residue is in `Asked`, when
+more than half the list items (or all of them) would go, or when the reduced digest fails any
+detector on a re-check. `qc-report` prints a `degraded` line. Records from before 0.17.0 count
+as 0, since no earlier version could degrade.
 
 `prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
 cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.

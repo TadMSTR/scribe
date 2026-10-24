@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .extract.models import EventLog
-from .summarize.render import TRUNCATION_RE
+from .summarize.render import TRUNCATION_RE, WITHHELD_RE
 from .writeback import ANCHOR_RE, TERMINATOR_RE
 
 #: Below this share of the session's non-trivial events, a digest is a FAIL rather than a
@@ -390,6 +390,13 @@ def grounding_terms(log: EventLog) -> dict[str, set[str]]:
     }
 
 
+#: Scribe's own markers, which `rewrite_id_conflations` must leave byte-for-byte alone. The same
+#: ones `strip_scribe_markers` removes before grading, for the same reason: they are written by
+#: scribe, not asserted by the model, so nothing in them is a claim to correct. One tuple for
+#: both, so a new marker cannot reach one and miss the other.
+_MARKER_RES = (ANCHOR_RE, TERMINATOR_RE, TRUNCATION_RE, WITHHELD_RE)
+
+
 def strip_scribe_markers(text: str) -> str:
     """Remove scribe's own block markers before anything is read as a claim.
 
@@ -412,8 +419,13 @@ def strip_scribe_markers(text: str) -> str:
     note is written by `render_digest` when an unbounded field overflows (vikunja#884), so it
     is scribe's prose, not the model's. Grading it would attach a guaranteed finding to
     exactly the digests this build exists to stop losing.
+
+    `WITHHELD_RE` likewise: the contamination guard's marker for dropped items is scribe's
+    prose (vikunja#1216), and grading it would put a finding on every degraded digest.
     """
-    return TRUNCATION_RE.sub(" ", TERMINATOR_RE.sub(" ", ANCHOR_RE.sub(" ", text)))
+    for rx in _MARKER_RES:
+        text = rx.sub(" ", text)
+    return text
 
 
 def _claims(text: str) -> dict[str, set[str]]:
@@ -965,10 +977,6 @@ def check_groundedness(digest_text: str, log: EventLog, report: Report) -> None:
                 )
 
 
-#: Scribe's own markers, which `rewrite_id_conflations` must leave byte-for-byte alone. The same
-#: three `strip_scribe_markers` removes before grading, for the same reason: they are written by
-#: scribe, not asserted by the model, so nothing in them is a claim to correct.
-_MARKER_RES = (ANCHOR_RE, TERMINATOR_RE, TRUNCATION_RE)
 #: `#N (id N)` -- a conflated ref the model already annotated with the same number. Rewriting
 #: only the `#N` would leave `id N (id N)`, so the pair collapses to one `id N`. Matched
 #: case-insensitively, so `(ID N)` collapses too (audit F-05).

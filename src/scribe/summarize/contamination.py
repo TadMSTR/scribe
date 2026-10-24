@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import bisect
 import re
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 
 _PLACEHOLDER_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9 _./-]{0,40}>")
 
@@ -61,6 +63,11 @@ _RESIDUE_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b[NM]/[NM0-9]\b|\b\d+/[NM]\b"),
     re.compile(r"\bYYYY(?:-MM(?:-(?:DD|XX))?)?\b|\b\d{4}-\d{2}-XX\b"),
 )
+
+#: A stable name for each `_RESIDUE_RES` entry, in the same order, recorded as
+#: `Detection.rule`. Names rather than indices, so a reorder of the tuple cannot silently
+#: relabel the run record's history.
+_RESIDUE_RULES: tuple[str, ...] = ("count_letter", "ratio", "date")
 
 #: The `_RESIDUE_RES` patterns whose `N`/`M` hits `_is_notation` may excuse. The date pattern
 #: and `XX` are never excused: neither is part of the ticket notation, and neither has
@@ -207,30 +214,145 @@ def _is_notation(
     return anchored and anchor_end is not None and anchor_end <= pos
 
 
-def _has_residue(text: str) -> bool:
-    """Whether `text` carries template residue. The detector and the fallback re-check
-    (F-05) share this, so they cannot disagree about what residue is."""
+def _residue_hits(text: str) -> Iterator[tuple[re.Match[str], str]]:
+    """Every unexcused residue hit in `text`, with the name of the rule that made it, pattern
+    by pattern in `_RESIDUE_RES` order."""
     newlines = [i for i, ch in enumerate(text) if ch == "\n"]
     facts: dict[int, tuple] = {}
     for i, res in enumerate(_RESIDUE_RES):
         for m in res.finditer(text):
             exemptable = i in _NOTATION_EXEMPT and "XX" not in m.group()
             if not (exemptable and _is_notation(text, m, newlines, facts, anchored=i == 0)):
-                return True
-    return False
+                yield m, _RESIDUE_RULES[i]
 
 
-def detect_contamination(summary: str, raw: str) -> str | None:
-    """Return a short reason if `summary` looks like copied template text, else None."""
+def _first_residue(text: str) -> tuple[re.Match[str], str] | None:
+    """The earliest unexcused hit in `text` and its rule, or None; the longer match wins a
+    tie. By position rather than by pattern order, so `N/M` reports as the `ratio` it is and
+    not as the `M` that `count_letter` also sees in it."""
+    return min(_residue_hits(text), key=lambda h: (h[0].start(), -len(h[0].group())), default=None)
+
+
+def _has_residue(text: str) -> bool:
+    """Whether `text` carries template residue. The detector, the fallback re-check (F-05)
+    and the per-item degrade in `runner` share `_residue_hits`, so they cannot disagree about
+    what residue is. Stops at the first hit."""
+    return next(_residue_hits(text), None) is not None
+
+
+#: Longest excerpt `Detection` carries. Enough to see what the model wrote around the token,
+#: short enough that the run record holds a quote rather than a paragraph.
+EXCERPT_CHARS = 80
+
+
+@dataclass(frozen=True)
+class Detection:
+    """What the guard matched, not only that it matched (vikunja#1216).
+
+    Before 0.17.0 the rejected render was thrown away, and three investigations of this
+    detector started from a guess at what the model had written. `excerpt` is that answer.
+
+    **`excerpt` and `line` are unredacted model output** derived from the transcript. Neither
+    may be stored as they are: `runner` stores `redacted_excerpt(...)` instead, and puts
+    neither on a span nor in `Outcome.errors`. `line` is excluded from `repr` so a debug print
+    of a detection does not become the leak.
+    """
+
+    #: The same strings `detect_contamination` returns.
+    signal: str
+    #: The matched text (`N`, `n/N`, `YYYY-MM-DD`). "" for signals that are not one token.
+    token: str = ""
+    #: Which pattern fired: a `_RESIDUE_RULES` name for `residue_token`, else "".
+    rule: str = ""
+    #: The hit's line, whitespace-collapsed, cut to `EXCERPT_CHARS` around the hit.
+    excerpt: str = ""
+    #: The whole whitespace-collapsed line, for `redacted_excerpt`. In memory only.
+    line: str = field(default="", repr=False)
+
+
+def _collapse(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _window(line: str, start: int, end: int) -> str:
+    """`line` cut to at most `EXCERPT_CHARS`, centred on `[start, end)`, in whole words.
+
+    Whole words, so a cut never leaves a fragment of a longer string: a secret-shaped word is
+    either in the excerpt complete, where the redactor can see it, or not at all. A hit whose
+    own word is longer than the window is reported as the matched text alone.
+    """
+    if len(line) <= EXCERPT_CHARS:
+        return line
+    lo = max(0, (start + end) // 2 - EXCERPT_CHARS // 2)
+    hi = min(len(line), lo + EXCERPT_CHARS)
+    lo = max(0, hi - EXCERPT_CHARS)
+    # Move each cut inwards to a word boundary unless it already sits on one.
+    if lo > 0 and line[lo - 1] != " ":
+        sp = line.find(" ", lo)
+        lo = len(line) if sp == -1 else sp + 1
+    if hi < len(line) and line[hi] != " ":
+        sp = line.rfind(" ", 0, hi)
+        hi = 0 if sp == -1 else sp
+    if lo > start or hi < end:
+        return line[start:end][:EXCERPT_CHARS]
+    return line[lo:hi].strip()
+
+
+def _residue_detection(text: str) -> Detection | None:
+    hit = _first_residue(text)
+    if hit is None:
+        return None
+    m, rule = hit
+    # The hit's own line, collapsed, with the hit's offsets carried into the collapsed form.
+    ls = text.rfind("\n", 0, m.start()) + 1
+    le = text.find("\n", m.end())
+    le = len(text) if le == -1 else le
+    before = _collapse(text[ls : m.start()])
+    after = _collapse(text[m.end() : le])
+    lead = before + " " if before and text[m.start() - 1].isspace() else before
+    trail = " " + after if after and text[m.end()].isspace() else after
+    line = lead + m.group() + trail
+    start = len(lead)
+    return Detection(
+        signal="residue_token",
+        token=m.group(),
+        rule=rule,
+        excerpt=_window(line, start, start + len(m.group())),
+        line=line,
+    )
+
+
+def redacted_excerpt(detection: Detection, scrub: Callable[[str], str]) -> str:
+    """`detection`'s excerpt rebuilt from the line AFTER `scrub` has run over all of it.
+
+    Scrubbing the 80-character window instead would let the cut split a secret, or drop the
+    key that tells the redactor the value next to it is one (`password=...`). So the whole
+    line is scrubbed first, the hit is found again in what is left, and the window is taken
+    from that. If the hit was inside something the redactor removed, the window starts at the
+    beginning of the line. The window is scrubbed once more on the way out; scrubbing is
+    idempotent, so that can only remove, never restore.
+    """
+    if not detection.line:
+        return ""
+    clean = scrub(detection.line)
+    found = _residue_detection(clean)
+    if found is not None:
+        return scrub(found.excerpt)
+    return scrub(_window(clean, 0, 0))
+
+
+def explain_contamination(summary: str, raw: str) -> Detection | None:
+    """`detect_contamination`, with what it matched. Same order, same signals, same `None`."""
     if not summary or not summary.strip():
-        return "empty"
+        return Detection(signal="empty")
     if any(_scaffold_line(line) for line in summary.splitlines()):
-        return "placeholder_token"
-    if _has_residue(summary):
-        return "residue_token"
+        return Detection(signal="placeholder_token")
+    residue = _residue_detection(summary)
+    if residue is not None:
+        return residue
     for sig in _TEMPLATE_SIGNATURES:
         if sig.search(summary):
-            return "template_signature"
+            return Detection(signal="template_signature")
 
     raw_lines = [
         n for n in (_normalize_line(x) for x in raw.splitlines()) if len(n) >= _MIN_OVERLAP_LEN
@@ -243,8 +365,17 @@ def detect_contamination(summary: str, raw: str) -> str | None:
         for i in range(len(sum_lines) - _MIN_OVERLAP_LINES + 1):
             window = "\n".join(sum_lines[i : i + _MIN_OVERLAP_LINES])
             if window in raw_blob:
-                return "verbatim_overlap"
+                return Detection(signal="verbatim_overlap")
     return None
+
+
+def detect_contamination(summary: str, raw: str) -> str | None:
+    """Return a short reason if `summary` looks like copied template text, else None.
+
+    A thin wrapper over `explain_contamination`, kept because `build_fallback_note`, the tests
+    and the deploy replay one-liners call it, and its behaviour must not change."""
+    d = explain_contamination(summary, raw)
+    return d.signal if d else None
 
 
 def build_fallback_note(raw: str) -> str:
