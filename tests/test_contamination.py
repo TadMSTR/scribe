@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from scribe.summarize.contamination import build_fallback_note, detect_contamination
+from scribe.summarize.contamination import (
+    RETRY_REMINDER,
+    build_fallback_note,
+    detect_contamination,
+)
 
 
 @pytest.mark.parametrize(
@@ -28,6 +32,8 @@ from scribe.summarize.contamination import build_fallback_note, detect_contamina
         ("- progress N/M complete", "residue_token"),
         ("- dated YYYY-MM-DD", "residue_token"),
         ("- filed on 2026-07-XX", "residue_token"),
+        ("Closed N tickets today", "residue_token"),
+        ("N files changed in the PR", "residue_token"),
     ],
 )
 def test_contamination_signals(summary: str, reason: str) -> None:
@@ -263,3 +269,113 @@ def test_the_fallback_recheck_keeps_the_broad_pattern_on_purpose() -> None:
     quoted = "Renamed <agent> to the real path"
     assert detect_contamination(quoted, raw="") is None
     assert "User turn:" not in build_fallback_note(f"[User]: {quoted}")
+
+
+# --- vikunja#1216: the `#N (id M)` notation is not residue ----------------------------------
+
+#: Real lines from the 2026-10-22/23 sessions that were suppressed on all nine attempts, and
+#: from the convention docs. Every one of them is about the citation form rather than a
+#: template echoing a count, and each was a `residue_token` before 0.16.0.
+NOTATION_LINES = [
+    pytest.param("bare #N is a warning", id="C1-hash-prefix"),
+    pytest.param("a swapped pair #N (id M) where M is the identifier", id="C2-pair-then-bare"),
+    pytest.param("id M resolves", id="C3-id-prefix"),
+    pytest.param("`#M` as written, N as an id", id="C4-bare-after-notation"),
+    pytest.param("still accepted as `n/N` with N above 256", id="C5-code-span-then-bare"),
+    pytest.param("cite tickets as #N (id M) everywhere", id="C6-plain-pair"),
+    pytest.param("- cite as `#N (id M)`, and `N/M` pairs are refused", id="code-span"),
+    # Accepted (audit F-04): a `#`-prefixed template form is the same token as the notation.
+    pytest.param("Merged PR #N into main", id="F-04-accepted-hash-form"),
+    # A word-labelled `#N` still anchors when `(id` follows it (R2-01); here the id is a real
+    # number, so nothing else on the line could.
+    pytest.param("a swapped pair #N (id 525) where N is the id", id="R2-01-hash-then-id"),
+    # Excused by the code span alone: nothing earlier on the line anchors it.
+    pytest.param("`N/M` pairs are refused", id="code-span-only"),
+]
+
+
+@pytest.mark.parametrize("line", NOTATION_LINES)
+def test_the_ticket_notation_is_not_residue(line: str) -> None:
+    assert detect_contamination(line, raw="") is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Option (ii) excuses a bare letter only AFTER a notation use on its line, so a count
+        # letter that comes first still fires, even on a line that then writes `#N`.
+        "the N in #N refers to identifier",
+        "- Closed N tickets: #N, #N",
+        # `XX` and the date templates are never excused, notation or not.
+        "#N (id M) filed on 2026-07-XX",
+        "id M reviewed XX tickets",
+        "`#N` dated YYYY-MM-DD",
+        # A notation use on ANOTHER line excuses nothing.
+        "cite as #N (id M)\n- wrote N docs",
+        # Audit F-02: inline code that only CONTAINS a standalone letter is not notation, so
+        # it anchors nothing; and an `N/M` pair after a real anchor still fires.
+        "ran `M-x compile` then wrote N docs",
+        "ran `--max N` and closed N tickets",
+        "see #N, progress N/M complete",
+        # Audit F-04: the notation writes `id` in lowercase, so `ID M` is a count letter.
+        "ID M tickets were closed",
+        # Audit R2-01: a word-labelled `#N` is excused itself but anchors nothing after it.
+        "Merged PR #N, then closed N tickets",
+        "Step #N: wrote N docs",
+    ],
+)
+def test_the_notation_exemption_is_bounded(line: str) -> None:
+    """The positive half of option (ii): the exemption is per line and positional, so it
+    cannot be used to smuggle a count letter past the detector."""
+    assert detect_contamination(line, raw="") == "residue_token"
+
+
+def test_a_count_letter_split_across_lines_still_fires() -> None:
+    """The detector still scans the whole digest, so `\\s+` in the lookahead keeps crossing a
+    newline exactly as before 0.16.0."""
+    assert detect_contamination("- wrote N\ndocs", raw="") == "residue_token"
+
+
+def test_the_fallback_keeps_a_first_line_that_cites_the_notation() -> None:
+    """F1. The detector and the re-check share `_has_residue` (F-05), so a user line that
+    quotes the convention survives the fallback like it survives the detector."""
+    note = build_fallback_note("[User]: cite as #N (id M)")
+    assert "User turn: cite as #N (id M)" in note
+    # R2-01: the same narrowing reaches the fallback through the shared helper.
+    assert "User turn:" not in build_fallback_note("[User]: Merged PR #N, then closed N tickets")
+    # C6's line never fired, so it cannot tell the shared helper from the old regexes. This
+    # one could: it was dropped from every fallback note before 0.16.0.
+    assert "User turn: bare #N is a warning" in build_fallback_note("[User]: bare #N is a warning")
+
+
+def test_the_retry_reminder_no_longer_forbids_the_notation() -> None:
+    """The old reminder banned N and M outright, so attempts 2 and 3 of a session about the
+    notation failed exactly as attempt 1 did."""
+    assert "`#N (id M)`" in RETRY_REMINDER
+    assert "count letters like N, M, or XX" in RETRY_REMINDER
+
+
+def test_a_long_line_of_excused_hits_is_scanned_in_linear_time() -> None:
+    """IV-47 (0.16.0 pre-audit). The first cut re-scanned the whole line for every hit, so
+    100 KB of excused hits took 17 s; the guard runs on model output. Generous bound: the
+    quadratic version needs minutes here, the linear one well under a second."""
+    import time
+
+    for line in ("#N a " * 40_000, "`N a` " * 40_000, "id M x " * 40_000):
+        t = time.perf_counter()
+        assert detect_contamination(line, raw="") is None
+        assert time.perf_counter() - t < 2.0
+
+
+def test_an_unclosed_backtick_does_not_make_the_anchor_scan_quadratic() -> None:
+    """Audit F-01. The code-span anchor used to be a regex alternative that, after one
+    unclosed backtick, tried every later `N` as a pivot and scanned to the end of the line
+    each time: 100 KB took 3.3 s. The audit's own line: the first hit is unexcused, but
+    deciding that computes the line's facts, and that was the quadratic part. No `#N` up
+    front, or the regex's leftmost alternative matches at once and the case is never run."""
+    import time
+
+    line = "`" + "N x " * 25_000
+    t = time.perf_counter()
+    assert detect_contamination(line, raw="") == "residue_token"
+    assert time.perf_counter() - t < 2.0

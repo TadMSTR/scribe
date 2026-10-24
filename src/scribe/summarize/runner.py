@@ -44,6 +44,9 @@ class Outcome:
     digest: Digest | None = None
     ok: bool = False
     suppressed: bool = False
+    #: The detector signal behind a suppression (`residue_token`, ...), "" otherwise. Its own
+    #: field so the run record can carry it without parsing `reason` (vikunja#1216).
+    contamination_signal: str = ""
     reason: str = ""
     attempts: int = 0
     input_tokens: int = 0
@@ -159,6 +162,7 @@ def summarize_log(
             # summary still records that the session happened and why it is not here.
             outcome.markdown = render_suppressed(note=build_fallback_note(corpus), heading=heading)
             outcome.suppressed = True
+            outcome.contamination_signal = contaminated
             outcome.reason = f"contamination: {contaminated}"
             return outcome
 

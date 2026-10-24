@@ -296,6 +296,30 @@ def test_post_render_fires_are_broken_down_by_cause(record, capsys) -> None:
     assert "!! 5 post-render redaction(s) by cause: extraction-miss 1," in capsys.readouterr().out
 
 
+def test_suppressions_are_broken_down_by_signal(record, capsys) -> None:
+    """R3 (vikunja#1216). A suppressed record without the key predates 0.16.0 and counts as
+    `unrecorded`; the figures sum to `suppressed`."""
+    rows = [
+        rec(suppressed=True),  # pre-0.16.0: no contamination_signal key at all
+        rec(suppressed=True, contamination_signal="residue_token"),
+        rec(suppressed=True, contamination_signal="residue_token"),
+        rec(suppressed=False, contamination_signal=""),
+    ] + [rec() for _ in range(21)]
+    write(record, rows)
+    current = stats([json.loads(line) for line in record.read_text().splitlines()])
+    assert current["suppressed_by_signal"] == {"residue_token": 2, "unrecorded": 1}
+    assert sum(current["suppressed_by_signal"].values()) == current["suppressed"]
+
+    assert main(["--run-record", str(record), "--until", UNTIL]) == EXIT_OK
+    assert "3 suppressed by signal: residue_token 2, unrecorded 1" in capsys.readouterr().out
+
+
+def test_no_signal_line_without_suppressions(record, capsys) -> None:
+    write(record, [rec() for _ in range(25)])
+    assert main(["--run-record", str(record), "--until", UNTIL]) == EXIT_OK
+    assert "suppressed by signal" not in capsys.readouterr().out
+
+
 # --- backfill through the CLI ---------------------------------------------------------
 
 

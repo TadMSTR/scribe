@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-10-24
+
+**Minor.** The contamination guard no longer suppresses digests of sessions about the
+`#N (id M)` ticket notation (vikunja#1216). The retry reminder stops forbidding that
+notation, and the reason a session was suppressed now reaches the run record and
+`qc-report`. No schema change, no config change, and no change to the digest format.
+
+### Changed
+
+- **The ticket notation is not residue.** `residue_token` read the `N` in `#N` and the `M`
+  in `id M` as unfilled count letters. Since the fleet adopted `#N (id M)` on 2026-10-21,
+  a digest of any session about ticket references failed on every attempt: two sessions
+  were suppressed on all nine. An `N`/`M` hit from the count-letter patterns is now excused
+  when it is written as notation: directly after `#`, after lowercase `id` or `(id`, or
+  inside inline code. A bare count letter is also excused when the same line already wrote
+  `#N`, `#M`, `id N`, `id M` or an inline-code `n/N` ratio before it, as in "`#M` as
+  written, N as an id". A `#N` labelled by a word (`PR #N`, `Step #N`) counts only when
+  `(id` follows it. That later-on-the-line rule covers bare letters only: an `N/M` pair
+  after the notation still fires, and inline code that merely contains a letter
+  (`` `--max N` ``, `` `M-x compile` ``) starts nothing. "Closed N tickets", "the N in
+  #N", `ID M`, and a count letter on a different line all still fire. `XX` and the
+  `YYYY-MM-DD` patterns are never excused. `PR #N` is excused along with the notation,
+  because the two are the same token. The fallback note's re-check uses the same helper,
+  so a first user line that cites the notation is quoted again. The scan is linear in the
+  digest's length.
+- **The retry reminder allows the notation.** It still asks for real numbers instead of
+  count letters, but says the literal `` `#N (id M)` `` may be written when the session was
+  about it. Before this, attempts 2 and 3 failed the same way attempt 1 did.
+- **`prompt_sha256` changes** (`98a39128…` → `94727aa7…`), because the reminder is hashed
+  into it. That is intended. Records from 0.16.0 on form their own bucket in
+  `qc-report --by prompt`.
+
+### Added
+
+- **`contamination_signal` in the run record**, next to `suppressed`. It holds the
+  detector's signal name (`residue_token`, `placeholder_token`, …) when the session was
+  suppressed, `""` otherwise, and `null` on backfilled records. Before this the signal
+  reached only the SigNoz `memsearch.summarize_rejected` span, and the record said
+  `errors: 3`. `record_version` is unchanged, as with `post_render_cause` (0.15.0).
+- **`qc-report` breaks suppressions down by signal.** Records from before 0.16.0 count as
+  `unrecorded`. The figures sum to `suppressed`.
+
 ## [0.15.0] — 2026-10-22
 
 **Minor.** The post-render redaction guard no longer reports prose as a leak, and no longer

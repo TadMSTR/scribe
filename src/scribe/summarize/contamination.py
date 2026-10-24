@@ -5,13 +5,14 @@ logic to be unified rather than triplicated, so **this copy is intended to be th
 one** — when scribe cuts over, the other copies should import it or be deleted, not diverge.
 
 Nothing here involves a model. The signals are: an unresolved `<...>` placeholder; bare
-template residue the angle-bracket pattern misses (count letters, `YYYY-MM-DD` date
-templates); a known skill/template structural signature; and several consecutive non-trivial
-lines reproduced verbatim from the source.
+template residue the angle-bracket pattern misses (count letters, but not the `#N (id M)`
+ticket notation; `YYYY-MM-DD` date templates); a known skill/template structural
+signature; and several consecutive non-trivial lines reproduced verbatim from the source.
 """
 
 from __future__ import annotations
 
+import bisect
 import re
 
 _PLACEHOLDER_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9 _./-]{0,40}>")
@@ -61,6 +62,57 @@ _RESIDUE_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bYYYY(?:-MM(?:-(?:DD|XX))?)?\b|\b\d{4}-\d{2}-XX\b"),
 )
 
+#: The `_RESIDUE_RES` patterns whose `N`/`M` hits `_is_notation` may excuse. The date pattern
+#: and `XX` are never excused: neither is part of the ticket notation, and neither has
+#: produced a false positive.
+_NOTATION_EXEMPT = frozenset({0, 1})
+
+#: The fleet writes ticket references as `#N (id M)` (adopted 2026-10-21, fleet-wide via
+#: vikunja#1190), and every agent's CLAUDE.md now explains it. A faithful digest of a session
+#: *about* that convention has to say `#N`, `id M` and "N as an id", and `_RESIDUE_RES[0]`
+#: read every one of them as an unfilled count letter. Two sessions were suppressed on all
+#: nine attempts (vikunja#1216): the same defect as #868's placeholders, a guard keyed on
+#: surface syntax that cannot tell content *about* a form from content *in* it. The fix is
+#: the same too: key on **position**, and leave the letter patterns alone so `wrote N docs`
+#: still fires.
+#:
+#: A letter is notation when it is written as a ticket ref, `#N` or `id M` / `(id M)`, or
+#: when it sits inside inline code, `` `n/N` ``. Templates do not wrap their count letters
+#: in backticks, so the cost of that exemption is a digest that keeps an `N`; the cost of
+#: the false positive was a digest lost.
+#:
+#: `id` is matched in lowercase only, the way the notation writes it, so `ID M tickets` still
+#: fires (audit F-04).
+# SECURITY[accepted]: `PR #N` and other `#`-prefixed template forms are excused with the
+# ticket notation; on syntax alone they are the same token, and the guard is a quality
+# control on model output, not a security boundary. Audit: 2026-10-24/scribe-residue-guard-2026-10.
+_REF_BEFORE_RE = re.compile(r"(?:#|\bid\s{1,8}\(?)$")
+#: How far back from a hit `_REF_BEFORE_RE` looks: `id` + up to 8 spaces + `(` fits. Bounded
+#: so the per-hit cost does not grow with the line.
+_REF_WINDOW = 12
+_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+#: A notation use earlier on the same line: `#N`, `id M`, or inline code holding an `n/N`
+#: ratio (`_NOTATION_SPAN_RE`). A bare `N`/`M` count letter (`_RESIDUE_RES[0]` only) *after*
+#: one of these is excused too (option ii of the build plan's C4/C5): in "`#M` as written, N
+#: as an id" the `N` names the notation the line just wrote, and nothing about the letter
+#: itself can tell it from "wrote N docs". Only what comes after counts, so "Closed N
+#: tickets" and "the N in #N" both still fire. A template line that pairs a count letter with
+#: a literal `#N` ("Closed N tickets: #N") also still fires, because its count comes first.
+#:
+#: Narrowed after the audit (F-02): inline code that merely contains a standalone `N`/`M`
+#: (`` `M-x compile` ``, `` `--max N` ``) is not an anchor, and an `N/M` pair after an
+#: anchor still fires. The letter inside such a span is still excused by the span itself.
+#: The span alternative was also taken out of this regex and checked against the spans
+#: `_line_facts` already has: as an alternative here it backtracked quadratically on a line
+#: with an unclosed backtick (F-01).
+#:
+#: A `#N` that a word labels (`PR #N`, `Step #N`) anchors nothing unless `(id` follows it: it
+#: is excused itself (accepted, F-04), but it is a template form as often as it is the
+#: notation, so it must not excuse the rest of its line too (audit R2-01).
+_NOTATION_ANCHOR_RE = re.compile(r"(?<!\w)(?<!\w\s)#[NM]\b|#[NM](?=\s*\(id\b)|\bid\s{1,8}\(?[NM]\b")
+_NOTATION_SPAN_RE = re.compile(r"\b[nm]/[NM]\b")
+
 _MIN_OVERLAP_LINES = 3  # consecutive identical non-trivial lines that mean "copied"
 _MIN_OVERLAP_LEN = 20  # ignore short/generic lines when comparing
 
@@ -70,8 +122,10 @@ RETRY_REMINDER = (
     "tokens from the source. Also do NOT emit bare placeholder residue: use the ACTUAL "
     "numbers from the event log instead of count letters like N, M, or XX, and real dates "
     "instead of YYYY-MM-DD templates — if a value is unknown, omit it rather than leaving a "
-    "placeholder. Describe only what happened. If a skill or template was loaded, state "
-    "only that it was loaded and for what purpose — never its contents."
+    "placeholder. The ticket notation itself is not residue: if the session was about the "
+    "`#N (id M)` citation form, you may write it, in backticks. Describe only what "
+    "happened. If a skill or template was loaded, state only that it was loaded and for "
+    "what purpose — never its contents."
 )
 
 
@@ -108,15 +162,72 @@ def _scaffold_line(line: str) -> bool:
     return len(words) < _MIN_PROSE_WORDS
 
 
+def _line_facts(text: str, start: int) -> tuple[list[int], list[int], int | None]:
+    """Code-span starts and ends, and the end of the earliest notation use, for the line of
+    `text` beginning at `start`. Computed once per line, never once per hit: a digest is
+    model output, and a long line of excused hits went quadratic when every hit re-scanned
+    its line (IV-47, 0.16.0 pre-audit)."""
+    end = text.find("\n", start)
+    end = len(text) if end == -1 else end
+    spans = [(c.start(), c.end()) for c in _CODE_SPAN_RE.finditer(text, start, end)]
+    anchor = _NOTATION_ANCHOR_RE.search(text, start, end)
+    anchor_end = anchor.end() if anchor else None
+    for a, b in spans:
+        if anchor_end is not None and b >= anchor_end:
+            break
+        if _NOTATION_SPAN_RE.search(text, a, b):
+            anchor_end = b
+            break
+    return [a for a, _ in spans], [b for _, b in spans], anchor_end
+
+
+def _is_notation(
+    text: str, m: re.Match[str], newlines: list[int], facts: dict[int, tuple], *, anchored: bool
+) -> bool:
+    """True when the residue hit `m` in `text` is the ticket notation, not a count letter.
+
+    Judged on the hit's own line: a ref prefix right before it, an enclosing code span, or
+    an earlier notation use on the line. See `_REF_BEFORE_RE`, `_NOTATION_ANCHOR_RE` and
+    `_NOTATION_SPAN_RE`.
+    `newlines` holds every newline offset in `text`; `facts` caches `_line_facts` by line
+    start. Both live for one scan. `anchored` allows the earlier-notation rule, which only
+    a bare count letter gets (F-02).
+    """
+    pos = m.start()
+    k = bisect.bisect_left(newlines, pos)
+    start = newlines[k - 1] + 1 if k else 0
+    if _REF_BEFORE_RE.search(text, max(start, pos - _REF_WINDOW), pos):
+        return True
+    if start not in facts:
+        facts[start] = _line_facts(text, start)
+    starts, ends, anchor_end = facts[start]
+    i = bisect.bisect_left(starts, pos) - 1
+    if i >= 0 and pos < ends[i]:
+        return True
+    return anchored and anchor_end is not None and anchor_end <= pos
+
+
+def _has_residue(text: str) -> bool:
+    """Whether `text` carries template residue. The detector and the fallback re-check
+    (F-05) share this, so they cannot disagree about what residue is."""
+    newlines = [i for i, ch in enumerate(text) if ch == "\n"]
+    facts: dict[int, tuple] = {}
+    for i, res in enumerate(_RESIDUE_RES):
+        for m in res.finditer(text):
+            exemptable = i in _NOTATION_EXEMPT and "XX" not in m.group()
+            if not (exemptable and _is_notation(text, m, newlines, facts, anchored=i == 0)):
+                return True
+    return False
+
+
 def detect_contamination(summary: str, raw: str) -> str | None:
     """Return a short reason if `summary` looks like copied template text, else None."""
     if not summary or not summary.strip():
         return "empty"
     if any(_scaffold_line(line) for line in summary.splitlines()):
         return "placeholder_token"
-    for res in _RESIDUE_RES:
-        if res.search(summary):
-            return "residue_token"
+    if _has_residue(summary):
+        return "residue_token"
     for sig in _TEMPLATE_SIGNATURES:
         if sig.search(summary):
             return "template_signature"
@@ -165,7 +276,7 @@ def build_fallback_note(raw: str) -> str:
     if first_user and (
         _PLACEHOLDER_RE.search(first_user)
         or any(sig.search(first_user) for sig in _TEMPLATE_SIGNATURES)
-        or any(res.search(first_user) for res in _RESIDUE_RES)
+        or _has_residue(first_user)
     ):
         first_user = ""
     return f"- User turn: {first_user}\n{SUPPRESSION_MARKER}" if first_user else SUPPRESSION_MARKER

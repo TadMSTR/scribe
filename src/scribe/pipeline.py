@@ -123,6 +123,11 @@ class SessionResult:
     #: Empty when nothing fired. Reported so a sweep can be filtered by cause rather than by
     #: reading every error string (vikunja#856).
     post_render_cause: str = ""
+    #: The contamination detector's signal when the session was suppressed, else "". Before
+    #: 0.16.0 it reached only the SigNoz span, and a run record said `errors: 3` and nothing
+    #: more: finding that every suppression was `residue_token` took a span query
+    #: (vikunja#1216).
+    contamination_signal: str = ""
     #: Where this session's event log was persisted, or "" if it was not. Reported so a run
     #: says out loud whether the drill-down tier exists for each session rather than leaving
     #: it to be inferred from a directory listing.
@@ -196,6 +201,7 @@ class SessionResult:
             "qc_findings": self.qc_findings,
             "post_render_redactions": self.post_render_redactions,
             "post_render_cause": self.post_render_cause,
+            "contamination_signal": self.contamination_signal,
             "eventlog_path": self.eventlog_path,
             "replayed": self.replayed,
             "manifest_appended": self.manifest_appended,
@@ -681,6 +687,7 @@ def process_session(
         result.input_tokens, result.output_tokens = outcome.input_tokens, outcome.output_tokens
         result.summarized = outcome.ok
         result.suppressed = outcome.suppressed
+        result.contamination_signal = outcome.contamination_signal
         # The third state, and the one that was invisible: neither a digest nor a deliberate
         # suppression note, but `render_failure`'s marked placeholder. The session's summary is
         # gone. Recorded here so the run totals can say so out loud -- inferring it from
@@ -922,6 +929,8 @@ def _run_record(
         # The cause LABEL only, "" when nothing fired. Never a value, a length or a shape: the
         # guard's captured plaintext is cleared before this record is built (vikunja#1196).
         "post_render_cause": result.post_render_cause,
+        # The detector's signal name, "" unless suppressed (vikunja#1216).
+        "contamination_signal": result.contamination_signal,
         "errors": len(result.errors),
         **qc,
         "ticket_refs_rewritten": result.ticket_refs_rewritten,
