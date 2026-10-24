@@ -390,6 +390,10 @@ def _echo_norm(text: str) -> str:
     return " ".join(_ECHO_MARKUP_RE.sub("", text).casefold().split())
 
 
+# SECURITY[accepted]: a copy reworded beyond this normalization (past tense) and lines under
+# 20 chars are not caught, so such an echo can be trimmed and written. Only on a terminal
+# residue_token, under the majority floor and a full re-check; integrity-only. Audit:
+# 2026-10-24/scribe-residue-degrade-2026-10 R2-01.
 def echoes_source(summary: str, raw: str) -> bool:
     """Whether `summary` copies `raw`: three consecutive non-trivial lines that each appear in
     it, or at least three such lines making up at least half of the residue-free ones. Used
