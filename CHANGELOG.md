@@ -36,19 +36,20 @@ retry reminder: **`prompt_sha256` stays `94727aa7…`**. No schema change and no
   is clean and the untrimmed digest does not copy the session, list items that carry residue
   are dropped. A digest copies the session when three copied items run consecutively, or
   when at least three make up half or more of its residue-free lines. Matching is line by
-  line, so the one-line JSON corpus counts, and ignores case, `*`, backticks, spacing and a
-  trailing period. Lines under 20 characters are not checked, and a copy reworded beyond
-  that normalization (for example into the past tense) is not caught. The reduced digest is
-  then re-checked against every detector, once. It is written when the re-check is clean and
-  no more than half the list items went. Otherwise the session is suppressed as before, with
-  whatever the re-check found recorded. Each field that lost items gets a non-bullet
-  `_Withheld: N items dropped by the contamination guard (residue_token)._` line.
-  `qc.strip_scribe_markers` removes it before grading, and it never quotes the dropped text.
-  A degraded digest is a success: `written`, `suppressed: false`, with
-  `contamination_signal` still set and new `withheld_items`/`withheld_fields` keys in the
-  run record and the JSON report. Run totals gain `withheld` and `withheld_items`, and the
-  summarize span gains `withheld_items`. `scribe recover` does not count a degraded block as
-  loss.
+  line, so the one-line JSON corpus counts, and ignores case, `*`, backticks, spacing (tabs
+  and line breaks included), leading `1.`/`2)` numbering and trailing punctuation. Lines
+  under 20 characters are not checked; a copy reworded beyond that normalization (for
+  example into the past tense) is not caught, nor is a copy that is under half of a long
+  digest with no three items in a row. The reduced digest is then re-checked against every
+  detector, once. It is written when the re-check is clean and no more than half the list
+  items went. Otherwise the session is suppressed as before, with whatever the re-check
+  found recorded. Each field that lost items gets a non-bullet `_Withheld: N items dropped
+  by the contamination guard (residue_token)._` line. `qc.strip_scribe_markers` removes it
+  before grading, and it never quotes the dropped text. A degraded digest is a success:
+  `written`, `suppressed: false`, with `contamination_signal` still set and new
+  `withheld_items`/`withheld_fields` keys in the run record and the JSON report. Run totals
+  gain `withheld` and `withheld_items`, and the summarize span gains `withheld_items`.
+  `scribe recover` does not count a degraded block as loss.
 - **`qc-report` prints a `degraded` line**: sessions, items withheld, and the signal behind
   them. A record from before 0.17.0 counts as 0, not `unrecorded`, because no earlier version
   could degrade. `suppressed by signal` is unchanged.

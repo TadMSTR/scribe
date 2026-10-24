@@ -384,10 +384,23 @@ def detect_contamination(summary: str, raw: str) -> str | None:
 _ECHO_MARKUP_RE = re.compile(r"[*`]+")
 #: Trailing punctuation a model adds to a copied step, removed from the digest side only.
 _ECHO_TRAILING = ".,;:!? "
+#: Numbering a model adds to a copied step (`1.`, `2)`), removed from the digest side only, as
+#: `_normalize_line` removes a leading `-`, `*` or `#`.
+_ECHO_NUMBERING_RE = re.compile(r"^\d{1,3}[.)]\s+")
+#: Whitespace escapes in the one-line JSON corpus. `str.split()` sees `\t` there as two
+#: characters, not as spacing, so they are turned back into spaces first (audit R3-01).
+_JSON_SPACE_RE = re.compile(r"\\[tnr]")
 
 
 def _echo_norm(text: str) -> str:
     return " ".join(_ECHO_MARKUP_RE.sub("", text).casefold().split())
+
+
+def _echo_line(line: str) -> str:
+    """A digest line as the gate compares it. Markup goes BEFORE the trailing punctuation,
+    so `**step.**` loses both (audit R3-01)."""
+    n = _ECHO_MARKUP_RE.sub("", _normalize_line(line)).strip()
+    return _ECHO_NUMBERING_RE.sub("", n).rstrip(_ECHO_TRAILING)
 
 
 # SECURITY[accepted]: a copy reworded beyond this normalization (past tense) and lines under
@@ -406,9 +419,10 @@ def echoes_source(summary: str, raw: str) -> bool:
     accepts either the line as written or its JSON-escaped form, which is how it sits in the
     one-line corpus.
 
-    Both sides are casefolded, stripped of `*` and backticks, and whitespace-collapsed, and
-    the digest line loses trailing punctuation, so case, emphasis, spacing or a final period
-    can't hide a copy. The second rule catches a copy with the model's own lines between its
+    Both sides are casefolded, stripped of `*` and backticks, and whitespace-collapsed (the
+    corpus's `\t`/`\n` escapes count as spacing). The digest line also loses leading `1.`/`2)`
+    numbering and trailing punctuation, so case, emphasis, spacing, numbering or a final
+    period can't hide a copy. The second rule catches a copy with the model's own lines between its
     steps. It needs the copy to be at least half of what would survive, so a long digest that
     quotes three lines of its session is still degraded rather than suppressed.
 
@@ -420,13 +434,12 @@ def echoes_source(summary: str, raw: str) -> bool:
     It gates only the degrade. A digest that fails it is suppressed exactly as 0.16.0 would
     have suppressed it, so this cannot cost a session that 0.16.0 wrote.
     """
-    corpus = _echo_norm(raw)
+    corpus = _echo_norm(_JSON_SPACE_RE.sub(" ", raw))
     run = copied = candidates = 0
     for line in summary.splitlines():
-        n = _normalize_line(line)
-        if len(n) < _MIN_OVERLAP_LEN:
+        if len(_normalize_line(line)) < _MIN_OVERLAP_LEN:
             continue
-        n = n.rstrip(_ECHO_TRAILING)
+        n = _echo_line(line)
         hit = any(
             _echo_norm(form) in corpus for form in (n, json.dumps(n, ensure_ascii=False)[1:-1])
         )

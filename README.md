@@ -622,10 +622,12 @@ QC does not grade, and the record carries `withheld_items` and `withheld_fields`
 untrimmed digest copies the session (three copied items in a row, or at least three that make up
 half or more of the residue-free lines); when more than half the list items (or all of them)
 would go; or when the reduced digest fails any detector on a re-check. A copied item is one that
-appears in the session text once case, `*`, backticks, spacing and a trailing period are
-ignored. Lines under 20 characters are not checked, and a copy reworded beyond that, for example
-into the past tense, is not caught. `qc-report` prints a `degraded` line. Records from before
-0.17.0 count as 0, since no earlier version could degrade.
+appears in the session text once case, `*`, backticks, spacing (tabs and line breaks included),
+leading `1.`/`2)` numbering and trailing punctuation are ignored. Lines under 20 characters are
+not checked, a copy reworded beyond that (for example into the past tense) is not caught, and a
+copy that is under half of a long digest with no three items in a row is still trimmed.
+`qc-report` prints a `degraded` line. Records from before 0.17.0 count as 0, since no earlier
+version could degrade.
 
 `prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
 cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.

@@ -256,10 +256,11 @@ def summarize_log(
             # including residue that only shows once an item is gone, suppresses as before,
             # with that detection recorded. No loop and no second pruning pass.
             #
-            # A digest whose UNTRIMMED text copies the source verbatim, three items running,
-            # is a template echo with a few count letters in it, and trimming those letters
-            # would write the rest. Checked before the trim, because the trim breaks the run
-            # (audit F-01).
+            # A digest whose UNTRIMMED text copies the source (three copied items running, or
+            # at least three that are half or more of its residue-free lines) is a template
+            # echo with a few count letters in it, and trimming those letters would write the
+            # rest. Checked before the trim, because the trim breaks the run (audit F-01,
+            # R2-01). See `echoes_source` for what counts as copied.
             degradable = contaminated == DEGRADABLE_SIGNAL and not echoes_source(rendered, corpus)
             reduced = _withhold_residue(digest) if degradable else None
             if reduced is not None:

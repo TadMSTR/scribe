@@ -597,3 +597,53 @@ def test_steps_under_twenty_characters_are_outside_the_gate(slept) -> None:
     log.turns[0].user_text = "\n".join(steps)
     out = summarize_log(log, _three(_digest(done=steps)), sleep=sleep)
     assert out.ok is True and out.withheld_items == 2
+
+
+# --- audit R3-01/R3-02 (round 3) ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        lambda t: f"**{t}.**",  # period inside closing emphasis
+        lambda t: f"*{t};*",  # (backticks would excuse the N as notation: no residue at all)
+        lambda t: f"1. {t}",  # the model numbers its items
+        lambda t: f"2) {t}.",
+    ],
+)
+def test_markup_numbering_and_a_final_period_together_do_not_hide_a_copy(slept, variant) -> None:
+    """R3-01. Markup is stripped before the trailing punctuation, and numbering is dropped."""
+    _delays, sleep = slept
+    items = [variant(t) for t in TEMPLATE]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_tabs_and_line_breaks_in_the_source_count_as_spacing(slept) -> None:
+    """R3-01. In the one-line JSON corpus a tab is the two characters `\\t`, which plain
+    whitespace collapsing does not see."""
+    _delays, sleep = slept
+    log = _template_log()
+    log.turns[0].user_text = "\n".join(t.replace(" ", "\t", 2) for t in TEMPLATE)
+    assert "\\t" in log.grounding_text(), "the probe needs the escaped tab in the corpus"
+    out = summarize_log(log, _three(_digest(done=TEMPLATE)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_a_step_wrapped_across_source_lines_still_matches() -> None:
+    from scribe.summarize.contamination import echoes_source
+
+    log = _log()
+    log.turns[0].user_text = "\n".join(t.replace(" the ", "\nthe ", 1) for t in TEMPLATE)
+    md = "\n".join(f"- {t}" for t in (TEMPLATE[0], TEMPLATE[2], TEMPLATE[3]))
+    assert echoes_source(md, log.grounding_text()) is True
+
+
+def test_two_copied_items_in_a_short_digest_still_degrade(slept) -> None:
+    """R3-02. The share rule needs at least three copied lines: two of four is not an echo,
+    whatever the share."""
+    _delays, sleep = slept
+    own = "Rebased the branch onto main twice"
+    items = [TEMPLATE[0], own, TEMPLATE[2], "wrote N docs in batch"]
+    out = summarize_log(_template_log(), _three(_digest(asked="Do it", done=items)), sleep=sleep)
+    assert out.ok is True and out.withheld_items == 1
