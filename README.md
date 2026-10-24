@@ -603,7 +603,8 @@ the session was suppressed, `""` otherwise. `qc-report` breaks suppressions down
 records from before 0.16.0 count as `unrecorded`. The guard does not treat the `#N (id M)`
 ticket notation as residue: an `N`/`M` written after `#` or lowercase `id`, or inside inline
 code, is excused, and so is a bare count letter later on a line that already wrote `#N`, `id M`
-or an inline-code `n/N`. An `N/M` pair, `XX` and date templates are never excused that way.
+or an inline-code `n/N` (a word-labelled `#N` such as `PR #N` counts only with `(id` after it).
+An `N/M` pair, `XX` and date templates are never excused that way.
 
 `prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
 cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.

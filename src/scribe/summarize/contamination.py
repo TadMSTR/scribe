@@ -106,7 +106,11 @@ _CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
 #: The span alternative was also taken out of this regex and checked against the spans
 #: `_line_facts` already has: as an alternative here it backtracked quadratically on a line
 #: with an unclosed backtick (F-01).
-_NOTATION_ANCHOR_RE = re.compile(r"#[NM]\b|\bid\s{1,8}\(?[NM]\b")
+#:
+#: A `#N` that a word labels (`PR #N`, `Step #N`) anchors nothing unless `(id` follows it: it
+#: is excused itself (accepted, F-04), but it is a template form as often as it is the
+#: notation, so it must not excuse the rest of its line too (audit R2-01).
+_NOTATION_ANCHOR_RE = re.compile(r"(?<!\w)(?<!\w\s)#[NM]\b|#[NM](?=\s*\(id\b)|\bid\s{1,8}\(?[NM]\b")
 _NOTATION_SPAN_RE = re.compile(r"\b[nm]/[NM]\b")
 
 _MIN_OVERLAP_LINES = 3  # consecutive identical non-trivial lines that mean "copied"
@@ -183,7 +187,8 @@ def _is_notation(
     """True when the residue hit `m` in `text` is the ticket notation, not a count letter.
 
     Judged on the hit's own line: a ref prefix right before it, an enclosing code span, or
-    an earlier notation use on the line. See `_REF_BEFORE_RE` and `_NOTATION_ANCHOR_RE`.
+    an earlier notation use on the line. See `_REF_BEFORE_RE`, `_NOTATION_ANCHOR_RE` and
+    `_NOTATION_SPAN_RE`.
     `newlines` holds every newline offset in `text`; `facts` caches `_line_facts` by line
     start. Both live for one scan. `anchored` allows the earlier-notation rule, which only
     a bare count letter gets (F-02).

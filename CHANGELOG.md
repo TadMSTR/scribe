@@ -23,7 +23,8 @@ notation, and the reason a session was suppressed now reaches the run record and
   when it is written as notation: directly after `#`, after lowercase `id` or `(id`, or
   inside inline code. A bare count letter is also excused when the same line already wrote
   `#N`, `#M`, `id N`, `id M` or an inline-code `n/N` ratio before it, as in "`#M` as
-  written, N as an id". That later-on-the-line rule covers bare letters only: an `N/M` pair
+  written, N as an id". A `#N` labelled by a word (`PR #N`, `Step #N`) counts only when
+  `(id` follows it. That later-on-the-line rule covers bare letters only: an `N/M` pair
   after the notation still fires, and inline code that merely contains a letter
   (`` `--max N` ``, `` `M-x compile` ``) starts nothing. "Closed N tickets", "the N in
   #N", `ID M`, and a count letter on a different line all still fire. `XX` and the

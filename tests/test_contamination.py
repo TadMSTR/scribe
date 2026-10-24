@@ -286,6 +286,9 @@ NOTATION_LINES = [
     pytest.param("- cite as `#N (id M)`, and `N/M` pairs are refused", id="code-span"),
     # Accepted (audit F-04): a `#`-prefixed template form is the same token as the notation.
     pytest.param("Merged PR #N into main", id="F-04-accepted-hash-form"),
+    # A word-labelled `#N` still anchors when `(id` follows it (R2-01); here the id is a real
+    # number, so nothing else on the line could.
+    pytest.param("a swapped pair #N (id 525) where N is the id", id="R2-01-hash-then-id"),
     # Excused by the code span alone: nothing earlier on the line anchors it.
     pytest.param("`N/M` pairs are refused", id="code-span-only"),
 ]
@@ -316,6 +319,9 @@ def test_the_ticket_notation_is_not_residue(line: str) -> None:
         "see #N, progress N/M complete",
         # Audit F-04: the notation writes `id` in lowercase, so `ID M` is a count letter.
         "ID M tickets were closed",
+        # Audit R2-01: a word-labelled `#N` is excused itself but anchors nothing after it.
+        "Merged PR #N, then closed N tickets",
+        "Step #N: wrote N docs",
     ],
 )
 def test_the_notation_exemption_is_bounded(line: str) -> None:
@@ -335,6 +341,8 @@ def test_the_fallback_keeps_a_first_line_that_cites_the_notation() -> None:
     quotes the convention survives the fallback like it survives the detector."""
     note = build_fallback_note("[User]: cite as #N (id M)")
     assert "User turn: cite as #N (id M)" in note
+    # R2-01: the same narrowing reaches the fallback through the shared helper.
+    assert "User turn:" not in build_fallback_note("[User]: Merged PR #N, then closed N tickets")
     # C6's line never fired, so it cannot tell the shared helper from the old regexes. This
     # one could: it was dropped from every fallback note before 0.16.0.
     assert "User turn: bare #N is a warning" in build_fallback_note("[User]: bare #N is a warning")
