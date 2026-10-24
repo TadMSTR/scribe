@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-24
+
+**Minor.** The contamination guard records what it matched, and a session whose last attempt
+is rejected only for `residue_token` is written without the offending items instead of being
+suppressed (vikunja#1216). The set of strings the guard fires on is unchanged, and so is the
+retry reminder: **`prompt_sha256` stays `94727aa7…`**. No schema change and no config change.
+
+### Added
+
+- **What matched reaches the run record.** `contamination_rule` names the residue pattern
+  that fired (`count_letter`, `ratio`, `date`), by name rather than index so a reorder cannot
+  relabel history. `contamination_excerpt` is the model's line around the hit: at most 80
+  characters, centred on the match, cut on word boundaries, and passed through the redactor
+  before it is stored. The whole digest is scrubbed before the cut, as the post-render guard
+  does, so a window can't split a secret, drop the key that marks one, or miss a PEM block
+  that spans two items. Lone surrogates are replaced so the record can always be written.
+  The excerpt goes to the run record and to `scribe run --json`, and nowhere else. The excerpt is kept out of `errors` and off every
+  span. Before this the rejected render was thrown away, and every investigation of this
+  detector started from a guess. Backfilled records carry `null`. `record_version` is
+  unchanged.
+- **`rule` and `token` on `memsearch.summarize_rejected`**, with the token capped at 16
+  characters and digit runs of five or more masked. The span name and the `signal`/`attempt`/`fallback` attributes are unchanged.
+- **`explain_contamination(summary, raw)`** returns a `Detection` (signal, token, rule,
+  excerpt). `detect_contamination` is now a thin wrapper over it and behaves the same.
+  Residue is reported at its earliest position, so `N/M` reads as `ratio`.
+- **Per-item degrade on a terminal `residue_token`.** On the last attempt only, when `Asked`
+  is clean and the untrimmed digest does not copy the session, list items that carry residue
+  are dropped. A digest copies the session when three copied items run consecutively, or
+  when at least three make up half or more of its residue-free lines. Matching is line by
+  line, so the one-line JSON corpus counts, and ignores case, `*`, backticks, spacing (tabs
+  and line breaks included), leading `1.`/`2)` numbering and trailing punctuation. Lines
+  under 20 characters are not checked; a copy reworded beyond that normalization (for
+  example into the past tense) is not caught, nor is a copy that is under half of a long
+  digest with no three items in a row. The reduced digest is then re-checked against every
+  detector, once. It is written when the re-check is clean and no more than half the list
+  items went. Otherwise the session is suppressed as before, with whatever the re-check
+  found recorded. Each field that lost items gets a non-bullet `_Withheld: N items dropped
+  by the contamination guard (residue_token)._` line. `qc.strip_scribe_markers` removes it
+  before grading, and it never quotes the dropped text. A degraded digest is a success:
+  `written`, `suppressed: false`, with `contamination_signal` still set and new
+  `withheld_items`/`withheld_fields` keys in the run record and the JSON report. Run totals
+  gain `withheld` and `withheld_items`, and the summarize span gains `withheld_items`.
+  `scribe recover` does not count a degraded block as loss.
+- **`qc-report` prints a `degraded` line**: sessions, items withheld, and the signal behind
+  them. A record from before 0.17.0 counts as 0, not `unrecorded`, because no earlier version
+  could degrade. `suppressed by signal` is unchanged.
+
+### Not changed
+
+- No new exemptions. `placeholder_token`, `template_signature` and `verbatim_overlap` still
+  suppress, never degrade.
+
 ## [0.16.0] — 2026-10-24
 
 **Minor.** The contamination guard no longer suppresses digests of sessions about the

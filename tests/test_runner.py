@@ -237,3 +237,413 @@ def test_a_retryable_schema_violation_still_gets_its_retries(slept) -> None:
     out = summarize_log(_log(), provider, sleep=sleep)
     assert len(provider.calls) == 2, "attempt 1 retried; attempt 2 hit the cap and stopped"
     assert out.ok is False
+
+
+# --- 0.17.0: degrade per item on a terminal `residue_token` (vikunja#1216) ----------------------
+
+from scribe.extract.redact import REDACTED  # noqa: E402
+from scribe.summarize.contamination import Detection, detect_contamination  # noqa: E402
+from scribe.summarize.render import WITHHELD_MARKER  # noqa: E402
+
+CLEAN = [
+    "Read the restic check flags",
+    "Confirmed the subset parser rejects zero",
+    "Ran the bats suite green",
+    "Tagged the release candidate",
+    "Opened the audit request",
+]
+#: Long enough to count for the overlap detector, and present in `_overlap_log`'s source.
+SOURCE = [
+    "The restic subset flag accepts a fraction of the packs",
+    "The parser rejects a denominator above the allowed bound",
+    "The bats suite covers both of the rejected input shapes",
+]
+
+
+def _digest(asked: str = "Check the release workflow", **fields) -> str:
+    """`done` is required by the schema; a short default stays out of the overlap window."""
+    return json.dumps({"asked": asked, "done": ["Listed the runs"], **fields})
+
+
+@pytest.fixture
+def line_corpus(monkeypatch):
+    """A multi-line corpus holding `SOURCE`. `grounding_text()` is one JSON line, which the
+    three-line overlap window can never match, so the overlap cases supply their own corpus
+    to reach the runner's handling of that signal at all."""
+    monkeypatch.setattr("scribe.summarize.runner.grounding_corpus", lambda log: "\n".join(SOURCE))
+
+
+def _three(text: str) -> Scripted:
+    return Scripted(text, text, text)
+
+
+def test_a_terminal_residue_item_is_withheld_not_the_session(slept) -> None:
+    """G1. Five clean items and one paraphrased `n/N` line: the five are written."""
+    _delays, sleep = slept
+    found = [*CLEAN, "values of N above 256 are still accepted"]
+    out = summarize_log(_log(), _three(_digest(found=found)), sleep=sleep)
+    assert out.ok is True and out.suppressed is False
+    assert out.digest.found == CLEAN
+    assert out.withheld_items == 1 and out.withheld_fields == {"found": 1}
+    assert out.contamination_signal == "residue_token" and out.contamination_rule == "count_letter"
+    assert "values of N above 256" in out.contamination_excerpt
+    assert f"{WITHHELD_MARKER} 1 item dropped by the contamination guard (residue_token)._" in (
+        out.markdown.splitlines()
+    )
+    assert "N above 256" not in out.markdown, "the marker must not quote the withheld text"
+    assert all(f"- {c}" in out.markdown for c in CLEAN)
+    assert detect_contamination(out.markdown, "") is None
+
+
+def test_the_guards_own_audit_shape_degrades(slept) -> None:
+    """G2. d2cbddef: an audit of the guard has to name its positive controls."""
+    _delays, sleep = slept
+    out = summarize_log(
+        _log(),
+        _three(_digest(done=[*CLEAN[:3], "Checked that wrote N docs still fires"])),
+        sleep=sleep,
+    )
+    assert out.ok is True and out.digest.done == CLEAN[:3] and out.withheld_items == 1
+
+
+def test_a_digest_that_is_mostly_residue_is_still_suppressed(slept) -> None:
+    """G3. Withholding more than half the items would launder a template echo."""
+    _delays, sleep = slept
+    dirty = _digest(done=[CLEAN[0], "Closed N tickets", "wrote N docs"])
+    out = summarize_log(_log(), _three(dirty), sleep=sleep)
+    assert out.suppressed is True and out.ok is False and out.withheld_items == 0
+    assert out.contamination_signal == "residue_token"
+    assert "contamination guard" in out.markdown
+
+
+@pytest.mark.parametrize(
+    "clean,dirty,degraded",
+    [
+        (2, 2, True),  # exactly half withheld: degraded
+        (1, 2, False),  # one clean item fewer: suppressed
+        (3, 3, True),
+        (2, 3, False),
+        (0, 1, False),  # nothing would be left
+    ],
+)
+def test_the_majority_floor_boundary(slept, clean: int, dirty: int, degraded: bool) -> None:
+    """G3, the boundary on both sides. Items are spread over two fields, because the floor
+    counts the digest's list items in total, not per field."""
+    _delays, sleep = slept
+    bad = [f"wrote N docs in batch {i}" for i in range(dirty)]
+    text = _digest(done=[*CLEAN[:clean], *bad[:1]], found=bad[1:])
+    out = summarize_log(_log(), _three(text), sleep=sleep)
+    assert out.ok is degraded and out.suppressed is not degraded
+    assert out.withheld_items == (dirty if degraded else 0)
+
+
+def test_a_field_emptied_by_the_guard_keeps_its_label_and_marker(slept) -> None:
+    _delays, sleep = slept
+    out = summarize_log(
+        _log(), _three(_digest(done=CLEAN[:2], found=["wrote N docs"])), sleep=sleep
+    )
+    assert out.ok is True and out.digest.found == []
+    lines = out.markdown.splitlines()
+    assert lines[lines.index("**Found:**") + 1].startswith(WITHHELD_MARKER)
+
+
+def test_residue_in_asked_always_suppresses(slept) -> None:
+    """G4. `asked` is one string, read first, with no partial form."""
+    _delays, sleep = slept
+    out = summarize_log(_log(), _three(_digest(asked="Close N tickets", done=CLEAN)), sleep=sleep)
+    assert out.suppressed is True and out.ok is False and out.withheld_items == 0
+
+
+def test_degrade_is_never_reached_before_the_last_attempt(slept) -> None:
+    """G5. The reminder gets its chance first."""
+    _delays, sleep = slept
+    dirty = _digest(found=[*CLEAN, "wrote N docs"])
+    provider = Scripted(dirty, GOOD)
+    out = summarize_log(_log(), provider, sleep=sleep)
+    assert out.ok is True and out.attempts == 2
+    assert out.withheld_items == 0 and out.contamination_signal == ""
+    assert WITHHELD_MARKER not in out.markdown
+    assert "IMPORTANT" in provider.calls[1][0]
+
+
+@pytest.mark.parametrize(
+    "fields,signal",
+    [
+        ({"done": [*CLEAN, "set <Env vars here"]}, "template_signature"),
+        ({"done": [*CLEAN, "did <specific step>", "wrote N docs"]}, "placeholder_token"),
+        ({"found": SOURCE}, "verbatim_overlap"),
+    ],
+)
+def test_other_terminal_signals_are_never_degraded(
+    slept, line_corpus, fields: dict, signal: str
+) -> None:
+    """G6."""
+    _delays, sleep = slept
+    out = summarize_log(_log(), _three(_digest(**fields)), sleep=sleep)
+    assert out.suppressed is True and out.ok is False
+    assert out.contamination_signal == signal and out.withheld_items == 0
+    assert WITHHELD_MARKER not in out.markdown
+
+
+def test_a_recheck_that_finds_something_else_suppresses_and_records_it(slept, line_corpus) -> None:
+    """G7. Dropping the residue item joins three source lines into a verbatim run, which the
+    first pass never got to because residue is checked before overlap. The residue item is
+    long enough to count as a line, so the untrimmed digest has no run of three, and the
+    model's own items keep the copied share under half, so the echo gate (F-01, R2-01) lets
+    the trim go ahead; the re-check is what stops it."""
+    _delays, sleep = slept
+    found = [SOURCE[0], SOURCE[1], "Checked that wrote N docs still fires", SOURCE[2], *CLEAN[:3]]
+    out = summarize_log(_log(), _three(_digest(found=found)), sleep=sleep)
+    assert out.suppressed is True and out.ok is False and out.withheld_items == 0
+    assert out.contamination_signal == "verbatim_overlap"
+    assert out.contamination_rule == "" and out.contamination_excerpt == ""
+    assert out.reason == "contamination: verbatim_overlap"
+
+
+def test_the_recheck_runs_the_full_detector_once(slept, monkeypatch) -> None:
+    """G7, mechanically: whatever the re-check returns is what is recorded, and there is no
+    second pruning pass."""
+    _delays, sleep = slept
+    calls: list[str] = []
+
+    def fake(rendered, corpus):
+        calls.append(rendered)
+        if WITHHELD_MARKER in rendered:
+            return Detection(signal="residue_token", token="M", rule="count_letter")
+        return Detection(signal="residue_token", token="N", rule="count_letter")
+
+    monkeypatch.setattr("scribe.summarize.runner.explain_contamination", fake)
+    out = summarize_log(_log(), _three(_digest(found=[*CLEAN, "wrote N docs"])), sleep=sleep)
+    assert out.suppressed is True and len(calls) == 4, "three attempts and one re-check"
+
+
+def test_the_stored_excerpt_is_redacted(slept, monkeypatch) -> None:
+    """X1 at the runner. Must FAIL with the scrub call removed: the secret sits inside the
+    raw 80-character window, so only the redactor can keep it out."""
+    _delays, sleep = slept
+    secret = "ghp_FAKE1234567890abcdefghijklmnop"
+    for text in (
+        _digest(asked=f"Close N tickets using {secret}", done=CLEAN),  # suppressed
+        _digest(found=[*CLEAN, f"wrote N docs with {secret}"]),  # degraded
+    ):
+        out = summarize_log(_log(), _three(text), sleep=sleep)
+        assert out.contamination_excerpt, "the probe must store an excerpt"
+        assert secret not in out.contamination_excerpt and "FAKE" not in out.contamination_excerpt
+        assert REDACTED in out.contamination_excerpt
+        assert not any(secret in e or REDACTED in e for e in out.errors)
+
+
+def test_a_lone_surrogate_in_the_excerpt_cannot_break_the_record(slept) -> None:
+    """Pre-audit F-2. The excerpt is model text, and provider JSON can decode to a lone
+    surrogate, which a strict UTF-8 write of the run record refuses."""
+    _delays, sleep = slept
+    out = summarize_log(
+        _log(), _three(_digest(asked="Close N tickets \ud83d now", done=CLEAN)), sleep=sleep
+    )
+    assert out.contamination_excerpt
+    out.contamination_excerpt.encode("utf-8")  # strict: raises if a surrogate survived
+
+
+@pytest.mark.parametrize(
+    "token,shown",
+    [("N", "N"), ("256/N", "256/N"), ("YYYY-MM-DD", "YYYY-MM-DD"), ("1234567890123456/N", "#/N")],
+)
+def test_the_span_token_masks_long_digit_runs(token: str, shown: str) -> None:
+    from scribe.summarize.runner import SPAN_TOKEN_CHARS, _span_token
+
+    assert _span_token(token) == shown and len(shown) <= SPAN_TOKEN_CHARS
+
+
+# --- audit F-01/F-04 (scribe-residue-degrade-2026-10) -------------------------------------------
+
+#: A skill template with count letters on two of its five steps, loaded into the session.
+TEMPLATE = [
+    "Read the plan and confirm every prerequisite",
+    "Run the suite and record N failures by name",
+    "Open the pull request against the main branch",
+    'Post the "ready for review" note in the room',
+    "Close N tickets that the change resolves",
+]
+
+
+def _template_log() -> EventLog:
+    """The template in the session text, so `grounding_text()` is the real one-line JSON."""
+    log = _log()
+    log.turns[0].user_text = "\n".join(TEMPLATE)
+    return log
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        TEMPLATE,  # the dropped items (2 and 5) sit between survivors: 1, 3, 4 are left
+        [TEMPLATE[1], TEMPLATE[0], TEMPLATE[2], TEMPLATE[3]],  # survivors consecutive
+    ],
+)
+def test_a_template_echo_is_not_laundered_by_the_trim(slept, items: list[str]) -> None:
+    """F-01. Before the fix both shapes were written, three copied steps and a marker,
+    because the re-check's overlap detector cannot fire on the one-line corpus and the trim
+    breaks the run it needs. The echo is judged on the untrimmed digest."""
+    _delays, sleep = slept
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.suppressed is True and out.ok is False and out.withheld_items == 0
+    assert out.contamination_signal == "residue_token"
+
+
+def test_two_copied_items_do_not_block_the_degrade(slept) -> None:
+    """The run is three, as for `verbatim_overlap`. A digest that quotes two steps and
+    reports its own work is not an echo."""
+    _delays, sleep = slept
+    items = [TEMPLATE[0], TEMPLATE[2], *CLEAN[:2], TEMPLATE[1]]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.ok is True and out.withheld_items == 1
+
+
+def test_echo_matching_sees_a_line_the_corpus_holds_json_escaped() -> None:
+    from scribe.summarize.contamination import echoes_source
+
+    corpus = _template_log().grounding_text()
+    assert TEMPLATE[3] not in corpus, "the probe needs a line that only matches escaped"
+    md = "\n".join(f"- {t}" for t in (TEMPLATE[2], TEMPLATE[3], TEMPLATE[0]))
+    assert echoes_source(md, corpus) is True
+    assert echoes_source("\n".join(f"- {t}" for t in CLEAN[:3]), corpus) is False
+
+
+def test_residue_in_asked_is_refused_by_the_trim_itself() -> None:
+    """F-04. Pinned on `_withhold_residue` directly: the full re-check would also suppress
+    this digest, which is why removing the guard passed every other test."""
+    from scribe.summarize.runner import _withhold_residue
+    from scribe.summarize.schema import Digest
+
+    d = Digest(asked="Close N tickets", done=[*CLEAN, "wrote N docs"])
+    assert _withhold_residue(d) is None
+    assert _withhold_residue(Digest(asked="Close the tickets", done=d.done)) is not None
+
+
+# --- audit R2-01/R2-02: what the echo gate normalizes, and what it does not ---------------------
+
+
+def _past(step: str) -> str:
+    return {
+        TEMPLATE[0]: "Read the plan and confirmed every prerequisite",
+        TEMPLATE[2]: "Opened the pull request against the main branch",
+        TEMPLATE[3]: 'Posted the "ready for review" note in the room',
+    }.get(step, step)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        lambda t: t + ".",  # trailing period
+        lambda t: t[0].lower() + t[1:],  # first letter lower-cased
+        lambda t: t.upper(),  # case throughout
+        lambda t: t.replace("pull request", "`pull request`"),  # model ADDS markdown
+    ],
+)
+def test_a_lightly_edited_echo_is_still_not_laundered(slept, variant) -> None:
+    """R2-01. Case, emphasis, spacing and a final period do not hide a copy."""
+    _delays, sleep = slept
+    items = [variant(t) for t in TEMPLATE]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_markup_and_spacing_the_model_dropped_still_match(slept) -> None:
+    """R2-01. The session had emphasis and a double space; the model's items have neither
+    (`_bullet` always flattens whitespace)."""
+    _delays, sleep = slept
+    log = _template_log()
+    log.turns[0].user_text = "\n".join(
+        t.replace("plan", "**plan**").replace("pull request", "pull  `request`") for t in TEMPLATE
+    )
+    out = summarize_log(log, _three(_digest(done=TEMPLATE)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_an_echo_interleaved_with_own_items_is_not_laundered(slept) -> None:
+    """R2-01. No three copied items are consecutive, but the copy is most of what would
+    survive."""
+    _delays, sleep = slept
+    items = [TEMPLATE[0], CLEAN[1], TEMPLATE[1], TEMPLATE[2], CLEAN[2], TEMPLATE[3], TEMPLATE[4]]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_a_long_digest_quoting_three_session_lines_still_degrades(slept) -> None:
+    """The share rule's other side: three verbatim lines among many of the model's own are a
+    digest that quotes its session, not an echo."""
+    _delays, sleep = slept
+    own = [f"{c} during the second pass" for c in CLEAN]
+    items = [TEMPLATE[0], *own[:2], TEMPLATE[2], *own[2:], TEMPLATE[3], "wrote N docs in batch"]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.ok is True and out.withheld_items == 1
+
+
+def test_a_past_tense_echo_is_an_accepted_residual(slept) -> None:
+    """R2-01, accepted: rewording beyond case, markup, spacing and punctuation is not caught.
+    Pinned so the limit is a recorded decision, and so a fix that closes it updates this."""
+    _delays, sleep = slept
+    out = summarize_log(
+        _template_log(), _three(_digest(done=[_past(t) for t in TEMPLATE])), sleep=sleep
+    )
+    assert out.ok is True and out.withheld_items == 2
+
+
+def test_steps_under_twenty_characters_are_outside_the_gate(slept) -> None:
+    """R2-02, documented: the gate skips short lines, as `verbatim_overlap` does."""
+    _delays, sleep = slept
+    steps = ["Run N tests", "Open the PR", "Post the note", "Tag it", "Close N bugs"]
+    log = _log()
+    log.turns[0].user_text = "\n".join(steps)
+    out = summarize_log(log, _three(_digest(done=steps)), sleep=sleep)
+    assert out.ok is True and out.withheld_items == 2
+
+
+# --- audit R3-01/R3-02 (round 3) ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        lambda t: f"**{t}.**",  # period inside closing emphasis
+        lambda t: f"*{t};*",  # (backticks would excuse the N as notation: no residue at all)
+        lambda t: f"1. {t}",  # the model numbers its items
+        lambda t: f"2) {t}.",
+    ],
+)
+def test_markup_numbering_and_a_final_period_together_do_not_hide_a_copy(slept, variant) -> None:
+    """R3-01. Markup is stripped before the trailing punctuation, and numbering is dropped."""
+    _delays, sleep = slept
+    items = [variant(t) for t in TEMPLATE]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_tabs_and_line_breaks_in_the_source_count_as_spacing(slept) -> None:
+    """R3-01. In the one-line JSON corpus a tab is the two characters `\\t`, which plain
+    whitespace collapsing does not see."""
+    _delays, sleep = slept
+    log = _template_log()
+    log.turns[0].user_text = "\n".join(t.replace(" ", "\t", 2) for t in TEMPLATE)
+    assert "\\t" in log.grounding_text(), "the probe needs the escaped tab in the corpus"
+    out = summarize_log(log, _three(_digest(done=TEMPLATE)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_a_step_wrapped_across_source_lines_still_matches() -> None:
+    from scribe.summarize.contamination import echoes_source
+
+    log = _log()
+    log.turns[0].user_text = "\n".join(t.replace(" the ", "\nthe ", 1) for t in TEMPLATE)
+    md = "\n".join(f"- {t}" for t in (TEMPLATE[0], TEMPLATE[2], TEMPLATE[3]))
+    assert echoes_source(md, log.grounding_text()) is True
+
+
+def test_two_copied_items_in_a_short_digest_still_degrade(slept) -> None:
+    """R3-02. The share rule needs at least three copied lines: two of four is not an echo,
+    whatever the share."""
+    _delays, sleep = slept
+    own = "Rebased the branch onto main twice"
+    items = [TEMPLATE[0], own, TEMPLATE[2], "wrote N docs in batch"]
+    out = summarize_log(_template_log(), _three(_digest(asked="Do it", done=items)), sleep=sleep)
+    assert out.ok is True and out.withheld_items == 1

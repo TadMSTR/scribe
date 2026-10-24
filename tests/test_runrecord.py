@@ -74,6 +74,10 @@ LIVE_FIELDS = {
     "post_render_redactions",
     "post_render_cause",
     "contamination_signal",
+    "contamination_rule",
+    "contamination_excerpt",
+    "withheld_items",
+    "withheld_fields",
     "errors",
     "qc_ok",
     "qc_coverage",
@@ -410,3 +414,61 @@ def test_a_record_that_was_not_suppressed_has_an_empty_signal(env) -> None:
     run_once(cfg, store, now=1_000_000.0, provider_factory=Stub)
     (rec,) = _records(cfg)
     assert rec["suppressed"] is False and rec["contamination_signal"] == ""
+
+
+# --- 0.17.0: what matched, redacted, and the per-item degrade --------------------------------
+
+_SECRET = "ghp_FAKE1234567890abcdefghijklmnop"
+_CLEAN = ["Read the restic check flags", "Ran the bats suite green", "Tagged the candidate"]
+
+
+def test_a_suppressed_record_carries_the_rule_and_a_redacted_excerpt(env) -> None:
+    """X1, end to end. The secret sits next to the residue token, inside the raw excerpt
+    window: the run record and the JSON report must hold the redaction marker, never the
+    plaintext. Fails with the runner's scrub call removed."""
+    cfg, store = env
+    dirty = json.dumps({"asked": f"Close N tickets using {_SECRET}", "done": _CLEAN})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(dirty))
+    (rec,) = _records(cfg)
+    assert rec["suppressed"] is True and rec["contamination_signal"] == "residue_token"
+    assert rec["contamination_rule"] == "count_letter"
+    assert (
+        REDACTED in rec["contamination_excerpt"]
+        and "Close N tickets" in rec["contamination_excerpt"]
+    )
+    assert rec["withheld_items"] == 0 and rec["withheld_fields"] == {}
+    report = json.dumps(r.to_dict())
+    raw = Path(cfg.qc_run_record).read_text()
+    for sink in (raw, report, rec["contamination_excerpt"], r.contamination_excerpt):
+        assert _SECRET not in sink and "FAKE" not in sink
+    assert not any("Close N" in e for e in r.errors), "the excerpt never goes in errors"
+
+
+def test_a_degraded_record_is_written_and_says_why(env) -> None:
+    """The run record shows both: written, and degraded with the signal behind it."""
+    cfg, store = env
+    dirty = json.dumps({"asked": "x", "done": [*_CLEAN, f"wrote N docs with {_SECRET}"]})
+    (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Stub(dirty))
+    (rec,) = _records(cfg)
+    assert rec["written"] is True and rec["suppressed"] is False and rec["placeholder"] is False
+    assert (
+        rec["contamination_signal"] == "residue_token"
+        and rec["contamination_rule"] == "count_letter"
+    )
+    assert rec["withheld_items"] == r.withheld_items == 1
+    assert rec["withheld_fields"] == r.withheld_fields == {"done": 1}
+    assert REDACTED in rec["contamination_excerpt"]
+    assert summarize_run([r])["withheld"] == 1 and summarize_run([r])["withheld_items"] == 1
+    body = next(output_root(cfg).rglob("*.md")).read_text()
+    assert "_Withheld: 1 item dropped by the contamination guard (residue_token)._" in body
+    assert _SECRET not in body and "wrote N docs" not in body
+    for sink in (Path(cfg.qc_run_record).read_text(), json.dumps(r.to_dict())):
+        assert _SECRET not in sink and "FAKE" not in sink
+
+
+def test_a_clean_record_has_empty_contamination_detail(env) -> None:
+    cfg, store = env
+    run_once(cfg, store, now=1_000_000.0, provider_factory=Stub)
+    (rec,) = _records(cfg)
+    assert rec["contamination_rule"] == rec["contamination_excerpt"] == ""
+    assert rec["withheld_items"] == 0 and rec["withheld_fields"] == {}

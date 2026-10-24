@@ -60,7 +60,33 @@ def _truncation_note(dropped: int, cap: int) -> str:
     return f"{TRUNCATION_MARKER} {dropped} further {items} dropped at the {cap}-item cap._"
 
 
-def render_digest(digest: Digest, *, heading: str = "", caps: dict[str, int] | None = None) -> str:
+#: Prefix of the line that records items the contamination guard withheld, and its pattern.
+#: Constants for the same reason as `TRUNCATION_MARKER`: `qc.strip_scribe_markers` must
+#: recognise the line to exclude it from grading (vikunja#1216).
+WITHHELD_MARKER = "_Withheld:"
+WITHHELD_RE = re.compile(rf"^{re.escape(WITHHELD_MARKER)}[^\n]*_$", re.M)
+
+
+def _withheld_note(dropped: int, signal: str) -> str:
+    """The line that says the contamination guard dropped items from this field.
+
+    Not a bullet, for `_truncation_note`'s reason: it is scribe's prose about scribe, and a
+    bullet would be graded as a claim and fail groundedness on every degraded digest (the
+    vikunja#848 shape). It never quotes what was dropped. That text is what the guard
+    objected to, so it does not go in the block in any form.
+    """
+    items = "item" if dropped == 1 else "items"
+    return f"{WITHHELD_MARKER} {dropped} {items} dropped by the contamination guard ({signal})._"
+
+
+def render_digest(
+    digest: Digest,
+    *,
+    heading: str = "",
+    caps: dict[str, int] | None = None,
+    withheld: dict[str, int] | None = None,
+    withheld_signal: str = "residue_token",
+) -> str:
     """Render one session digest. Always terminated with a newline.
 
     `caps` is threaded in rather than read from the constants because the truncation note
@@ -68,8 +94,13 @@ def render_digest(digest: Digest, *, heading: str = "", caps: dict[str, int] | N
     longer that number. A note reading "dropped at the 40-item cap" under a session whose cap
     was 156 is a statement about the code that is false about the run — and the note exists
     precisely so a reader can see how much was lost and against what.
+
+    `withheld` maps a field to the number of items the contamination guard dropped from it
+    (`runner`'s per-item degrade). A field emptied by it still gets its label and its marker,
+    so the gap is visible where the items would have been.
     """
     caps = caps or field_caps()
+    withheld = withheld or {}
     lines: list[str] = []
     if heading:
         lines.append(f"### {heading}")
@@ -77,7 +108,7 @@ def render_digest(digest: Digest, *, heading: str = "", caps: dict[str, int] | N
     lines.append(f"**Asked:** {' '.join(digest.asked.split())}")
     for attr, label in _SECTIONS:
         values = getattr(digest, attr)
-        if not values:
+        if not values and not withheld.get(attr):
             continue
         lines.append("")
         lines.append(f"**{label}:**")
@@ -85,6 +116,8 @@ def render_digest(digest: Digest, *, heading: str = "", caps: dict[str, int] | N
         dropped = digest.truncated.get(attr, 0)
         if dropped:
             lines.append(_truncation_note(dropped, caps[attr]))
+        if withheld.get(attr):
+            lines.append(_withheld_note(withheld[attr], withheld_signal))
     return "\n".join(lines) + "\n"
 
 

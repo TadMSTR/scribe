@@ -177,6 +177,7 @@ def stats(records: list[dict]) -> dict:
         "placeholders": len(placeholders),
         "suppressed": sum(1 for r in records if r.get("suppressed")),
         "suppressed_by_signal": _suppressed_by_signal(records),
+        "degraded": _degraded(records),
         "discarded": sum(1 for r in records if r.get("discarded")),
         # A fire is not a leak by itself: it is loud in the text report unless its cause is
         # `model-output`, the one cause that rules a leak out. See `_post_render_by_cause`.
@@ -220,6 +221,26 @@ def _suppressed_by_signal(records: list[dict]) -> dict[str, int]:
         if r.get("suppressed"):
             out[r.get("contamination_signal") or CAUSE_UNRECORDED] += 1
     return dict(sorted(out.items()))
+
+
+def _degraded(records: list[dict]) -> dict:
+    """Sessions written with items withheld by the contamination guard (0.17.0), per signal,
+    with the total items withheld.
+
+    **A record with no `withheld_items` key counts as 0, not as `unrecorded`**, unlike
+    `_suppressed_by_signal`. That function cannot know which signal an old suppression had,
+    so it says so. Here the absence is a true zero: no scribe before 0.17.0 could degrade,
+    so an older record is known not to have.
+    """
+    hit = [r for r in records if _num(r.get("withheld_items")) > 0]
+    by_signal: Counter[str] = Counter(
+        r.get("contamination_signal") or CAUSE_UNRECORDED for r in hit
+    )
+    return {
+        "sessions": len(hit),
+        "items": int(sum(_num(r.get("withheld_items")) for r in hit)),
+        "by_signal": dict(sorted(by_signal.items())),
+    }
 
 
 def group(records: list[dict], by: list[str]) -> dict[tuple, list[dict]]:
