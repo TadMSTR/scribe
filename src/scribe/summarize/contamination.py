@@ -12,6 +12,7 @@ signature; and several consecutive non-trivial lines reproduced verbatim from th
 
 from __future__ import annotations
 
+import bisect
 import re
 
 _PLACEHOLDER_RE = re.compile(r"<[a-zA-Z][a-zA-Z0-9 _./-]{0,40}>")
@@ -79,7 +80,10 @@ _NOTATION_EXEMPT = frozenset({0, 1})
 #: when it sits inside inline code, `` `n/N` ``. Templates do not wrap their count letters
 #: in backticks, so the cost of that exemption is a digest that keeps an `N`; the cost of
 #: the false positive was a digest lost.
-_REF_BEFORE_RE = re.compile(r"(?:#|\bid\s+\(?)$", re.IGNORECASE)
+_REF_BEFORE_RE = re.compile(r"(?:#|\bid\s{1,8}\(?)$", re.IGNORECASE)
+#: How far back from a hit `_REF_BEFORE_RE` looks: `id` + up to 8 spaces + `(` fits. Bounded
+#: so the per-hit cost does not grow with the line.
+_REF_WINDOW = 12
 _CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
 
 #: A notation use earlier on the same line: `#N`, `id M`, or inline code holding a bare
@@ -140,30 +144,49 @@ def _scaffold_line(line: str) -> bool:
     return len(words) < _MIN_PROSE_WORDS
 
 
-def _is_notation(text: str, m: re.Match[str]) -> bool:
+def _line_facts(text: str, start: int) -> tuple[list[int], list[int], int | None]:
+    """Code-span starts and ends, and the end of the earliest notation use, for the line of
+    `text` beginning at `start`. Computed once per line, never once per hit: a digest is
+    model output, and a long line of excused hits went quadratic when every hit re-scanned
+    its line (IV-47, 0.16.0 pre-audit)."""
+    end = text.find("\n", start)
+    end = len(text) if end == -1 else end
+    spans = [(c.start(), c.end()) for c in _CODE_SPAN_RE.finditer(text, start, end)]
+    anchor = _NOTATION_ANCHOR_RE.search(text, start, end)
+    return [a for a, _ in spans], [b for _, b in spans], (anchor.end() if anchor else None)
+
+
+def _is_notation(text: str, m: re.Match[str], newlines: list[int], facts: dict[int, tuple]) -> bool:
     """True when the residue hit `m` in `text` is the ticket notation, not a count letter.
 
     Judged on the hit's own line: a ref prefix right before it, an enclosing code span, or
     an earlier notation use on the line. See `_REF_BEFORE_RE` and `_NOTATION_ANCHOR_RE`.
+    `newlines` holds every newline offset in `text`; `facts` caches `_line_facts` by line
+    start. Both live for one scan.
     """
-    start = text.rfind("\n", 0, m.start()) + 1
-    end = text.find("\n", m.end())
-    line = text[start : end if end != -1 else len(text)]
-    pos = m.start() - start
-    if _REF_BEFORE_RE.search(line[:pos]):
+    pos = m.start()
+    k = bisect.bisect_left(newlines, pos)
+    start = newlines[k - 1] + 1 if k else 0
+    if _REF_BEFORE_RE.search(text, max(start, pos - _REF_WINDOW), pos):
         return True
-    if any(c.start() < pos < c.end() for c in _CODE_SPAN_RE.finditer(line)):
+    if start not in facts:
+        facts[start] = _line_facts(text, start)
+    starts, ends, anchor_end = facts[start]
+    i = bisect.bisect_left(starts, pos) - 1
+    if i >= 0 and pos < ends[i]:
         return True
-    return bool(_NOTATION_ANCHOR_RE.search(line[:pos]))
+    return anchor_end is not None and anchor_end <= pos
 
 
 def _has_residue(text: str) -> bool:
     """Whether `text` carries template residue. The detector and the fallback re-check
     (F-05) share this, so they cannot disagree about what residue is."""
+    newlines = [i for i, ch in enumerate(text) if ch == "\n"]
+    facts: dict[int, tuple] = {}
     for i, res in enumerate(_RESIDUE_RES):
         for m in res.finditer(text):
             exemptable = i in _NOTATION_EXEMPT and "XX" not in m.group()
-            if not (exemptable and _is_notation(text, m)):
+            if not (exemptable and _is_notation(text, m, newlines, facts)):
                 return True
     return False
 

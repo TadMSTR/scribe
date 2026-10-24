@@ -337,3 +337,15 @@ def test_the_retry_reminder_no_longer_forbids_the_notation() -> None:
     notation failed exactly as attempt 1 did."""
     assert "`#N (id M)`" in RETRY_REMINDER
     assert "count letters like N, M, or XX" in RETRY_REMINDER
+
+
+def test_a_long_line_of_excused_hits_is_scanned_in_linear_time() -> None:
+    """IV-47 (0.16.0 pre-audit). The first cut re-scanned the whole line for every hit, so
+    100 KB of excused hits took 17 s; the guard runs on model output. Generous bound: the
+    quadratic version needs minutes here, the linear one well under a second."""
+    import time
+
+    for line in ("#N a " * 40_000, "`N a` " * 40_000, "id M x " * 40_000):
+        t = time.perf_counter()
+        assert detect_contamination(line, raw="") is None
+        assert time.perf_counter() - t < 2.0
