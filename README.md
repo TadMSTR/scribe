@@ -618,11 +618,14 @@ When the last attempt is rejected only for `residue_token`, scribe writes the di
 offending list items instead of suppressing the session. Each field that lost items gets a
 non-bullet `_Withheld: N items dropped by the contamination guard (residue_token)._` line, which
 QC does not grade, and the record carries `withheld_items` and `withheld_fields` with
-`contamination_signal` still set. It suppresses as before when residue is in `Asked`, when the
-untrimmed digest has three items running that appear verbatim in the session (a copied template
-with a few count letters in it), when more than half the list items (or all of them) would go,
-or when the reduced digest fails any detector on a re-check. `qc-report` prints a `degraded`
-line. Records from before 0.17.0 count as 0, since no earlier version could degrade.
+`contamination_signal` still set. It suppresses as before when residue is in `Asked`; when the
+untrimmed digest copies the session (three copied items in a row, or at least three that make up
+half or more of the residue-free lines); when more than half the list items (or all of them)
+would go; or when the reduced digest fails any detector on a re-check. A copied item is one that
+appears in the session text once case, `*`, backticks, spacing and a trailing period are
+ignored. Lines under 20 characters are not checked, and a copy reworded beyond that, for example
+into the past tense, is not caught. `qc-report` prints a `degraded` line. Records from before
+0.17.0 count as 0, since no earlier version could degrade.
 
 `prompt_sha256` hashes the system prompt, the user-prompt framing, the retry reminder and the
 cap *rules* (floors, headroom, clamp), so changing a cap counts as a new prompt.

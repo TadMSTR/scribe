@@ -388,10 +388,11 @@ def test_other_terminal_signals_are_never_degraded(
 def test_a_recheck_that_finds_something_else_suppresses_and_records_it(slept, line_corpus) -> None:
     """G7. Dropping the residue item joins three source lines into a verbatim run, which the
     first pass never got to because residue is checked before overlap. The residue item is
-    long enough to count as a line, so the untrimmed digest has no run of three and the
-    echo gate (F-01) lets the trim go ahead; the re-check is what stops it."""
+    long enough to count as a line, so the untrimmed digest has no run of three, and the
+    model's own items keep the copied share under half, so the echo gate (F-01, R2-01) lets
+    the trim go ahead; the re-check is what stops it."""
     _delays, sleep = slept
-    found = [SOURCE[0], SOURCE[1], "Checked that wrote N docs still fires", SOURCE[2]]
+    found = [SOURCE[0], SOURCE[1], "Checked that wrote N docs still fires", SOURCE[2], *CLEAN[:3]]
     out = summarize_log(_log(), _three(_digest(found=found)), sleep=sleep)
     assert out.suppressed is True and out.ok is False and out.withheld_items == 0
     assert out.contamination_signal == "verbatim_overlap"
@@ -517,3 +518,82 @@ def test_residue_in_asked_is_refused_by_the_trim_itself() -> None:
     d = Digest(asked="Close N tickets", done=[*CLEAN, "wrote N docs"])
     assert _withhold_residue(d) is None
     assert _withhold_residue(Digest(asked="Close the tickets", done=d.done)) is not None
+
+
+# --- audit R2-01/R2-02: what the echo gate normalizes, and what it does not ---------------------
+
+
+def _past(step: str) -> str:
+    return {
+        TEMPLATE[0]: "Read the plan and confirmed every prerequisite",
+        TEMPLATE[2]: "Opened the pull request against the main branch",
+        TEMPLATE[3]: 'Posted the "ready for review" note in the room',
+    }.get(step, step)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        lambda t: t + ".",  # trailing period
+        lambda t: t[0].lower() + t[1:],  # first letter lower-cased
+        lambda t: t.upper(),  # case throughout
+        lambda t: t.replace("pull request", "`pull request`"),  # model ADDS markdown
+    ],
+)
+def test_a_lightly_edited_echo_is_still_not_laundered(slept, variant) -> None:
+    """R2-01. Case, emphasis, spacing and a final period do not hide a copy."""
+    _delays, sleep = slept
+    items = [variant(t) for t in TEMPLATE]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_markup_and_spacing_the_model_dropped_still_match(slept) -> None:
+    """R2-01. The session had emphasis and a double space; the model's items have neither
+    (`_bullet` always flattens whitespace)."""
+    _delays, sleep = slept
+    log = _template_log()
+    log.turns[0].user_text = "\n".join(
+        t.replace("plan", "**plan**").replace("pull request", "pull  `request`") for t in TEMPLATE
+    )
+    out = summarize_log(log, _three(_digest(done=TEMPLATE)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_an_echo_interleaved_with_own_items_is_not_laundered(slept) -> None:
+    """R2-01. No three copied items are consecutive, but the copy is most of what would
+    survive."""
+    _delays, sleep = slept
+    items = [TEMPLATE[0], CLEAN[1], TEMPLATE[1], TEMPLATE[2], CLEAN[2], TEMPLATE[3], TEMPLATE[4]]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.suppressed is True and out.withheld_items == 0
+
+
+def test_a_long_digest_quoting_three_session_lines_still_degrades(slept) -> None:
+    """The share rule's other side: three verbatim lines among many of the model's own are a
+    digest that quotes its session, not an echo."""
+    _delays, sleep = slept
+    own = [f"{c} during the second pass" for c in CLEAN]
+    items = [TEMPLATE[0], *own[:2], TEMPLATE[2], *own[2:], TEMPLATE[3], "wrote N docs in batch"]
+    out = summarize_log(_template_log(), _three(_digest(done=items)), sleep=sleep)
+    assert out.ok is True and out.withheld_items == 1
+
+
+def test_a_past_tense_echo_is_an_accepted_residual(slept) -> None:
+    """R2-01, accepted: rewording beyond case, markup, spacing and punctuation is not caught.
+    Pinned so the limit is a recorded decision, and so a fix that closes it updates this."""
+    _delays, sleep = slept
+    out = summarize_log(
+        _template_log(), _three(_digest(done=[_past(t) for t in TEMPLATE])), sleep=sleep
+    )
+    assert out.ok is True and out.withheld_items == 2
+
+
+def test_steps_under_twenty_characters_are_outside_the_gate(slept) -> None:
+    """R2-02, documented: the gate skips short lines, as `verbatim_overlap` does."""
+    _delays, sleep = slept
+    steps = ["Run N tests", "Open the PR", "Post the note", "Tag it", "Close N bugs"]
+    log = _log()
+    log.turns[0].user_text = "\n".join(steps)
+    out = summarize_log(log, _three(_digest(done=steps)), sleep=sleep)
+    assert out.ok is True and out.withheld_items == 2

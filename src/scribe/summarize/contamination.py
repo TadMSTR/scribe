@@ -380,10 +380,20 @@ def detect_contamination(summary: str, raw: str) -> str | None:
     return d.signal if d else None
 
 
+#: Markdown the model adds or drops freely, removed from both sides before an echo match.
+_ECHO_MARKUP_RE = re.compile(r"[*`]+")
+#: Trailing punctuation a model adds to a copied step, removed from the digest side only.
+_ECHO_TRAILING = ".,;:!? "
+
+
+def _echo_norm(text: str) -> str:
+    return " ".join(_ECHO_MARKUP_RE.sub("", text).casefold().split())
+
+
 def echoes_source(summary: str, raw: str) -> bool:
-    """Whether `summary` has `_MIN_OVERLAP_LINES` consecutive non-trivial lines that each
-    appear verbatim in `raw`. Used before the per-item degrade (audit F-01,
-    scribe-residue-degrade-2026-10).
+    """Whether `summary` copies `raw`: three consecutive non-trivial lines that each appear in
+    it, or at least three such lines making up at least half of the residue-free ones. Used
+    before the per-item degrade (audit F-01 and R2-01, scribe-residue-degrade-2026-10).
 
     `verbatim_overlap` cannot stand in for this. It looks for a three-line window inside a
     line-structured `raw`, and scribe's corpus is `grounding_text()`, one JSON line, so it
@@ -392,21 +402,37 @@ def echoes_source(summary: str, raw: str) -> bool:
     accepts either the line as written or its JSON-escaped form, which is how it sits in the
     one-line corpus.
 
+    Both sides are casefolded, stripped of `*` and backticks, and whitespace-collapsed, and
+    the digest line loses trailing punctuation, so case, emphasis, spacing or a final period
+    can't hide a copy. The second rule catches a copy with the model's own lines between its
+    steps. It needs the copy to be at least half of what would survive, so a long digest that
+    quotes three lines of its session is still degraded rather than suppressed.
+
+    **What it does not catch** (accepted, see accepted-risks): a copy reworded beyond that
+    normalization, for example into the past tense; and lines shorter than
+    `_MIN_OVERLAP_LEN` (20) characters after `_normalize_line`, which are skipped, as
+    `verbatim_overlap` skips them.
+
     It gates only the degrade. A digest that fails it is suppressed exactly as 0.16.0 would
     have suppressed it, so this cannot cost a session that 0.16.0 wrote.
     """
-    run = 0
+    corpus = _echo_norm(raw)
+    run = copied = candidates = 0
     for line in summary.splitlines():
         n = _normalize_line(line)
         if len(n) < _MIN_OVERLAP_LEN:
             continue
-        if n in raw or json.dumps(n, ensure_ascii=False)[1:-1] in raw:
-            run += 1
-            if run >= _MIN_OVERLAP_LINES:
-                return True
-        else:
-            run = 0
-    return False
+        n = n.rstrip(_ECHO_TRAILING)
+        hit = any(
+            _echo_norm(form) in corpus for form in (n, json.dumps(n, ensure_ascii=False)[1:-1])
+        )
+        run = run + 1 if hit else 0
+        if run >= _MIN_OVERLAP_LINES:
+            return True
+        if not _has_residue(line):
+            candidates += 1
+            copied += hit
+    return copied >= _MIN_OVERLAP_LINES and copied * 2 >= candidates
 
 
 def build_fallback_note(raw: str) -> str:
