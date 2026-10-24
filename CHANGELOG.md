@@ -20,12 +20,17 @@ notation, and the reason a session was suppressed now reaches the run record and
   in `id M` as unfilled count letters. Since the fleet adopted `#N (id M)` on 2026-10-21,
   a digest of any session about ticket references failed on every attempt: two sessions
   were suppressed on all nine. An `N`/`M` hit from the count-letter patterns is now excused
-  when it is written as notation: directly after `#`, after `id` or `(id`, or inside inline
-  code. A bare letter later on the same line as one of those is excused too, as in
-  "`#M` as written, N as an id". Only hits *after* a notation use count, so "Closed N
-  tickets" and "the N in #N" still fire, and so does a count letter on a different line.
-  `XX` and the `YYYY-MM-DD` patterns are never excused. The fallback note's re-check uses
-  the same helper, so a first user line that cites the notation is quoted again.
+  when it is written as notation: directly after `#`, after lowercase `id` or `(id`, or
+  inside inline code. A bare count letter is also excused when the same line already wrote
+  `#N`, `#M`, `id N`, `id M` or an inline-code `n/N` ratio before it, as in "`#M` as
+  written, N as an id". That later-on-the-line rule covers bare letters only: an `N/M` pair
+  after the notation still fires, and inline code that merely contains a letter
+  (`` `--max N` ``, `` `M-x compile` ``) starts nothing. "Closed N tickets", "the N in
+  #N", `ID M`, and a count letter on a different line all still fire. `XX` and the
+  `YYYY-MM-DD` patterns are never excused. `PR #N` is excused along with the notation,
+  because the two are the same token. The fallback note's re-check uses the same helper,
+  so a first user line that cites the notation is quoted again. The scan is linear in the
+  digest's length.
 - **The retry reminder allows the notation.** It still asks for real numbers instead of
   count letters, but says the literal `` `#N (id M)` `` may be written when the session was
   about it. Before this, attempts 2 and 3 failed the same way attempt 1 did.

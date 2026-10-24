@@ -80,20 +80,34 @@ _NOTATION_EXEMPT = frozenset({0, 1})
 #: when it sits inside inline code, `` `n/N` ``. Templates do not wrap their count letters
 #: in backticks, so the cost of that exemption is a digest that keeps an `N`; the cost of
 #: the false positive was a digest lost.
-_REF_BEFORE_RE = re.compile(r"(?:#|\bid\s{1,8}\(?)$", re.IGNORECASE)
+#:
+#: `id` is matched in lowercase only, the way the notation writes it, so `ID M tickets` still
+#: fires (audit F-04).
+# SECURITY[accepted]: `PR #N` and other `#`-prefixed template forms are excused with the
+# ticket notation; on syntax alone they are the same token, and the guard is a quality
+# control on model output, not a security boundary. Audit: 2026-10-24/scribe-residue-guard-2026-10.
+_REF_BEFORE_RE = re.compile(r"(?:#|\bid\s{1,8}\(?)$")
 #: How far back from a hit `_REF_BEFORE_RE` looks: `id` + up to 8 spaces + `(` fits. Bounded
 #: so the per-hit cost does not grow with the line.
 _REF_WINDOW = 12
 _CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
 
-#: A notation use earlier on the same line: `#N`, `id M`, or inline code holding a bare
-#: `N`/`M`. A bare letter *after* one of these is excused too (option ii of the build plan's
-#: C4/C5): in "`#M` as written, N as an id" the `N` names the notation the line just wrote,
-#: and nothing about the letter itself can tell it from "wrote N docs". Only what comes
-#: after counts, so "Closed N tickets" and "the N in #N" both still fire. A template line
-#: that pairs a count letter with a literal `#N` ("Closed N tickets: #N") also still fires,
-#: because its count comes first.
-_NOTATION_ANCHOR_RE = re.compile(r"#[NM]\b|\bid\s+\(?[NM]\b|`[^`\n]*\b[NM]\b[^`\n]*`")
+#: A notation use earlier on the same line: `#N`, `id M`, or inline code holding an `n/N`
+#: ratio (`_NOTATION_SPAN_RE`). A bare `N`/`M` count letter (`_RESIDUE_RES[0]` only) *after*
+#: one of these is excused too (option ii of the build plan's C4/C5): in "`#M` as written, N
+#: as an id" the `N` names the notation the line just wrote, and nothing about the letter
+#: itself can tell it from "wrote N docs". Only what comes after counts, so "Closed N
+#: tickets" and "the N in #N" both still fire. A template line that pairs a count letter with
+#: a literal `#N` ("Closed N tickets: #N") also still fires, because its count comes first.
+#:
+#: Narrowed after the audit (F-02): inline code that merely contains a standalone `N`/`M`
+#: (`` `M-x compile` ``, `` `--max N` ``) is not an anchor, and an `N/M` pair after an
+#: anchor still fires. The letter inside such a span is still excused by the span itself.
+#: The span alternative was also taken out of this regex and checked against the spans
+#: `_line_facts` already has: as an alternative here it backtracked quadratically on a line
+#: with an unclosed backtick (F-01).
+_NOTATION_ANCHOR_RE = re.compile(r"#[NM]\b|\bid\s{1,8}\(?[NM]\b")
+_NOTATION_SPAN_RE = re.compile(r"\b[nm]/[NM]\b")
 
 _MIN_OVERLAP_LINES = 3  # consecutive identical non-trivial lines that mean "copied"
 _MIN_OVERLAP_LEN = 20  # ignore short/generic lines when comparing
@@ -153,16 +167,26 @@ def _line_facts(text: str, start: int) -> tuple[list[int], list[int], int | None
     end = len(text) if end == -1 else end
     spans = [(c.start(), c.end()) for c in _CODE_SPAN_RE.finditer(text, start, end)]
     anchor = _NOTATION_ANCHOR_RE.search(text, start, end)
-    return [a for a, _ in spans], [b for _, b in spans], (anchor.end() if anchor else None)
+    anchor_end = anchor.end() if anchor else None
+    for a, b in spans:
+        if anchor_end is not None and b >= anchor_end:
+            break
+        if _NOTATION_SPAN_RE.search(text, a, b):
+            anchor_end = b
+            break
+    return [a for a, _ in spans], [b for _, b in spans], anchor_end
 
 
-def _is_notation(text: str, m: re.Match[str], newlines: list[int], facts: dict[int, tuple]) -> bool:
+def _is_notation(
+    text: str, m: re.Match[str], newlines: list[int], facts: dict[int, tuple], *, anchored: bool
+) -> bool:
     """True when the residue hit `m` in `text` is the ticket notation, not a count letter.
 
     Judged on the hit's own line: a ref prefix right before it, an enclosing code span, or
     an earlier notation use on the line. See `_REF_BEFORE_RE` and `_NOTATION_ANCHOR_RE`.
     `newlines` holds every newline offset in `text`; `facts` caches `_line_facts` by line
-    start. Both live for one scan.
+    start. Both live for one scan. `anchored` allows the earlier-notation rule, which only
+    a bare count letter gets (F-02).
     """
     pos = m.start()
     k = bisect.bisect_left(newlines, pos)
@@ -175,7 +199,7 @@ def _is_notation(text: str, m: re.Match[str], newlines: list[int], facts: dict[i
     i = bisect.bisect_left(starts, pos) - 1
     if i >= 0 and pos < ends[i]:
         return True
-    return anchor_end is not None and anchor_end <= pos
+    return anchored and anchor_end is not None and anchor_end <= pos
 
 
 def _has_residue(text: str) -> bool:
@@ -186,7 +210,7 @@ def _has_residue(text: str) -> bool:
     for i, res in enumerate(_RESIDUE_RES):
         for m in res.finditer(text):
             exemptable = i in _NOTATION_EXEMPT and "XX" not in m.group()
-            if not (exemptable and _is_notation(text, m, newlines, facts)):
+            if not (exemptable and _is_notation(text, m, newlines, facts, anchored=i == 0)):
                 return True
     return False
 

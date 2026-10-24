@@ -284,7 +284,8 @@ NOTATION_LINES = [
     pytest.param("still accepted as `n/N` with N above 256", id="C5-code-span-then-bare"),
     pytest.param("cite tickets as #N (id M) everywhere", id="C6-plain-pair"),
     pytest.param("- cite as `#N (id M)`, and `N/M` pairs are refused", id="code-span"),
-    pytest.param("ID M is the identifier", id="id-any-case"),
+    # Accepted (audit F-04): a `#`-prefixed template form is the same token as the notation.
+    pytest.param("Merged PR #N into main", id="F-04-accepted-hash-form"),
     # Excused by the code span alone: nothing earlier on the line anchors it.
     pytest.param("`N/M` pairs are refused", id="code-span-only"),
 ]
@@ -308,6 +309,13 @@ def test_the_ticket_notation_is_not_residue(line: str) -> None:
         "`#N` dated YYYY-MM-DD",
         # A notation use on ANOTHER line excuses nothing.
         "cite as #N (id M)\n- wrote N docs",
+        # Audit F-02: inline code that only CONTAINS a standalone letter is not notation, so
+        # it anchors nothing; and an `N/M` pair after a real anchor still fires.
+        "ran `M-x compile` then wrote N docs",
+        "ran `--max N` and closed N tickets",
+        "see #N, progress N/M complete",
+        # Audit F-04: the notation writes `id` in lowercase, so `ID M` is a count letter.
+        "ID M tickets were closed",
     ],
 )
 def test_the_notation_exemption_is_bounded(line: str) -> None:
@@ -349,3 +357,17 @@ def test_a_long_line_of_excused_hits_is_scanned_in_linear_time() -> None:
         t = time.perf_counter()
         assert detect_contamination(line, raw="") is None
         assert time.perf_counter() - t < 2.0
+
+
+def test_an_unclosed_backtick_does_not_make_the_anchor_scan_quadratic() -> None:
+    """Audit F-01. The code-span anchor used to be a regex alternative that, after one
+    unclosed backtick, tried every later `N` as a pivot and scanned to the end of the line
+    each time: 100 KB took 3.3 s. The audit's own line: the first hit is unexcused, but
+    deciding that computes the line's facts, and that was the quadratic part. No `#N` up
+    front, or the regex's leftmost alternative matches at once and the case is never run."""
+    import time
+
+    line = "`" + "N x " * 25_000
+    t = time.perf_counter()
+    assert detect_contamination(line, raw="") == "residue_token"
+    assert time.perf_counter() - t < 2.0
