@@ -30,6 +30,13 @@ once called "gate artefacts", and measured 2026-10-21 neither is (#1188 (id 1271
 
 `absent` is the bucket that says the model invented something outright.
 
+**The headline and the verdict are over model-written blocks only** (`render_mode` `llm` or
+`verbatim-fallback-llm`; a record from before 0.18.0 has no `render_mode` and is `llm`). A
+headless block quotes the agent and builds its rollup from the event log, so it is graded on
+different terms (its quotation is not graded at all), and pooling it would move the pass rate
+by the headless SHARE rather than by quality -- reading as a regression or hiding one. Every
+mode is still reported, separately, under `render_modes` (vikunja#1347).
+
 A sudden move in `absent` per session with no change in `scribe_version` or `prompt_sha256`
 is the practical signal of an upstream model change. `model_resolved` will not show it on a
 provider that echoes the requested alias (Mistral does), so the report does not claim it can.
@@ -43,6 +50,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from .qc_survey import ABSENT
+from .summarize.headless import LLM_MODES, MODE_LLM
 
 #: The exit-code contract. Every code is distinct and no success path returns 1 (#875): a
 #: cron that alerts on 1 must never be paged by a report that simply ran.
@@ -61,7 +69,18 @@ GROUP_FIELDS = {
     "version": "scribe_version",
     "prompt": "prompt_sha256",
     "model": "model_resolved",
+    "render_mode": "render_mode",
 }
+
+
+def render_mode(record: dict) -> str:
+    """The record's `render_mode`, with a pre-0.18.0 record (no key) read as `llm`."""
+    return record.get("render_mode") or MODE_LLM
+
+
+def model_written(records: list[dict]) -> list[dict]:
+    """The records the trend is judged on. See the module docstring."""
+    return [r for r in records if render_mode(r) in LLM_MODES]
 
 
 def parse_ts(value: object) -> datetime | None:
@@ -359,8 +378,11 @@ def build(
         if want_previous
         else None
     )
-    current = stats(cur_rows)
-    previous = stats(prev_rows) if prev_rows is not None else None
+    current = stats(model_written(cur_rows))
+    previous = stats(model_written(prev_rows)) if prev_rows is not None else None
+    modes: dict[str, list[dict]] = {}
+    for r in cur_rows:
+        modes.setdefault(render_mode(r), []).append(r)
     verdict = evaluate(current, previous, thresholds, min_sessions)
 
     groups = []
@@ -391,6 +413,8 @@ def build(
         "min_sessions": min_sessions,
         "current": current,
         "previous": previous,
+        # Every mode, each its own population; `current` above is the model-written part.
+        "render_modes": {mode: stats(rows) for mode, rows in sorted(modes.items())},
         "groups": groups,
         "new_models": new_models,
         "thresholds": thresholds,

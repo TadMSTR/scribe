@@ -37,6 +37,7 @@ from .qc_report import (
     build,
     parse_ts,
 )
+from .summarize.headless import LLM_MODES
 
 #: A crash mid-append can tear the last line, so a small number of bad lines is survivable.
 #: More than this share of the file (and more than one line) is a record the report cannot
@@ -286,6 +287,17 @@ def _print(report: dict, code: int) -> None:
     if report["previous"] is not None:
         for line in _section("previous", report["previous"]):
             print(line)
+    modes = report.get("render_modes") or {}
+    if set(modes) - {"llm"}:
+        # Said whenever a headless mode is present, because it changes what the lines above
+        # count: they are model-written blocks only.
+        headless = sum(m["sessions"] for k, m in modes.items() if k not in LLM_MODES)
+        print(f"  above: model-written blocks only; {headless} headless block(s) reported apart")
+        for mode, m in modes.items():
+            print(
+                f"  [render_mode={mode}] {m['sessions']} session(s), {m['graded']} graded, "
+                f"pass {_pct(m['pass_rate'])}, coverage {_pct(m['coverage_mean'])}"
+            )
     for grp in report["groups"]:
         key = ", ".join(
             f"{k}={(str(v)[:12] if k == 'prompt' and v else v)}" for k, v in grp["key"].items()

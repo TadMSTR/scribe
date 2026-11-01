@@ -38,11 +38,13 @@ from .extract.redact import Redactor
 from .manifest import append, record_for_turn
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest, id_conflation_edits
 from .state import STATUS_FAILED, SessionRow, Store
+from .summarize import headless
 from .summarize.prompt import prompt_sha256
 from .summarize.providers import Provider, build
 from .summarize.runner import Outcome, summarize_log
 from .telemetry import SPAN_EXTRACT, SPAN_SUMMARIZE, record_spend, set_span_attributes, span
 from .writeback import (
+    PROVISIONAL_PENDING,
     PROVISIONAL_PLACEHOLDER,
     PROVISIONAL_SUPPRESSED,
     append_block,
@@ -183,6 +185,20 @@ class SessionResult:
     #: Never handed to the provider: an earlier session in this sweep was deferred, and the
     #: sweep stopped calling a provider it had just found down. Untouched, like `deferred`.
     not_attempted: bool = False
+    #: Who wrote the block: `llm`, `verbatim` (a headless session's own closing statement),
+    #: `verbatim-fallback-llm` or `pending` -- see `summarize.headless`. Recorded because the
+    #: QC trend must be read per mode: a headless share that grows would otherwise move the
+    #: pass rate and look like a regression, or hide one.
+    render_mode: str = headless.MODE_LLM
+    #: The closing statement's length, where and why: `closing_source` is `final-turn` or
+    #: `previous-turn`; `closing_reason` says why the verbatim path was not taken.
+    closing_chars: int = 0
+    closing_source: str = ""
+    closing_reason: str = ""
+    #: A rollup-only `provisional:pending` block was written: the headless session is still
+    #: waiting on background work. A fourth term in `written == summarized + suppressed +
+    #: placeholder + pending`, with its own total (invariant 13).
+    pending: bool = False
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -228,6 +244,11 @@ class SessionResult:
             "ticket_refs_rewritten": self.ticket_refs_rewritten,
             "deferred": self.deferred,
             "not_attempted": self.not_attempted,
+            "render_mode": self.render_mode,
+            "closing_chars": self.closing_chars,
+            "closing_source": self.closing_source,
+            "closing_reason": self.closing_reason,
+            "pending": self.pending,
             "errors": self.errors,
         }
 
@@ -677,13 +698,34 @@ def process_session(
     except (OSError, ValueError) as exc:  # ValueError: an unencodable string (audit F-03)
         result.errors.append(f"eventlog: {exc}")
 
+    # Headless sessions (vikunja#1347): the agent's own closing statement and a rollup, with no
+    # provider call -- or a fallback to the digest below, which is recorded as such.
+    choice: headless.Choice | None = None
+    if cfg.headless.enabled and cfg.headless.matches(log.entrypoint, result.agent):
+        choice = headless.choose(log, cfg.headless.min_closing_chars, heading=f"{when:%H:%M}")
+        result.render_mode = choice.mode
+        result.closing_chars = choice.closing_chars
+        result.closing_source = choice.closing.source if choice.closing else ""
+        result.closing_reason = choice.reason
+
     # What the post-grading rewrite changed, for the corrections ledger. Empty when it is off
     # or changed nothing, which is what keeps a ledger line off every uncorrected block.
     edits: list[dict] = []
     with span(
         SPAN_SUMMARIZE, session_id=log.session_id, agent=result.agent, events=st.tool_events
     ) as sp:
-        outcome: Outcome = summarize_log(log, provider, heading=f"{when:%H:%M}")
+        if choice is not None and choice.markdown:
+            outcome = Outcome(
+                markdown=choice.markdown,
+                ok=choice.mode == headless.MODE_VERBATIM,
+                pending=choice.mode == headless.MODE_PENDING,
+                reason=choice.reason,
+            )
+            result.truncated_fields = dict(choice.truncated)
+            result.truncated_items = sum(result.truncated_fields.values())
+        else:
+            outcome = summarize_log(log, provider, heading=f"{when:%H:%M}")
+        set_span_attributes(sp, render_mode=result.render_mode)
         if outcome.digest is not None:
             result.truncated_fields = dict(outcome.digest.truncated)
             result.truncated_items = sum(result.truncated_fields.values())
@@ -713,7 +755,8 @@ def process_session(
         # suppression note, but `render_failure`'s marked placeholder. The session's summary is
         # gone. Recorded here so the run totals can say so out loud -- inferring it from
         # `written - summarized` is how 13 lost sessions would have read as a clean backfill.
-        result.placeholder = not outcome.ok and not outcome.suppressed
+        result.placeholder = not outcome.ok and not outcome.suppressed and not outcome.pending
+        result.pending = outcome.pending
         result.errors.extend(outcome.errors)
         if outcome.input_tokens or outcome.output_tokens:
             record_spend(
@@ -819,6 +862,8 @@ def process_session(
     # before it existed, `append_block` refused the replacement and the digest was discarded.
     if outcome.ok:
         provisional = ""
+    elif outcome.pending:
+        provisional = PROVISIONAL_PENDING
     elif outcome.suppressed:
         provisional = PROVISIONAL_SUPPRESSED
     else:
@@ -862,7 +907,14 @@ def process_session(
             _run_record(result, row, log, outcome, provider, qc, digest=_relative(cfg, path)),
         )
 
-    if outcome.ok:
+    if outcome.ok or outcome.pending:
+        # A pending block is marked summarized, not provisional, deliberately. Provisional
+        # spends `MAX_PROVISIONAL_ATTEMPTS` and is re-offered every sweep, and a session that
+        # is waiting on a two-hour CI run would burn the budget re-rendering the same rollup.
+        # It needs no retry: when the background work reports back the transcript grows, the
+        # unread bytes re-offer it, and its new block replaces this one (`append_block`'s
+        # supersede path). A session killed while waiting keeps the rollup-only block, which
+        # is the honest record of a run that never finished.
         store.mark_summarized(
             row.transcript_path,
             offset=st.raw_file_bytes,
@@ -912,6 +964,7 @@ def _run_record(
     the transcript's last write before it aged out, which is still the true lag.
     """
     lag = round(datetime.now(UTC).timestamp() - row.mtime_ns / 1e9, 1) if row.mtime_ns else None
+    llm = result.render_mode in headless.LLM_MODES
     return {
         "record_version": runrecord.RECORD_VERSION,
         "ts": runrecord._now(),
@@ -919,8 +972,10 @@ def _run_record(
         "graded_by": __version__,
         "scribe_version": __version__,
         "prompt_sha256": prompt_sha256(),
-        "provider": outcome.provider or provider.name,
-        "model_requested": getattr(provider, "model", "") or None,
+        # No provider for a block no model wrote. "mistral" on a verbatim record would claim a
+        # call that never happened.
+        "provider": (outcome.provider or provider.name) if llm else None,
+        "model_requested": (getattr(provider, "model", "") or None) if llm else None,
         # What the response said, or null. Never back-filled from the request: see
         # `Completion.model_resolved`.
         "model_resolved": outcome.model_resolved or None,
@@ -965,6 +1020,11 @@ def _run_record(
         "errors": len(result.errors),
         **qc,
         "ticket_refs_rewritten": result.ticket_refs_rewritten,
+        "render_mode": result.render_mode,
+        "closing_chars": result.closing_chars,
+        "closing_source": result.closing_source,
+        "closing_reason": result.closing_reason,
+        "pending": result.pending,
         "lag_s": lag,
     }
 
@@ -1075,7 +1135,11 @@ def _provider_answered(result: SessionResult) -> bool:
 
     A session with nothing to summarize, or one whose extraction failed, never called the
     provider, so it says nothing about whether the provider is up and cannot clear a suspect.
+    Nor does a headless block: `verbatim` is `summarized` with no call made, and letting it
+    clear a suspect would re-run a deferred session onto the provisional path during an outage.
     """
+    if result.render_mode not in headless.LLM_MODES:
+        return False
     return result.summarized or result.suppressed or result.placeholder
 
 
@@ -1103,6 +1167,11 @@ def summarize_run(results: list[SessionResult]) -> dict:
         #: Non-zero means summaries were LOST, not merely degraded. Treat it as loud.
         "placeholders": sum(1 for r in results if r.placeholder),
         "discarded": sum(1 for r in results if r.discarded),
+        #: Headless sessions (vikunja#1347), by what they got. `verbatim` sessions are also in
+        #: `summarized`; `pending` is the fourth term of the written identity.
+        "verbatim": sum(1 for r in results if r.render_mode == headless.MODE_VERBATIM),
+        "verbatim_fallback": sum(1 for r in results if r.render_mode == headless.MODE_FALLBACK),
+        "pending": sum(1 for r in results if r.pending),
         #: Sessions with at least one truncated field, and the total items dropped across the
         #: sweep. Both, because they answer different questions: the first is how often the
         #: declared cap fails to hold, the second is by how much.

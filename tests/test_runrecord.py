@@ -89,6 +89,12 @@ LIVE_FIELDS = {
     "claims",
     "ticket_refs_rewritten",
     "lag_s",
+    # 0.18.0, vikunja#1347
+    "render_mode",
+    "closing_chars",
+    "closing_source",
+    "closing_reason",
+    "pending",
 }
 
 
@@ -152,6 +158,7 @@ def test_a_live_run_writes_exactly_one_record_per_session_with_every_field(env) 
     assert rec["written"] is True and rec["placeholder"] is False
     assert rec["digest"] == str(next(output_root(cfg).rglob("*.md")).relative_to(output_root(cfg)))
     assert isinstance(rec["lag_s"], float)
+    assert rec["render_mode"] == "llm" and rec["closing_chars"] == 0
 
 
 def test_the_record_file_is_owner_only(env) -> None:

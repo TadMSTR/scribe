@@ -113,6 +113,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         if totals["suppressed"]:
             print(f"  {totals['suppressed']} suppressed (contamination fallback)")
+        # Quiet: none of these is a loss. Printed because the cron reads this branch, and a
+        # fallback count that climbs is the first sign the closing-statement rule is wrong.
+        if totals["verbatim"] or totals["verbatim_fallback"] or totals["pending"]:
+            print(
+                f"  headless: {totals['verbatim']} closing statement(s) written verbatim, "
+                f"{totals['verbatim_fallback']} fell back to the digest, "
+                f"{totals['pending']} pending (still waiting on background work)"
+            )
         # Quiet: a correction, not a loss. Printed because the cron reads this branch and the
         # count is the evidence the rewrite runs at all (invariant 13).
         if totals["ticket_refs_rewritten"]:

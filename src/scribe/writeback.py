@@ -58,6 +58,9 @@ ANCHOR_RE = re.compile(
 PROVISIONAL_PLACEHOLDER = "placeholder"
 #: A block whose body is the contamination guard's suppression note — `render_suppressed`.
 PROVISIONAL_SUPPRESSED = "suppressed"
+#: A headless session's rollup-only block while background work it started is outstanding
+#: (vikunja#1347). Replaced by the block the session gets once it finishes.
+PROVISIONAL_PENDING = "pending"
 #: Written after the body. Its presence is what proves the block was written whole --
 #: see `existing_turns`.
 TERMINATOR_RE = re.compile(r"(?m)^<!--[ \t]*/scribe[ \t]+turn:(\S+)[ \t]*-->[ \t]*$")

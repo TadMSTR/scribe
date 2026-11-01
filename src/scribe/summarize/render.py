@@ -121,6 +121,19 @@ def render_digest(
     return "\n".join(lines) + "\n"
 
 
+#: The lines around a headless block's closing statement (vikunja#1347). Everything between
+#: them is the agent's own words, quoted, so `qc.strip_scribe_markers` removes the whole REGION
+#: before grading: a quotation is not a claim scribe made, and grading it would charge the
+#: model's error rate with text no model wrote. The same span is protected from the
+#: id-conflation rewrite, which must not edit a quotation either. Constants, like the markers
+#: above, so a reworded line cannot silently stop being recognised.
+VERBATIM_START = "<!-- scribe:verbatim -->"
+VERBATIM_END = "<!-- /scribe:verbatim -->"
+VERBATIM_RE = re.compile(
+    rf"(?ms)^{re.escape(VERBATIM_START)}[ \t]*$.*?^{re.escape(VERBATIM_END)}[ \t]*$"
+)
+
+
 #: The line that identifies a placeholder block on disk.
 #:
 #: A constant because `scribe recover` has to find these blocks in a corpus written before
