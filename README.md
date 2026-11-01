@@ -535,8 +535,10 @@ while a session waits on a two-hour CI run, and its final turn is left unprocess
 notification's arrival re-renders it even when it lands in the same turn. A session killed
 while waiting keeps the rollup-only block.
 
-The contamination guard and the post-render redaction run over the quotation exactly as over
-a model's digest, because it reaches the same index and the same SessionStart injection.
+The contamination guard and the post-render redaction run over the quotation as over a
+model's digest, because it reaches the same index and the same SessionStart injection. The
+quotation is redacted before it is quoted: a `> ` prefix would hide a `key: value` line from
+the line-anchored rules. Its hits count in `post_render_redactions` with the rest.
 Measured over 222 writer and security sessions: 219 rendered verbatim, 2 fell back on a guard
 fire (both sessions *about* the `n/N` notation), 1 on a short final text, and none came near
 the 8,000-character cap on assistant text.

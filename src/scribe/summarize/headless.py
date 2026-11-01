@@ -36,9 +36,11 @@ Three ways out of the verbatim path, each recorded in the run record as `render_
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from ..extract.models import EventLog, Turn
+from ..extract.redact import Redactor
 from .contamination import explain_contamination
 from .render import VERBATIM_END, VERBATIM_RE, VERBATIM_START, _bullet, _truncation_note
 from .schema import MAX_ROLLUP_ITEMS, caps_for
@@ -272,7 +274,21 @@ def _render_rollup(log: EventLog) -> tuple[list[str], dict[str, int]]:
     return lines, truncated
 
 
-def render_verbatim(log: EventLog, closing: Closing, *, heading: str = "") -> Choice:
+def render_verbatim(
+    log: EventLog,
+    closing: Closing,
+    *,
+    heading: str = "",
+    scrub: Callable[[str], str] | None = None,
+) -> Choice:
+    """The verbatim block: the closing statement as a blockquote, then the rollup.
+
+    The quotation is scrubbed with current rules BEFORE it is quoted. The `> ` prefix blinds
+    the line-anchored rules (`keyval`), so a re-scrub of the rendered block cannot do this
+    pass; it matters for `scribe recover` re-rendering an event log extracted under older
+    rules (audit R2-01). `pipeline` passes its post-render guard as `scrub`, so a hit here is
+    counted and classified with the rest; without one a fresh `Redactor` scrubs.
+    """
     # SECURITY[accepted]: retention widening -- the digest corpus (kept, indexed, injected at
     # SessionStart) holds the agent's full closing statement rather than a model excerpt, for
     # the configured headless agents only. Audit: 2026-11-01/scribe-headless-digest-2026-11
@@ -284,7 +300,8 @@ def render_verbatim(log: EventLog, closing: Closing, *, heading: str = "") -> Ch
     if heading:
         lines += [f"### {heading}", ""]
     lines += [CLOSING_HEADING, "", CLOSING_LABEL, ""]
-    lines += [VERBATIM_START, blockquote(closing.text), VERBATIM_END]
+    text = (scrub or Redactor().scrub)(closing.text)
+    lines += [VERBATIM_START, blockquote(text), VERBATIM_END]
     rollup, truncated = _render_rollup(log)
     if rollup:
         lines += ["", ROLLUP_HEADING]
@@ -315,6 +332,10 @@ def render_pending(log: EventLog, *, heading: str = "") -> Choice:
         lines += [f"### {heading}", ""]
     lines.append(PENDING_LABEL)
     rollup, truncated = _render_rollup(log)
+    # The same label as the verbatim rollup: the preview drops the italic PENDING_LABEL and
+    # keeps these bullets, which are agent-written (audit R2-02).
+    if rollup:
+        lines += ["", ROLLUP_HEADING]
     lines += rollup
     waiting = ", ".join(f"`{t}`" for t in outstanding(log))
     return Choice(
@@ -325,18 +346,25 @@ def render_pending(log: EventLog, *, heading: str = "") -> Choice:
     )
 
 
-def choose(log: EventLog, min_chars: int, *, heading: str = "") -> Choice:
+def choose(
+    log: EventLog,
+    min_chars: int,
+    *,
+    heading: str = "",
+    scrub: Callable[[str], str] | None = None,
+) -> Choice:
     """The headless rendering for `log`, or a `MODE_FALLBACK` choice with no markdown.
 
     The contamination guard runs over the closing statement before it is accepted, exactly
     as it runs over a model's digest: the quotation reaches the same index and the same daily
     file, though as a blockquote the SessionStart preview drops it (audit F-01). On a fire
     the session falls back to the LLM digest, whose own guard and retry handle it. The
-    post-render redaction in `pipeline` runs over either.
+    quotation is redacted by `scrub` before it is quoted (see `render_verbatim`); the
+    post-render redaction in `pipeline` runs over the rest of the block.
     """
     if outstanding(log):
         pending = render_pending(log, heading=heading)
-        rest = pending.markdown.replace(PENDING_LABEL, "")
+        rest = pending.markdown.replace(PENDING_LABEL, "").replace(ROLLUP_HEADING, "")
         if explain_contamination(rest, log.grounding_text()) is not None:
             return Choice(mode=MODE_FALLBACK, reason="contamination (pending rollup)")
         return pending
@@ -349,7 +377,7 @@ def choose(log: EventLog, min_chars: int, *, heading: str = "") -> Choice:
         return Choice(
             mode=MODE_FALLBACK, closing=closing, reason=f"contamination: {detection.signal}"
         )
-    choice = render_verbatim(log, closing, heading=heading)
+    choice = render_verbatim(log, closing, heading=heading, scrub=scrub)
     # The rollup too: subagent descriptions and commit targets are agent-written and reach the
     # same injection (security baseline IV-24). Run over the block minus the quotation, which
     # was checked above. 0 of 220 measured rollups fired.

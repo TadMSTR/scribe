@@ -491,6 +491,32 @@ def test_pending_work_gives_a_rollup_only_block(tmp_path) -> None:
     assert "bfakewait1" in choice.reason
 
 
+def test_a_pending_blocks_rollup_is_labelled_in_the_preview(tmp_path) -> None:
+    """Audit R2-02: the preview drops the italic pending label and keeps the rollup bullets,
+    which are agent-written, so they need the same subhead the verbatim rollup has."""
+    md = headless.choose(_log(tmp_path, pending=True), 800, heading="10:00").markdown
+    shown = preview(f"## Session 10:00\n\n{md}")
+    assert headless.ROLLUP_HEADING in shown
+    before, after = shown.split(headless.ROLLUP_HEADING, 1)
+    assert not any(line.startswith("- ") for line in before.split("\n"))
+    assert any(line.startswith("- ") for line in after.split("\n"))
+
+
+def test_a_quoted_key_value_secret_is_redacted(tmp_path) -> None:
+    """Audit R2-01: `> password: v` is not matched by the line-anchored `keyval` rule, so the
+    quotation is scrubbed before it is quoted. The closing text is built by hand: one from a
+    current extract is already scrubbed, and the case is an event log from older rules."""
+    from scribe.extract.redact import Redactor
+
+    log = _log(tmp_path)
+    closing = headless.Closing(CLOSING + "\npassword: hunter2-Correct-Horse\n", 0, "final-turn")
+    assert "hunter2" not in headless.render_verbatim(log, closing).markdown
+    guard = Redactor(capture=True)
+    md = headless.render_verbatim(log, closing, scrub=guard.scrub).markdown
+    assert "hunter2" not in md
+    assert guard.count == 1
+
+
 def test_the_contamination_guard_runs_over_the_statement(tmp_path) -> None:
     """Handled as an LLM digest is: the guard reads it, and a fire falls back to the digest."""
     text = CLOSING + "\n## Phase 1\n\n- <specific step>\n"
@@ -639,6 +665,49 @@ def _run(cfg, store, provider):
 def _digest(cfg) -> str:
     (md,) = output_root(cfg).rglob("*.md")
     return md.read_text()
+
+
+def test_a_quoted_secret_counts_as_a_post_render_redaction(env, monkeypatch) -> None:
+    """Audit R2-01: the quotation's scrub is the pipeline's guard, so a hit is counted and
+    classified with the rest -- and never reaches the daily file."""
+    secret = "\npassword: hunter2-Correct-Horse\n"
+    real = headless.closing_statement
+
+    def with_secret(log, min_chars):
+        closing, why = real(log, min_chars)
+        return headless.Closing(closing.text + secret, closing.turn_index, closing.source), why
+
+    monkeypatch.setattr(headless, "closing_statement", with_secret)
+    cfg, store = env(_session(), entrypoints=("sdk-cli",))
+    r = _run(cfg, store, Counting())
+    assert r.render_mode == headless.MODE_VERBATIM
+    assert r.post_render_redactions == 1
+    assert "hunter2" not in _digest(cfg)
+
+
+def test_a_fallback_does_not_count_the_unwritten_quotations_scrub(env, monkeypatch) -> None:
+    """The quotation is scrubbed while the block is rendered, and a rollup guard fire can
+    still drop that block for the LLM digest: what it caught was never written."""
+    from types import SimpleNamespace
+
+    secret = "\npassword: hunter2-Correct-Horse\n"
+    real = headless.closing_statement
+    calls = []
+
+    def with_secret(log, min_chars):
+        closing, why = real(log, min_chars)
+        return headless.Closing(closing.text + secret, closing.turn_index, closing.source), why
+
+    def fires_on_rollup(text, corpus):
+        calls.append(text)
+        return SimpleNamespace(signal="test") if len(calls) == 2 else None
+
+    monkeypatch.setattr(headless, "closing_statement", with_secret)
+    monkeypatch.setattr(headless, "explain_contamination", fires_on_rollup)
+    cfg, store = env(_session(), entrypoints=("sdk-cli",))
+    r = _run(cfg, store, Counting())
+    assert r.render_mode == headless.MODE_FALLBACK
+    assert r.post_render_redactions == 0
 
 
 def test_a_headless_session_never_calls_the_provider(env) -> None:

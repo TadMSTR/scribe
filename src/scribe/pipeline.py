@@ -723,12 +723,23 @@ def process_session(
     # Headless sessions (vikunja#1347): the agent's own closing statement and a rollup, with no
     # provider call -- or a fallback to the digest below, which is recorded as such.
     choice: headless.Choice | None = None
+    # The post-render guard (see below), made here because the verbatim quotation is scrubbed
+    # through it before it is quoted: the `> ` prefix blinds the line-anchored rules to a
+    # re-scrub of the rendered block (audit R2-01). Its hits count with the rest.
+    guard = Redactor(capture=True)
     if cfg.headless.enabled and cfg.headless.matches(log.entrypoint, result.agent):
-        choice = headless.choose(log, cfg.headless.min_closing_chars, heading=f"{when:%H:%M}")
+        choice = headless.choose(
+            log, cfg.headless.min_closing_chars, heading=f"{when:%H:%M}", scrub=guard.scrub
+        )
         result.render_mode = choice.mode
         result.closing_chars = choice.closing_chars
         result.closing_source = choice.closing.source if choice.closing else ""
         result.closing_reason = choice.reason
+        if not choice.markdown:
+            # A fallback after the quotation was rendered (a rollup guard fire): that block is
+            # never written, so nothing its scrub caught is a post-render redaction.
+            guard.captured.clear()
+            guard = Redactor(capture=True)
 
     # What the post-grading rewrite changed, for the corrections ledger. Empty when it is off
     # or changed nothing, which is what keeps a ledger line off every uncorrected block.
@@ -797,6 +808,7 @@ def process_session(
             # hours of outage would retire every pending session until a manual `recover`.
             # Leaving the row alone is what makes the next sweep re-offer it for free.
             set_span_attributes(sp, deferred=True)
+            guard.captured.clear()
             result.deferred = True
             result.placeholder = False
             result.errors.append(
@@ -825,7 +837,6 @@ def process_session(
         # So ask the log rather than asserting. `capture=True` is used ONLY here and the captured
         # plaintext never leaves this block — in particular it is never put in `result.errors`,
         # which is an unredacted sink that reaches the JSON report and the CLI.
-        guard = Redactor(capture=True)
         markdown = guard.scrub(outcome.markdown)
         if guard.count:
             result.post_render_redactions = guard.count
