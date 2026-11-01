@@ -16,7 +16,11 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
-SCHEMA_VERSION = 1
+#: 2 (scribe 0.18.0) added `entrypoint`, `subagents`, `compactions`, `background_pending`,
+#: `Turn.queued_input` and `Stats.queued_commands`. A version-1 log has none of them, and
+#: `eventlog.log_from_dict` reads the three list fields back as None -- "not recorded" --
+#: never as an empty list, which would claim the session had no subagents.
+SCHEMA_VERSION = 2
 
 #: Coarse buckets for what a tool call *did*, so a prompt can group by activity without
 #: carrying a hardcoded list of tool names that goes stale every time one is added.
@@ -109,6 +113,12 @@ class Turn:
     events: list[ToolEvent] = field(default_factory=list)
     rollup: Rollup = field(default_factory=Rollup)
     thinking_blocks: int = 0
+    #: Input the harness delivered while this turn was running: a `queued_command` attachment,
+    #: which is how a background task's `<task-notification>` arrives when the session is
+    #: mid-turn. Not `user_text`: nobody typed it, and it did not start this turn. Before 0.18.0
+    #: the parser dropped these records, and 2 of 4 subagent results in one session never
+    #: reached the event log.
+    queued_input: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         out: dict = {
@@ -117,6 +127,7 @@ class Turn:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "user_text": self.user_text,
+            "queued_input": self.queued_input,
             "assistant_text": self.assistant_text,
             "events": [e.to_dict() for e in self.events],
             "rollup": self.rollup.to_dict(),
@@ -149,6 +160,9 @@ class Stats:
     #: a transcript that HAS a compact boundary means the guard did not fire, which is
     #: not distinguishable from "no boundary present" unless the count is reported.
     skipped_compact: int = 0
+    #: `queued_command` attachments read into `Turn.queued_input`. Every other attachment type
+    #: is still dropped; this count is what makes the one kept type measurable.
+    queued_commands: int = 0
     orphan_results: int = 0
     failures: int = 0
     #: Sum of characters across the four content categories the old hook triaged, so the
@@ -188,6 +202,46 @@ class Stats:
 
 
 @dataclass
+class Subagent:
+    """One Agent (or legacy Task) tool call: which subagent ran, and where its transcript is.
+
+    `agent_id` comes from the tool result's structured `toolUseResult.agentId`, falling back
+    to the `agentId: ...` line in the result text. `status` is the tool result's own status for
+    a foreground call (`completed`), and for a background one the `<status>` of its
+    task-notification, or `running` when none arrived. The subagent's transcript is never read
+    here: `log_path` is where Claude Code keeps it, and `log_exists` whether it was there when
+    this log was extracted.
+    """
+
+    turn_index: int
+    seq: int
+    subagent_type: str = ""
+    description: str = ""
+    background: bool = False
+    agent_id: str = ""
+    status: str = ""
+    log_path: str = ""
+    log_exists: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class Compaction:
+    """One `compact_boundary` record: when the session compacted, and from what to what."""
+
+    ts: str = ""
+    turn_index: int = 0
+    trigger: str = ""
+    pre_tokens: int = 0
+    post_tokens: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class EventLog:
     """The complete extraction of one transcript. This is the contract."""
 
@@ -198,11 +252,21 @@ class EventLog:
     cwd: str = ""
     git_branch: str = ""
     version: str = ""
+    #: `entrypoint` from the transcript's records: `sdk-cli` for `claude -p`, `sdk-ts` for an
+    #: SDK host, `cli` for the terminal. What the headless rendering mode keys on.
+    entrypoint: str = ""
     started_at: str = ""
     ended_at: str = ""
     turns: list[Turn] = field(default_factory=list)
     rollup: Rollup = field(default_factory=Rollup)
     stats: Stats = field(default_factory=Stats)
+    #: None means NOT RECORDED (a version-1 log), and that is a different fact from `[]`.
+    subagents: list[Subagent] | None = field(default_factory=list)
+    compactions: list[Compaction] | None = field(default_factory=list)
+    #: Background tasks (a background Agent call or a `run_in_background` Bash) launched in the
+    #: final turn with no task-notification yet: the session is waiting on work it started, so
+    #: its last message is not a closing statement. None means not recorded.
+    background_pending: list[str] | None = field(default_factory=list)
 
     def grounding_text(self) -> str:
         """Every string a digest is allowed to draw a concrete fact from, as one blob.
@@ -237,9 +301,18 @@ class EventLog:
             "cwd": self.cwd,
             "git_branch": self.git_branch,
             "version": self.version,
+            "entrypoint": self.entrypoint,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "turns": [t.to_dict() for t in self.turns],
             "rollup": self.rollup.to_dict(),
+            "subagents": _maybe([s.to_dict() for s in self.subagents or []], self.subagents),
+            "compactions": _maybe([c.to_dict() for c in self.compactions or []], self.compactions),
+            "background_pending": self.background_pending,
             "stats": self.stats.to_dict(),
         }
+
+
+def _maybe(rendered: list, source: list | None) -> list | None:
+    """`rendered`, or None when the source field was not recorded at all."""
+    return None if source is None else rendered

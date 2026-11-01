@@ -261,7 +261,12 @@ def test_schema_version_is_declared(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["transcript-with-bearer", "transcript-structural", "transcript-compact-boundary"],
+    [
+        "transcript-with-bearer",
+        "transcript-structural",
+        "transcript-compact-boundary",
+        "transcript-subagents",
+    ],
 )
 def test_output_round_trips_through_json(name: str) -> None:
     log = extract(FIXTURES / f"{name}.jsonl")
