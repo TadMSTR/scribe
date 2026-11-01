@@ -834,8 +834,10 @@ def process_session(
         # which an input-side cause cannot produce. Separately, all three persisted logs scrubbed
         # field-by-field fired 0 times across 1,797 string leaves.
         #
-        # So ask the log rather than asserting. `capture=True` is used ONLY here and the captured
-        # plaintext never leaves this block — in particular it is never put in `result.errors`,
+        # So ask the log rather than asserting. `capture=True` is used ONLY by this guard, which
+        # also scrubbed a headless block's quotation and rollup items before they were prefixed
+        # (made above, before `headless.choose`), and the captured plaintext never leaves this
+        # function — in particular it is never put in `result.errors`,
         # which is an unredacted sink that reaches the JSON report and the CLI.
         markdown = guard.scrub(outcome.markdown)
         if guard.count:

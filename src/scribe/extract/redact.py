@@ -192,9 +192,11 @@ class Redactor:
     **`capture` is off by default and extraction must never turn it on.** A capturing
     redactor holds the plaintext of everything it matched, which is the one thing this class
     exists to get rid of. It exists for exactly one caller: the post-render detector in
-    `pipeline.py`, which needs the matched value in memory just long enough to ask "was this
-    in the event log?" and then discards it. The values are never written anywhere — not to
-    the error list, not to the JSON report, not to a span attribute. See vikunja#856.
+    `pipeline.py` (which also scrubs a headless block's quotation and rollup items through
+    `headless.choose` before they are prefixed), which needs the matched value in memory just
+    long enough to ask "was this in the event log?" and then discards it. The values are never
+    written anywhere — not to the error list, not to the JSON report, not to a span attribute.
+    See vikunja#856.
     """
 
     def __init__(self, *, capture: bool = False) -> None:

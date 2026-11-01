@@ -79,9 +79,11 @@ Fixes from the pre-release audit (scribe-headless-digest-2026-11):
   always labelled `(from command output, unverified)`, and several are listed as ambiguous;
   git's detached-HEAD line is recognised. Only a `git_commit` result is reported bare.
 - A lone `-` setext underline in the quotation is escaped.
-- The quotation is redacted before it is quoted, through the post-render guard, so its hits
-  count in `post_render_redactions`: the `> ` prefix hid a `key: value` line from the
-  line-anchored rules, which mattered for `scribe recover` over an older event log.
+- The quotation and the rollup items (with a commit's target and a subagent's description
+  scrubbed before the item is composed) are redacted before they are prefixed, through the
+  post-render guard, so their hits count in `post_render_redactions`. The `> ` and `- `
+  prefixes hid a `key: value` line from the line-anchored rules, as did a line break other
+  than `\n`, which mattered for `scribe recover` over an older event log.
 - A `pending` block's rollup carries the same agent-written-data subhead as the verbatim one;
   the preview drops the pending label and kept its bullets bare.
 - `scribe session` reports a digest root that is not a directory as an error (exit `3`)

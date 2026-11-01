@@ -537,8 +537,9 @@ while waiting keeps the rollup-only block.
 
 The contamination guard and the post-render redaction run over the quotation as over a
 model's digest, because it reaches the same index and the same SessionStart injection. The
-quotation is redacted before it is quoted: a `> ` prefix would hide a `key: value` line from
-the line-anchored rules. Its hits count in `post_render_redactions` with the rest.
+quotation and the rollup items are redacted before they are prefixed, with their line breaks
+normalized first: a `> ` or `- ` prefix, or a break other than `\n`, would hide a `key: value`
+line from the line-anchored rules. Their hits count in `post_render_redactions` with the rest.
 Measured over 222 writer and security sessions: 219 rendered verbatim, 2 fell back on a guard
 fire (both sessions *about* the `n/N` notation), 1 on a short final text, and none came near
 the 8,000-character cap on assistant text.

@@ -175,7 +175,7 @@ def blockquote(text: str) -> str:
     return "\n".join(f"> {escape_structure(line)}" if line else ">" for line in text.splitlines())
 
 
-def _commits(log: EventLog) -> list[str]:
+def _commits(log: EventLog, scrub: Callable[[str], str]) -> list[str]:
     """Commit shas the session made, with the repo where the call names one.
 
     From a `git_commit` MCP call's result (`"sha": ...`) or a `git commit` Bash command's
@@ -187,7 +187,7 @@ def _commits(log: EventLog) -> list[str]:
             if ev.tool.endswith("git_commit"):
                 m = _GIT_COMMIT_MCP_SHA_RE.search(ev.result_digest)
                 if m:
-                    out.append(f"`{m.group(1)}` {ev.target}".rstrip())
+                    out.append(f"`{m.group(1)}` {scrub(ev.target)}".rstrip())
             elif ev.tool == "Bash" and _GIT_COMMIT_CMD_RE.search(ev.target):
                 # Free command output has no structure that says which `[branch sha]` line is
                 # git's: text the same command prints before or after git's line looks the
@@ -231,20 +231,28 @@ def _tasks(log: EventLog) -> list[str]:
     return [f"`{t}` {s}".rstrip() for t, s in last.items()]
 
 
-def _agents(log: EventLog) -> list[str]:
+def _agents(log: EventLog, scrub: Callable[[str], str]) -> list[str]:
     if log.subagents is None:
         # A version-1 log: no structured record, so the Agent call descriptions it does have.
-        return list(log.rollup.agents)
+        return [scrub(a) for a in log.rollup.agents]
     out = []
     for sub in log.subagents:
         detail = ", ".join(x for x in ("background" if sub.background else "", sub.status) if x)
         name = sub.subagent_type or "agent"
-        out.append(f"{name}: {sub.description}" + (f" ({detail})" if detail else ""))
+        out.append(f"{name}: {scrub(sub.description)}" + (f" ({detail})" if detail else ""))
     return out
 
 
-def rollup_sections(log: EventLog) -> list[tuple[str, list[str], int]]:
-    """`(label, items, cap)` per section, in render order. Built from the event log alone."""
+def rollup_sections(
+    log: EventLog, scrub: Callable[[str], str] | None = None
+) -> list[tuple[str, list[str], int]]:
+    """`(label, items, cap)` per section, in render order. Built from the event log alone.
+
+    `scrub` runs over the agent-written fields a composed item puts after a prefix (a commit's
+    target, a subagent's description): there no line-anchored rule can reach them once the
+    item is built (round-3 baseline IV-81). Whole items are scrubbed by `_render_rollup`.
+    """
+    scrub = scrub or (lambda text: text)
     # SECURITY[deferred]: Artifacts lists only the parent transcript's writes; files a subagent
     # wrote are missing. Ticket vikunja#1354. Audit: 2026-11-01/scribe-headless-digest-2026-11
     # (F-12).
@@ -253,21 +261,43 @@ def rollup_sections(log: EventLog) -> list[tuple[str, list[str], int]]:
         ("Artifacts", list(log.rollup.files_written), caps["artifacts"]),
         ("Tickets", list(log.rollup.tickets), caps["tickets"]),
         ("PRs", list(log.rollup.prs), caps["tickets"]),
-        ("Commits", _commits(log), MAX_ROLLUP_ITEMS),
+        ("Commits", _commits(log, scrub), MAX_ROLLUP_ITEMS),
         ("Tasks", _tasks(log), MAX_ROLLUP_ITEMS),
-        ("Agents", _agents(log), MAX_ROLLUP_ITEMS),
+        ("Agents", _agents(log, scrub), MAX_ROLLUP_ITEMS),
     ]
 
 
-def _render_rollup(log: EventLog) -> tuple[list[str], dict[str, int]]:
+def _scrubbed(scrub: Callable[[str], str], text: str) -> str:
+    """`text` with its line breaks made `\\n`, then scrubbed.
+
+    `blockquote` and the reader split on every `str.splitlines` separator, but the
+    line-anchored rules' `(?m)^` starts a line only after `\\n`: `done.\\rpassword: v` passed
+    the scrub and came out as its own `> password: v` line (round-3 baseline SC-46). With the
+    breaks normalized first, the scrub sees the same lines the quotation will have.
+    """
+    return scrub("\n".join(text.splitlines()))
+
+
+def _render_rollup(log: EventLog, scrub: Callable[[str], str]) -> tuple[list[str], dict[str, int]]:
+    """The rollup's lines, each item scrubbed BEFORE it is bulleted.
+
+    Same reason as the quotation (`render_verbatim`): the `- ` prefix blinds the line-anchored
+    rules to the post-render re-scrub, and the items -- subagent descriptions, commit targets,
+    paths -- come from an event log that may predate the current rules (round-3 baseline
+    IV-81, of audit R2-01).
+    """
     lines: list[str] = []
     truncated: dict[str, int] = {}
-    for label, items, cap in rollup_sections(log):
+
+    def clean(text: str) -> str:
+        return _scrubbed(scrub, text)
+
+    for label, items, cap in rollup_sections(log, clean):
         if not items:
             continue
         lines.append("")
         lines.append(f"**{label}:**")
-        lines.extend(_bullet(item) for item in items[:cap])
+        lines.extend(_bullet(clean(item)) for item in items[:cap])
         if len(items) > cap:
             truncated[label.lower()] = len(items) - cap
             lines.append(_truncation_note(len(items) - cap, cap))
@@ -283,11 +313,12 @@ def render_verbatim(
 ) -> Choice:
     """The verbatim block: the closing statement as a blockquote, then the rollup.
 
-    The quotation is scrubbed with current rules BEFORE it is quoted. The `> ` prefix blinds
-    the line-anchored rules (`keyval`), so a re-scrub of the rendered block cannot do this
-    pass; it matters for `scribe recover` re-rendering an event log extracted under older
-    rules (audit R2-01). `pipeline` passes its post-render guard as `scrub`, so a hit here is
-    counted and classified with the rest; without one a fresh `Redactor` scrubs.
+    The quotation and every rollup item are scrubbed with current rules BEFORE they are
+    prefixed. The `> ` and `- ` prefixes blind the line-anchored rules (`keyval`), so a
+    re-scrub of the rendered block cannot do this pass; it matters for `scribe recover`
+    re-rendering an event log extracted under older rules (audit R2-01, round-3 baseline
+    IV-81). `pipeline` passes its post-render guard as `scrub`, so a hit here is counted and
+    classified with the rest; without one a fresh `Redactor` scrubs.
     """
     # SECURITY[accepted]: retention widening -- the digest corpus (kept, indexed, injected at
     # SessionStart) holds the agent's full closing statement rather than a model excerpt, for
@@ -300,9 +331,9 @@ def render_verbatim(
     if heading:
         lines += [f"### {heading}", ""]
     lines += [CLOSING_HEADING, "", CLOSING_LABEL, ""]
-    text = (scrub or Redactor().scrub)(closing.text)
-    lines += [VERBATIM_START, blockquote(text), VERBATIM_END]
-    rollup, truncated = _render_rollup(log)
+    scrub = scrub or Redactor().scrub
+    lines += [VERBATIM_START, blockquote(_scrubbed(scrub, closing.text)), VERBATIM_END]
+    rollup, truncated = _render_rollup(log, scrub)
     if rollup:
         lines += ["", ROLLUP_HEADING]
     lines += rollup
@@ -326,12 +357,14 @@ def outstanding(log: EventLog) -> list[str]:
     return waiting
 
 
-def render_pending(log: EventLog, *, heading: str = "") -> Choice:
+def render_pending(
+    log: EventLog, *, heading: str = "", scrub: Callable[[str], str] | None = None
+) -> Choice:
     lines: list[str] = []
     if heading:
         lines += [f"### {heading}", ""]
     lines.append(PENDING_LABEL)
-    rollup, truncated = _render_rollup(log)
+    rollup, truncated = _render_rollup(log, scrub or Redactor().scrub)
     # The same label as the verbatim rollup: the preview drops the italic PENDING_LABEL and
     # keeps these bullets, which are agent-written (audit R2-02).
     if rollup:
@@ -359,11 +392,11 @@ def choose(
     as it runs over a model's digest: the quotation reaches the same index and the same daily
     file, though as a blockquote the SessionStart preview drops it (audit F-01). On a fire
     the session falls back to the LLM digest, whose own guard and retry handle it. The
-    quotation is redacted by `scrub` before it is quoted (see `render_verbatim`); the
-    post-render redaction in `pipeline` runs over the rest of the block.
+    quotation and the rollup items are redacted by `scrub` before they are prefixed (see
+    `render_verbatim`); the post-render redaction in `pipeline` runs over the whole block.
     """
     if outstanding(log):
-        pending = render_pending(log, heading=heading)
+        pending = render_pending(log, heading=heading, scrub=scrub)
         rest = pending.markdown.replace(PENDING_LABEL, "").replace(ROLLUP_HEADING, "")
         if explain_contamination(rest, log.grounding_text()) is not None:
             return Choice(mode=MODE_FALLBACK, reason="contamination (pending rollup)")
