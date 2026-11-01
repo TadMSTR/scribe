@@ -10,8 +10,9 @@ paths and tickets -- which the event log's rollup already has, with no model inv
 
 So the block is two parts:
 
-  * **The closing statement**, quoted verbatim between `VERBATIM_START` and `VERBATIM_END`,
-    under a line saying it is the agent's statement and not scribe's summary. Taken from the
+  * **The closing statement**, quoted verbatim as a blockquote between `VERBATIM_START` and
+    `VERBATIM_END`, under a subhead and a line saying it is the agent's statement and not
+    scribe's summary. The blockquote keeps it out of the SessionStart preview (audit F-01). Taken from the
     event log, not the transcript, so `scribe recover` can rebuild the block after the
     transcript has aged out.
   * **A rollup** generated from the event log: the same `Artifacts` and `Tickets` sections and
@@ -60,6 +61,12 @@ CLOSING_LABEL = (
     "_Closing statement: the agent's own final message, quoted verbatim. It is not a scribe "
     "summary._"
 )
+#: Subheads the SessionStart preview keeps (`journal.preview` keeps `###`/`####` and `- `
+#: lines only). The quotation itself is a blockquote, so the preview drops it: without these,
+#: the preview showed the statement's own `- ` lines unlabelled, beside scribe's rollup
+#: bullets, as standing context for the agent's next sessions (audit F-01, 2026-11-01).
+CLOSING_HEADING = "#### Closing statement (the agent's own words, quoted verbatim)"
+ROLLUP_HEADING = "#### Rollup (scribe, from the event log)"
 PENDING_LABEL = (
     "_Session still running: work it started has not reported back, so there is no closing "
     "statement yet. This block is replaced when the session finishes._"
@@ -135,6 +142,15 @@ def closing_statement(log: EventLog, min_chars: int) -> tuple[Closing | None, st
 def escape_structure(text: str) -> str:
     """`text` with every heading and HTML-comment line escaped. See `_STRUCTURAL_RE`."""
     return _STRUCTURAL_RE.sub(lambda m: f"{m.group(1)}\\{m.group(2)}", text)
+
+
+def blockquote(text: str) -> str:
+    """`text` as a markdown blockquote, one `> ` per line, after `escape_structure`.
+
+    No quoted line starts with `-` or `#`, so nothing in the quotation is a bullet or a
+    heading to the journal preview, qmd's section split or the anchor regexes.
+    """
+    return "\n".join(f"> {line}" if line else ">" for line in escape_structure(text).split("\n"))
 
 
 def _commits(log: EventLog) -> list[str]:
@@ -220,8 +236,11 @@ def render_verbatim(log: EventLog, closing: Closing, *, heading: str = "") -> Ch
     lines: list[str] = []
     if heading:
         lines += [f"### {heading}", ""]
-    lines += [CLOSING_LABEL, "", VERBATIM_START, escape_structure(closing.text), VERBATIM_END]
+    lines += [CLOSING_HEADING, "", CLOSING_LABEL, ""]
+    lines += [VERBATIM_START, blockquote(closing.text), VERBATIM_END]
     rollup, truncated = _render_rollup(log)
+    if rollup:
+        lines += ["", ROLLUP_HEADING]
     lines += rollup
     return Choice(
         mode=MODE_VERBATIM,
@@ -286,7 +305,12 @@ def choose(log: EventLog, min_chars: int, *, heading: str = "") -> Choice:
     # The rollup too: subagent descriptions and commit targets are agent-written and reach the
     # same injection (security baseline IV-24). Run over the block minus the quotation, which
     # was checked above. 0 of 220 measured rollups fired.
-    rest = VERBATIM_RE.sub("", choice.markdown).replace(CLOSING_LABEL, "")
+    rest = (
+        VERBATIM_RE.sub("", choice.markdown)
+        .replace(CLOSING_LABEL, "")
+        .replace(CLOSING_HEADING, "")
+        .replace(ROLLUP_HEADING, "")
+    )
     detection = explain_contamination(rest, corpus)
     if detection is not None:
         return Choice(
