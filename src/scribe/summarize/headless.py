@@ -188,12 +188,14 @@ def _commits(log: EventLog) -> list[str]:
                     out.append(f"`{m.group(1)}` {ev.target}".rstrip())
             elif ev.tool == "Bash" and _GIT_COMMIT_CMD_RE.search(ev.target):
                 # Free command output has no structure that says which `[branch sha]` line is
-                # git's: text the same command prints before OR after git's line looks the
-                # same (audit F-06, round-2 baseline IV-73). So every distinct candidate is
-                # kept, and more than one is reported as ambiguous rather than picked.
+                # git's: text the same command prints before or after git's line looks the
+                # same, and with `-q` or a failed commit a printed decoy is the only line
+                # (audit F-06, round-2 baseline IV-73, three times). So a sha from command
+                # output is always labelled as such, and several are reported as ambiguous;
+                # only a `git_commit` result above is reported as the commit.
                 shas = list(dict.fromkeys(_GIT_COMMIT_BASH_SHA_RE.findall(ev.result_digest)))
                 if len(shas) == 1:
-                    out.append(f"`{shas[0]}`")
+                    out.append(f"`{shas[0]}` (from command output, unverified)")
                 elif shas:
                     out.append(" / ".join(f"`{s}`" for s in shas) + " (ambiguous: command output)")
     return list(dict.fromkeys(out))

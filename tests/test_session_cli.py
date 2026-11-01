@@ -424,7 +424,38 @@ def test_a_failure_writing_the_report_keeps_the_exit_contract(swept, tmp_path, m
         raise BrokenPipeError(32, "Broken pipe")
 
     monkeypatch.setattr(session_cli.json, "dump", broken)
+    # In-process, pointing fd 1 at /dev/null would take pytest's own stdout with it. The real
+    # pipe is exercised in a subprocess by test_a_real_broken_pipe_exits_three_not_one_twenty.
+    monkeypatch.setattr(session_cli, "_discard_stdout", lambda: None)
     assert main([SID, "--config", str(_toml(cfg, tmp_path))]) == session_cli.EXIT_FAILED
+
+
+def test_a_real_broken_pipe_exits_three_not_one_twenty(swept, tmp_path) -> None:
+    """Round-2 baseline OV-27: after a failed write the buffered bytes made the interpreter's
+    shutdown flush fail too, and the process exited 120 instead of the 3 it returned."""
+    import subprocess
+    import sys
+
+    from scribe.session_cli import EXIT_FAILED
+
+    cfg, _ = swept
+    read_end, write_end = os.pipe()
+    os.close(read_end)  # nobody will read: the first write gets EPIPE
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / "src"))
+    try:
+        # S603: our own interpreter and module; no element of the argv is external.
+        proc = subprocess.run(  # noqa: S603
+            [sys.executable, "-m", "scribe", "session", SID, "--config", str(_toml(cfg, tmp_path))],
+            stdout=write_end,
+            stderr=subprocess.PIPE,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+    finally:
+        os.close(write_end)
+    assert proc.returncode == EXIT_FAILED, proc.stderr
+    assert b"could not write the report" in proc.stderr
 
 
 def test_containment_is_one_level_not_any_depth(tmp_path) -> None:

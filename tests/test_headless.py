@@ -251,7 +251,10 @@ def test_commits_and_tasks_come_from_results_and_arguments(tmp_path) -> None:
         ),
     ]
     sections = {label: items for label, items, _cap in headless.rollup_sections(log)}
-    assert sections["Commits"] == ["`d098b5a00fb8` /repo/kb", "`9f8e7d6`"]
+    assert sections["Commits"] == [
+        "`d098b5a00fb8` /repo/kb",
+        "`9f8e7d6` (from command output, unverified)",
+    ]
     assert sections["Tasks"] == ["`b38974f3-a35e-4488-85dd-28a87476a786` completed"]
 
 
@@ -303,6 +306,28 @@ def test_a_decoy_after_gits_own_line_is_ambiguous_too(tmp_path) -> None:
         "Commits"
     ]
     assert "`1a2b3c4` / `deadbeef` (ambiguous: command output)" in commits
+
+
+def test_a_lone_sha_from_command_output_is_never_reported_as_verified(tmp_path) -> None:
+    """Round-2 baseline IV-73: with `git commit -q` (no summary line) an echoed decoy was the
+    only candidate and was reported as the commit."""
+    log = _log(tmp_path)
+    from scribe.extract.models import ToolEvent
+
+    log.turns[-1].events.append(
+        ToolEvent(
+            seq=101,
+            tool="Bash",
+            kind="bash",
+            target="git commit -q -m y && echo '[x deadbeef] z'",
+            result_digest="[x deadbeef] z",
+        )
+    )
+    commits = dict((label, items) for label, items, _cap in headless.rollup_sections(log))[
+        "Commits"
+    ]
+    assert "`deadbeef` (from command output, unverified)" in commits
+    assert "`deadbeef`" not in commits
 
 
 def test_a_decoy_beside_a_detached_head_commit_is_ambiguous(tmp_path) -> None:

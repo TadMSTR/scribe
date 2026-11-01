@@ -406,6 +406,30 @@ def _brief(doc: dict) -> list[str]:
     return lines
 
 
+def _say(message: str) -> None:
+    """A line on stderr that cannot itself change the exit code.
+
+    An unguarded `print(..., file=sys.stderr)` that raised (a closed or broken stderr) exited
+    1, the "no trace" code, from inside the very paths that report a failure (round-2 baseline
+    OV-27).
+    """
+    with contextlib.suppress(Exception):
+        print(message, file=sys.stderr)
+
+
+def _discard_stdout() -> None:
+    """Point stdout at /dev/null after a failed write.
+
+    Otherwise the unwritten bytes stay buffered, the interpreter's shutdown flush fails on the
+    same broken pipe, and the process exits 120 instead of the 3 it returned -- the documented
+    handling for SIGPIPE in Python (round-2 baseline OV-27).
+    """
+    with contextlib.suppress(Exception):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="scribe session",
@@ -420,20 +444,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if not SAFE_STEM_RE.match(args.session_id):
         # Used in a filename and a LIKE pattern below, so only a bare id is accepted.
-        print(f"scribe: not a session id: {args.session_id!r}", file=sys.stderr)
+        _say(f"scribe: not a session id: {args.session_id!r}")
         return EXIT_USAGE
     try:
         cfg = load(args.config)
     except (ConfigError, OSError, ValueError) as exc:
         # OSError/ValueError: an unreadable config or a bad value `load` does not convert.
         # Either would otherwise exit 1, the "no trace" code (security baseline OV-27).
-        print(f"scribe: {exc}", file=sys.stderr)
+        _say(f"scribe: {exc}")
         return EXIT_USAGE
 
     try:
         doc = lookup(cfg, args.session_id)
     except Exception as exc:  # the contract must hold whatever goes wrong inside the join
-        print(f"scribe: session lookup failed ({type(exc).__name__})", file=sys.stderr)
+        _say(f"scribe: session lookup failed ({type(exc).__name__})")
         return EXIT_FAILED
     try:
         # Inside a guard too: a crash here (a state row missing a column, a broken pipe, an
@@ -445,14 +469,15 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write("\n")
         sys.stdout.flush()
     except Exception as exc:
-        print(f"scribe: could not write the report ({type(exc).__name__})", file=sys.stderr)
+        _discard_stdout()
+        _say(f"scribe: could not write the report ({type(exc).__name__})")
         return EXIT_FAILED
     if doc["errors"]:
         # A partial answer is not a complete one, found or not (security baseline OV-01).
-        print(f"scribe: could not look everywhere: {'; '.join(doc['errors'])}", file=sys.stderr)
+        _say(f"scribe: could not look everywhere: {'; '.join(doc['errors'])}")
         return EXIT_FAILED
     if not doc["found"]:
-        print(f"scribe: no trace of session {args.session_id!r}", file=sys.stderr)
+        _say(f"scribe: no trace of session {args.session_id!r}")
         return EXIT_UNKNOWN
     return EXIT_FOUND
 
