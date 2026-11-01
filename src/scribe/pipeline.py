@@ -347,6 +347,21 @@ _CAUSE_DETAIL: dict[str, str] = {
 }
 
 
+def _cause_detail(cause: str, render_mode: str) -> str:
+    """`_CAUSE_DETAIL[cause]`, said right for a block no model wrote.
+
+    A headless block's quotation and rollup come from the event log and no model is called,
+    so its hits classify as an extraction miss but "the model was shown it" is untrue (round-3
+    baseline OV-24).
+    """
+    if cause == CAUSE_EXTRACTION and render_mode not in headless.LLM_MODES:
+        return (
+            "at least one matched value IS present in this session's event log, so extraction "
+            "missed it (a headless block: no model was called) — investigate redact.py"
+        )
+    return _CAUSE_DETAIL[cause]
+
+
 def _is_evidence(value: str) -> bool:
     """Whether a captured value is specific enough for its presence in the log to mean anything."""
     return len(value) >= _MIN_EVIDENCE_LEN and any(c.isalnum() for c in value)
@@ -850,7 +865,7 @@ def process_session(
             guard.captured.clear()
             result.errors.append(
                 f"post-render redaction fired {guard.count}x — a secret was caught at write "
-                f"time; {_CAUSE_DETAIL[result.post_render_cause]}"
+                f"time; {_cause_detail(result.post_render_cause, result.render_mode)}"
             )
 
         # The QC gate runs on whatever was produced, including a placeholder: a run report that

@@ -734,7 +734,8 @@ it. A failed write is counted (`run_record_errors`) and never fails the sweep.
 
 Since 0.15.0 the line also has `post_render_cause`, which says why the write-time redaction
 guard fired. It is a label only, never the value: `""` (it did not fire), `extraction-miss`
-(the value is in the event log, so the model was shown it), `model-output` (it is not),
+(the value is in the event log: extraction missed it, and on the LLM path the model
+was shown it), `model-output` (it is not),
 `undetermined` (no event log to check), or `inconclusive` (every match was too short or generic
 to tell). The digest is redacted in every case. `qc-report` breaks post-render redactions down
 by cause. Records from before 0.15.0 count as `unrecorded`. The line is flagged with `!!`

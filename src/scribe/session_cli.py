@@ -17,7 +17,9 @@ Two rules hold for every field, and `tests/test_session_cli.py` holds them:
      `-shm` shared-memory index, read-only or not. It holds no database content.
   2. **No content beyond the redacted event log.** Paths, ids, counts, statuses and lengths
      are fine. Text appears only where the event log already holds it, redacted at extraction:
-     the closing statement and the subagent descriptions. A run record's `claims` and
+     the closing statement and the subagent descriptions. Both are scrubbed again with current
+     rules, line breaks normalized first, as the digest's are: the log may predate a rule
+     (round-3 baseline OV-19). A run record's `claims` and
      `contamination_excerpt` are digest and model text, so `runs` carries a fixed list of
      fields that excludes them. The state row's `last_error` goes through `Redactor` first.
 
@@ -238,7 +240,9 @@ def _eventlog(cfg: Config, session_id: str, errors: list[str]) -> tuple[dict | N
         "ended_at": log.ended_at or None,
         "stats": log.stats.to_dict(),
         "subagents": (
-            [s.to_dict() for s in log.subagents] if log.subagents is not None else not_recorded
+            [{**s.to_dict(), "description": _rescrub(s.description)} for s in log.subagents]
+            if log.subagents is not None
+            else not_recorded
         ),
         "compactions": (
             [c.to_dict() for c in log.compactions] if log.compactions is not None else not_recorded
@@ -247,6 +251,16 @@ def _eventlog(cfg: Config, session_id: str, errors: list[str]) -> tuple[dict | N
             log.background_pending if log.background_pending is not None else not_recorded
         ),
     }, log
+
+
+def _rescrub(text: str) -> str:
+    """Event-log text scrubbed with current rules, its line breaks made `\\n` first.
+
+    The same pass the headless digest gets (`headless._scrubbed`): a log extracted under older
+    rules, or with a break other than `\\n` before a `key: value` line, can hold what the
+    current rules catch (round-3 baseline OV-19, SC-46).
+    """
+    return Redactor().scrub("\n".join(text.splitlines()))
 
 
 def _blocks(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
@@ -339,7 +353,7 @@ def lookup(cfg: Config, session_id: str) -> dict:
         found, why = closing_statement(log, cfg.headless.min_closing_chars)
         if found is not None:
             closing = {
-                "text": found.text,
+                "text": _rescrub(found.text),
                 "chars": len(found.text),
                 "source": found.source,
                 "turn_index": found.turn_index,

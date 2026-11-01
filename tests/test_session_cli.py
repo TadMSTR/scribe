@@ -394,6 +394,34 @@ def test_an_unlistable_digest_dir_is_an_error_not_no_blocks(swept, monkeypatch) 
     assert doc["blocks"]  # the readable directories are still searched
 
 
+def test_closing_text_and_descriptions_are_rescrubbed(swept, monkeypatch) -> None:
+    """Round-3 baseline OV-19: the event log may predate a rule, so the text this command
+    prints gets the same current-rules pass the digest does, breaks normalized first."""
+    from scribe import session_cli
+    from scribe.summarize.headless import Closing
+
+    cfg, _ = swept
+    secret = "pass" + "word: FAKEhunter2-Correct-Horse"
+    real_load, real_closing = session_cli.load_eventlog, session_cli.closing_statement
+
+    def load_with_secret(*a, **k):
+        log = real_load(*a, **k)
+        log.subagents[0].description = f"done.\r{secret}"
+        return log
+
+    def closing_with_secret(log, min_chars):
+        closing, why = real_closing(log, min_chars)
+        text = closing.text + f"\ndone.\r{secret}"
+        return Closing(text, closing.turn_index, closing.source), why
+
+    monkeypatch.setattr(session_cli, "load_eventlog", load_with_secret)
+    monkeypatch.setattr(session_cli, "closing_statement", closing_with_secret)
+    doc = lookup(cfg, SID)
+    assert "FAKEhunter2" not in json.dumps(doc)
+    assert doc["closing_statement"]["text"]
+    assert doc["eventlog"]["subagents"][0]["description"].startswith("done.\n")
+
+
 def test_a_digest_root_that_is_a_file_is_an_error(swept, tmp_path) -> None:
     """Audit R2-04: a misconfigured `output_dir` read as "no blocks", so exit 1, not 3."""
     import dataclasses
