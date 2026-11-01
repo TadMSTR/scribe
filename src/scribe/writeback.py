@@ -338,6 +338,10 @@ def _supersede(
     atomic_replace(path, updated.rstrip("\n") + "\n")
 
 
+#: Provisional kinds that hold no account of the session, only of a failure to write one.
+_STAND_INS = frozenset({PROVISIONAL_PLACEHOLDER, PROVISIONAL_SUPPRESSED})
+
+
 def write_block(
     path: Path,
     *,
@@ -359,10 +363,17 @@ def write_block(
     Leaving the earlier block beside it put two versions of the same work in the index --
     developer session 808a51cf said 136 tests in one and 198 in the other (vikunja#1347).
 
-    So the new block replaces the session's earlier blocks, final or provisional, instead of
-    being appended after them. A final block for THIS turn still refuses the write: nothing
-    has changed since it was written, and the rule that a final digest is never overwritten by
-    a block for the same turn stands.
+    So the new block replaces the session's earlier blocks instead of being appended after
+    them. A final block for THIS turn still refuses the write: nothing has changed since it was
+    written, and the rule that a final digest is never overwritten by a block for the same turn
+    stands.
+
+    **A stand-in never replaces a real digest.** A `placeholder` or `suppressed` block says the
+    summary failed, not what the session did, so when the session already has a final block it
+    is appended beside it, as before 0.18.0, and the real digest stays until a final (or
+    `pending`) block replaces both. Without this, a provider failure on a second sweep put a
+    placeholder where the digest was (audit F-02, 2026-11-01). A `pending` block does supersede:
+    it is a rollup of the whole session, rendered because the session is running again.
     """
     secure_dir(path.parent)
     if turn_uuid in existing_turns(path):
@@ -370,6 +381,8 @@ def write_block(
     if supersede:
         text = _read(path)
         blocks = session_blocks(text, session_id)
+        if provisional in _STAND_INS and any(not a.group(4) for a, _c in blocks):
+            blocks = []
         if blocks:
             new_block = _block(
                 body=body,
@@ -411,8 +424,9 @@ def append_block(
 
     A turn already on disk as a **provisional** block is replaced rather than skipped — that
     is the write-side half of making a lost digest recoverable. Note the ordering: the final
-    check comes first, so a real digest is never overwritten by anything, including by a later
-    placeholder for the same turn.
+    check comes first, so a real digest is never overwritten by a block for the same turn,
+    including a later placeholder. (`write_block`'s supersede path replaces a session's earlier
+    blocks with a later turn's, but never a final block with a stand-in.)
     """
     # Digests are derived from 0600 transcripts and must not be published wider than
     # their source. See paths.py.

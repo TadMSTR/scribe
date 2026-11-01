@@ -21,9 +21,11 @@ from scribe.pipeline import output_root, run_once
 from scribe.recover_cli import EXIT_OK
 from scribe.recover_cli import main as recover_main
 from scribe.state import Store
-from scribe.summarize.providers import Completion, Provider
+from scribe.summarize.providers import Completion, Provider, ProviderError
 from scribe.writeback import (
+    PROVISIONAL_PENDING,
     PROVISIONAL_PLACEHOLDER,
+    PROVISIONAL_SUPPRESSED,
     append_block,
     daily_path,
     paired_blocks,
@@ -113,6 +115,36 @@ def test_a_final_block_for_the_same_turn_is_still_never_overwritten(tmp_path) ->
     w = _write(md, turn="t6", body="- other\n")
     assert not w.written
     assert _blocks(md) == [("S", "t6", "- final")]
+
+
+@pytest.mark.parametrize("kind", [PROVISIONAL_PLACEHOLDER, PROVISIONAL_SUPPRESSED])
+def test_a_stand_in_never_replaces_a_real_digest(tmp_path, kind) -> None:
+    """Audit F-02: a provider failure on a second sweep put a placeholder where the digest was."""
+    md = tmp_path / "research" / "2026-10-31.md"
+    _write(md, turn="t6", body="- the real digest\n")
+    w = _write(md, turn="t14", body="- placeholder\n", provisional=kind)
+    assert w.written and w.superseded == []
+    assert _blocks(md) == [("S", "t6", "- the real digest"), ("S", "t14", "- placeholder")]
+    # The next real render replaces both.
+    w = _write(md, turn="t15", body="- the newer digest\n")
+    assert w.superseded == ["t6", "t14"]
+    assert _blocks(md) == [("S", "t15", "- the newer digest")]
+
+
+def test_a_stand_in_still_replaces_earlier_stand_ins(tmp_path) -> None:
+    md = tmp_path / "research" / "2026-10-31.md"
+    _write(md, turn="t6", body="- placeholder 1\n", provisional=PROVISIONAL_PLACEHOLDER)
+    w = _write(md, turn="t14", body="- placeholder 2\n", provisional=PROVISIONAL_PLACEHOLDER)
+    assert w.superseded == ["t6"]
+    assert _blocks(md) == [("S", "t14", "- placeholder 2")]
+
+
+def test_a_pending_block_supersedes_a_real_digest(tmp_path) -> None:
+    """`pending` is a whole-session rollup for a session running again, not a failure."""
+    md = tmp_path / "research" / "2026-10-31.md"
+    _write(md, turn="t6", body="- the real digest\n")
+    w = _write(md, turn="t14", body="- rollup\n", provisional=PROVISIONAL_PENDING)
+    assert w.superseded == ["t6"]
 
 
 def test_without_supersede_the_old_append_behaviour_holds(tmp_path) -> None:
@@ -249,6 +281,33 @@ def test_two_sweeps_leave_one_block_with_the_later_render(sweep_env, tmp_path) -
         f'state_path = "{cfg.state_path}"\n'
     )
     assert recover_main(["--config", str(toml)]) == EXIT_OK
+
+
+class FailsSecond(Sequenced):
+    def complete(self, system, user, *, timeout=120.0) -> Completion:
+        if not self.done:
+            raise ProviderError("provider down")
+        return super().complete(system, user, timeout=timeout)
+
+
+def test_a_provider_failure_on_a_second_sweep_keeps_the_real_digest(sweep_env) -> None:
+    """Audit F-02, end to end: the placeholder sits beside the digest, never in its place."""
+    cfg, store, target = sweep_env
+    lines = (FIXTURES / "transcript-subagents.jsonl").read_text().splitlines(keepends=True)
+    cut = next(i for i, x in enumerate(lines) if '"uuid": "u6"' in x)
+    provider = FailsSecond("Ran 136 tests")
+
+    _put(target, lines[:cut], 1_000_000.0)
+    run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: provider)
+    _put(target, lines, 1_010_000.0)
+    (second,) = run_once(cfg, store, now=1_010_000.0, provider_factory=lambda: provider)
+
+    assert second.superseded_blocks == 0
+    (md,) = output_root(cfg).rglob("*.md")
+    text = md.read_text()
+    assert "136 tests" in text
+    kinds = [a.group(4) for a, _c in paired_blocks(text)]
+    assert kinds == [None, PROVISIONAL_PLACEHOLDER]
 
 
 def test_a_block_left_in_the_next_days_file_is_reported(sweep_env) -> None:
