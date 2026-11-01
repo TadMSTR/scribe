@@ -61,16 +61,17 @@ rules are unchanged.
 Fixes from the pre-release audit (scribe-headless-digest-2026-11):
 
 - The quoted closing statement no longer reaches the SessionStart preview: it is a
-  blockquote, which `journal.preview` drops, and the subheads it keeps say whose text is
-  whose. Quoted `- ` lines were injected into the agent's next sessions unlabelled.
+  blockquote, split on every line separator Python recognizes (a lone `\r` included), which
+  `journal.preview` drops, and the subheads it keeps say whose text is whose. Quoted `- ` lines were injected into the agent's next sessions unlabelled.
 - A `placeholder` or `suppressed` block never supersedes a real digest; it is appended beside
   it, and the next final render replaces both.
 - `scribe session` exits `3` for an unreadable event log, an unlistable digest directory and
   a failure while writing the report, all of which used to read as "no trace" or success; a
   subagent log that cannot be statted records `log_exists: null`, not `false`.
 - Rollup and render-mode labels come from structure: a task's status from the call's own
-  `status` argument (new `ToolEvent.task_status`), a Bash commit's sha from git's own (last)
-  `[branch sha]` line, and verbatim classification from the line-anchored marker regex.
+  `status` argument (new `ToolEvent.task_status`), and verbatim classification from the
+  line-anchored marker regex. A Bash `git commit` whose output holds more than one
+  `[branch sha]` line lists every candidate as ambiguous instead of picking one.
 - A lone `-` setext underline in the quotation is escaped.
 
 ### Changed
@@ -83,8 +84,9 @@ Fixes from the pre-release audit (scribe-headless-digest-2026-11):
   `writeback.write_block(..., supersede=True)`: the new block takes the session's first
   block's place (heading kept, anchor moved), the rest are removed in the same atomic
   replace, and each removed block gets an `index.jsonl` tombstone (`provisional:
-  "superseded"`, `superseded_by`) that `manifest.read` drops. A final block for the same
-  turn still refuses the write. A block for the session in the neighbouring day's file is
+  "superseded"`, `superseded_by`) that `manifest.read` drops. A `placeholder` or
+  `suppressed` block never supersedes a final one; it is appended beside it until the next
+  final render replaces both. A final block for the same turn still refuses the write. A block for the session in the neighbouring day's file is
   reported as an error, not superseded.
 - **QC strips the verbatim region** before reading claims (`render.VERBATIM_RE` joins
   `qc._MARKER_RES`), so the id-conflation rewrite cannot edit a quotation either.

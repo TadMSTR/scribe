@@ -66,7 +66,9 @@ CLOSING_LABEL = (
 #: the preview showed the statement's own `- ` lines unlabelled, beside scribe's rollup
 #: bullets, as standing context for the agent's next sessions (audit F-01, 2026-11-01).
 CLOSING_HEADING = "#### Closing statement (the agent's own words, quoted verbatim)"
-ROLLUP_HEADING = "#### Rollup (scribe, from the event log)"
+#: "From the session's event log", not "scribe's": the items are the session's own tool calls,
+#: and a subagent description or commit target is agent-written text (round-2 baseline HA-43).
+ROLLUP_HEADING = "#### Rollup (from the session's event log)"
 PENDING_LABEL = (
     "_Session still running: work it started has not reported back, so there is no closing "
     "statement yet. This block is replaced when the session finishes._"
@@ -146,12 +148,19 @@ def escape_structure(text: str) -> str:
 
 
 def blockquote(text: str) -> str:
-    """`text` as a markdown blockquote, one `> ` per line, after `escape_structure`.
+    """`text` as a markdown blockquote, one `> ` per line, each line `escape_structure`d.
 
     No quoted line starts with `-` or `#`, so nothing in the quotation is a bullet or a
     heading to the journal preview, qmd's section split or the anchor regexes.
+
+    **Split with `str.splitlines`, not on `\\n`.** A reader opens the daily file with universal
+    newlines (`journal`'s `read_text`), so a lone `\\r` -- or any other separator Python treats
+    as a line break -- would start a new, unquoted line on the way back in: `x\\r- do this`
+    became a bare bullet in the SessionStart preview (round-2 baseline HA-43). `splitlines`
+    breaks on every one of them, a superset of what universal newlines does, so each piece is
+    quoted, and escaped, on its own line.
     """
-    return "\n".join(f"> {line}" if line else ">" for line in escape_structure(text).split("\n"))
+    return "\n".join(f"> {escape_structure(line)}" if line else ">" for line in text.splitlines())
 
 
 def _commits(log: EventLog) -> list[str]:
@@ -168,11 +177,15 @@ def _commits(log: EventLog) -> list[str]:
                 if m:
                     out.append(f"`{m.group(1)}` {ev.target}".rstrip())
             elif ev.tool == "Bash" and _GIT_COMMIT_CMD_RE.search(ev.target):
-                # The LAST `[branch sha]` line: git prints its own after anything a hook or an
-                # earlier command in the same call printed (audit F-06).
-                shas = _GIT_COMMIT_BASH_SHA_RE.findall(ev.result_digest)
-                if shas:
-                    out.append(f"`{shas[-1]}`")
+                # Free command output has no structure that says which `[branch sha]` line is
+                # git's: text the same command prints before OR after git's line looks the
+                # same (audit F-06, round-2 baseline IV-73). So every distinct candidate is
+                # kept, and more than one is reported as ambiguous rather than picked.
+                shas = list(dict.fromkeys(_GIT_COMMIT_BASH_SHA_RE.findall(ev.result_digest)))
+                if len(shas) == 1:
+                    out.append(f"`{shas[0]}`")
+                elif shas:
+                    out.append(" / ".join(f"`{s}`" for s in shas) + " (ambiguous: command output)")
     return list(dict.fromkeys(out))
 
 

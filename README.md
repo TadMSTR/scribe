@@ -485,7 +485,10 @@ stayed: 46 of 681 sessions since 2026-10-01 had 2–5 blocks (64 across the whol
 qmd indexed every version.
 Developer session 808a51cf's first block said 136 tests passed, and its second said 198. Now
 the new block takes the first block's place in the daily file (heading kept, anchor moved to
-the new last turn) and the others are removed, in one atomic replace. The run record counts
+the new last turn) and the others are removed, in one atomic replace. The exception is a
+stand-in: when the later sweep fails or the contamination guard suppresses it, its
+`placeholder` or `suppressed` block is appended beside the real digest rather than replacing
+it, and the next real render replaces both. The run record counts
 them in `superseded_blocks`, and `index.jsonl` gets a tombstone for each.
 
 ### Headless sessions: the agent's own closing statement

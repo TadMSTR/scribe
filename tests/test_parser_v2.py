@@ -10,6 +10,7 @@ the reference, not a spec.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -161,14 +162,16 @@ def test_a_subagent_log_that_cannot_be_statted_is_unknown_not_absent(tmp_path, m
     """Audit F-05: an OSError on the stat was persisted as `log_exists: false`."""
     transcript = tmp_path / "sess-subagents.jsonl"
     shutil.copy(SUBAGENTS, transcript)
-    real = Path.is_file
+    # `os.stat`, which the parser calls, rather than `Path.is_file`: on Python 3.14 `is_file`
+    # swallows the error itself, so patching it would test nothing (round-2 baseline SH-15).
+    real = os.stat
 
-    def denied(self):
-        if "subagents" in self.parts:
+    def denied(p, *a, **k):
+        if "subagents" in Path(p).parts:
             raise PermissionError(13, "Permission denied")
-        return real(self)
+        return real(p, *a, **k)
 
-    monkeypatch.setattr(Path, "is_file", denied)
+    monkeypatch.setattr(os, "stat", denied)
     log = extract(transcript)
     assert log.subagents and all(s.log_exists is None for s in log.subagents if s.log_path)
 

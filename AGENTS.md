@@ -110,7 +110,10 @@ session retried, the model produced a digest, and `append_block` refused it as a
 A final block is never overwritten by a block for the same turn; a provisional one always is.
 A block for a LATER turn of the same session supersedes every earlier one, final or not
 (`writeback.write_block(supersede=True)`, 0.18.0): a sweep summarizes the whole session, so
-the newer block covers the older, and leaving both indexed two versions of the same work. Note how this coexists with
+the newer block covers the older, and leaving both indexed two versions of the same work.
+**Except a stand-in:** a `placeholder` or `suppressed` block never supersedes a final one. It
+is appended beside it, and the next final (or `pending`) block replaces both; a stand-in says
+the summary failed, not what the session did (audit F-02). Note how this coexists with
 invariant 8 — `mark_provisional` *does* advance `last_offset`, because leaving it behind is
 what re-offered a failing session on every sweep forever. What says the session is not done is
 the absence of its turns from `processed_turns`, not the offset.

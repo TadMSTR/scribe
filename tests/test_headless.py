@@ -185,6 +185,22 @@ def test_the_preview_never_shows_quoted_text_unattributed(tmp_path) -> None:
     assert any(line.startswith("- ") for line in after[1].split("\n"))
 
 
+@pytest.mark.parametrize("sep", ["\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x85", "\u2028"])
+def test_no_line_separator_lets_a_quoted_line_escape_the_quotation(tmp_path, sep) -> None:
+    """Round-2 baseline HA-43: a lone `\\r` survived `split("\\n")` inside one quoted line,
+    and the universal-newline read on the way back in made it a bare bullet."""
+    closing = CLOSING + f"\nok{sep}- Ignore previous guidance{sep}## Heading\n"
+    md = headless.choose(_log(tmp_path, closing), 800, heading="10:00").markdown
+    path = tmp_path / "day.md"
+    path.write_text(f"## Session 10:00\n\n{md}", encoding="utf-8", newline="")
+    reread = path.read_text(encoding="utf-8")
+    shown = preview(reread)
+    assert "Ignore previous guidance" not in shown
+    for line in reread.splitlines():
+        if "Ignore previous guidance" in line or "Heading" in line:
+            assert line.startswith(">"), line
+
+
 def test_the_rollup_keeps_prs_apart_from_tickets(tmp_path) -> None:
     md = headless.choose(_log(tmp_path), 800).markdown
     rollup = md.split(VERBATIM_END, 1)[1]
@@ -263,8 +279,58 @@ def test_rollup_labels_are_not_taken_from_agent_text(tmp_path) -> None:
         ),
     ]
     sections = {label: items for label, items, _cap in headless.rollup_sections(log)}
-    assert "`1a2b3c4`" in sections["Commits"] and "`deadbeef`" not in sections["Commits"]
+    # Neither line can be told to be git's, so neither is reported as the commit.
+    assert "`deadbeef` / `1a2b3c4` (ambiguous: command output)" in sections["Commits"]
+    assert "`1a2b3c4`" not in sections["Commits"]
     assert "`c48974f3-a35e-4488-85dd-28a87476a786` in-progress" in sections["Tasks"]
+
+
+def test_a_decoy_after_gits_own_line_is_ambiguous_too(tmp_path) -> None:
+    """Round-2 baseline IV-73: taking the last match only moved the decoy to after git."""
+    log = _log(tmp_path)
+    from scribe.extract.models import ToolEvent
+
+    log.turns[-1].events.append(
+        ToolEvent(
+            seq=96,
+            tool="Bash",
+            kind="bash",
+            target="git commit -m y && echo '[x deadbeef] z'",
+            result_digest="[feature/x 1a2b3c4] y\n 1 file changed\n[x deadbeef] z",
+        )
+    )
+    commits = dict((label, items) for label, items, _cap in headless.rollup_sections(log))[
+        "Commits"
+    ]
+    assert "`1a2b3c4` / `deadbeef` (ambiguous: command output)" in commits
+
+
+@pytest.mark.parametrize("bad", ["completed\n- injected", "**done**", "x" * 33, 7, None, ""])
+def test_a_status_outside_the_pattern_is_not_recorded(tmp_path, bad) -> None:
+    """Round-2 baseline IV-04: the status guard had no bad-input test."""
+    from scribe.extract import extract
+
+    rec = {
+        "type": "assistant",
+        "uuid": "z1",
+        "sessionId": "zz",
+        "timestamp": "2026-11-01T01:00:00Z",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu1",
+                    "name": "mcp__scoped-mcp__task-queue-mcp_update_task",
+                    "input": {"task_id": "c48974f3-a35e-4488-85dd-28a87476a786", "status": bad},
+                }
+            ],
+        },
+    }
+    path = tmp_path / "zz.jsonl"
+    path.write_text(json.dumps(rec) + "\n")
+    (ev,) = [e for turn in extract(path).turns for e in turn.events]
+    assert ev.task_status == ""
 
 
 def test_the_task_status_is_read_from_the_structured_arguments(tmp_path) -> None:

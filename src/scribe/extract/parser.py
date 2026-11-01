@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from pathlib import Path
 
 from .models import (
@@ -754,10 +755,15 @@ def _locate_subagent_logs(log: EventLog, transcript: Path) -> None:
             continue
         path = transcript.parent / sid / "subagents" / f"agent-{sub.agent_id}.jsonl"
         sub.log_path = str(path)
+        # An explicit stat, not `Path.is_file()`: from Python 3.14 `is_file` returns False on
+        # ANY OSError, so a permission failure would again be recorded as "absent" (audit F-05,
+        # round-2 baseline SH-15). Only "no such file" is absence; anything else is unknown.
         try:
-            sub.log_exists = path.is_file()
-        except OSError:
-            sub.log_exists = None  # unknown, not absent (audit F-05)
+            sub.log_exists = stat.S_ISREG(os.stat(path).st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            sub.log_exists = False
+        except (OSError, ValueError):
+            sub.log_exists = None
 
 
 def _build_rollups(log: EventLog) -> None:
