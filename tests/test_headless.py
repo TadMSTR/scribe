@@ -401,9 +401,16 @@ def test_a_version_one_log_lists_tasks_without_a_text_derived_status(tmp_path) -
     assert "`c48974f3-a35e-4488-85dd-28a87476a786`" in tasks
 
 
-@pytest.mark.parametrize("bad", ["completed\n- injected", "**done**", "x" * 33, 7, None, ""])
+@pytest.mark.parametrize(
+    "bad",
+    ["completed\n- injected", "completed\n", "completed\r", "**done**", "x" * 33, 7, None, ""],
+)
 def test_a_status_outside_the_pattern_is_not_recorded(tmp_path, bad) -> None:
-    """Round-2 baseline IV-04: the status guard had no bad-input test."""
+    """Round-2 baseline IV-04: the status guard had no bad-input test.
+
+    The bare trailing `\\n` is the case that tells `\\A…\\Z` from `^…$`: Python's `$` matches
+    before a final newline, and the first case fails on its space either way (audit R2-03).
+    """
     from scribe.extract import extract
 
     rec = {
