@@ -575,3 +575,9 @@ def test_a_contaminated_rollup_falls_back_too(tmp_path) -> None:
     choice = headless.choose(log, 800)
     assert choice.mode == headless.MODE_FALLBACK
     assert choice.reason.startswith("contamination (rollup)")
+
+
+def test_a_setext_underline_is_escaped_too() -> None:
+    out = headless.escape_structure("Summary\n=======\nDetails\n---\n- a bullet\n")
+    assert "\\=======" in out and "\\---" in out
+    assert "- a bullet" in out
