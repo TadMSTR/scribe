@@ -218,6 +218,9 @@ def _agents(log: EventLog) -> list[str]:
 
 def rollup_sections(log: EventLog) -> list[tuple[str, list[str], int]]:
     """`(label, items, cap)` per section, in render order. Built from the event log alone."""
+    # SECURITY[deferred]: Artifacts lists only the parent transcript's writes; files a subagent
+    # wrote are missing. Ticket vikunja#1354. Audit: 2026-11-01/scribe-headless-digest-2026-11
+    # (F-12).
     caps = caps_for(log)
     return [
         ("Artifacts", list(log.rollup.files_written), caps["artifacts"]),
@@ -245,6 +248,13 @@ def _render_rollup(log: EventLog) -> tuple[list[str], dict[str, int]]:
 
 
 def render_verbatim(log: EventLog, closing: Closing, *, heading: str = "") -> Choice:
+    # SECURITY[accepted]: retention widening -- the digest corpus (kept, indexed, injected at
+    # SessionStart) holds the agent's full closing statement rather than a model excerpt, for
+    # the configured headless agents only. Audit: 2026-11-01/scribe-headless-digest-2026-11
+    # (F-03a).
+    # SECURITY[deferred]: the quotation has only the Redactor's shape-based scrub; a secret it
+    # misses passes verbatim. A known-value pass belongs to the deployment, not this public
+    # package. Ticket vikunja#1352. Audit: 2026-11-01/scribe-headless-digest-2026-11 (F-04).
     lines: list[str] = []
     if heading:
         lines += [f"### {heading}", ""]

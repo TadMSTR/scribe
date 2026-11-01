@@ -21,8 +21,9 @@ rules are unchanged.
 
 - **Headless mode, `[summarize.headless]`, off by default.** A session whose `entrypoint` is
   listed (and whose agent is in `agents`, when that is set) is written as the final turn's
-  last text, quoted verbatim between `<!-- scribe:verbatim -->` markers under a line saying it
-  is the agent's statement, plus a rollup from the event log: `Artifacts` and `Tickets` with
+  last text, quoted verbatim as a blockquote between `<!-- scribe:verbatim -->` markers, under
+  a `#### Closing statement` subhead and a line saying it is the agent's statement, plus a
+  rollup from the event log under its own `#### Rollup` subhead: `Artifacts` and `Tickets` with
   the LLM digest's caps, then `PRs` (kept apart from tickets), `Commits`, `Tasks` (with the
   last status set) and `Agents`. No provider call. Under `min_closing_chars` (800) it takes
   the previous turn's text, then falls back to the LLM digest; a contamination-guard fire on
@@ -54,6 +55,23 @@ rules are unchanged.
 - **`qc-report` splits by `render_mode`.** The headline and the verdict cover model-written
   blocks only (`llm`, `verbatim-fallback-llm`; records without the key count as `llm`), and
   every mode is reported apart under `render_modes`. `--by render_mode` is accepted.
+
+### Security
+
+Fixes from the pre-release audit (scribe-headless-digest-2026-11):
+
+- The quoted closing statement no longer reaches the SessionStart preview: it is a
+  blockquote, which `journal.preview` drops, and the subheads it keeps say whose text is
+  whose. Quoted `- ` lines were injected into the agent's next sessions unlabelled.
+- A `placeholder` or `suppressed` block never supersedes a real digest; it is appended beside
+  it, and the next final render replaces both.
+- `scribe session` exits `3` for an unreadable event log, an unlistable digest directory and
+  a failure while writing the report, all of which used to read as "no trace" or success; a
+  subagent log that cannot be statted records `log_exists: null`, not `false`.
+- Rollup and render-mode labels come from structure: a task's status from the call's own
+  `status` argument (new `ToolEvent.task_status`), a Bash commit's sha from git's own (last)
+  `[branch sha]` line, and verbatim classification from the line-anchored marker regex.
+- A lone `-` setext underline in the quotation is escaped.
 
 ### Changed
 

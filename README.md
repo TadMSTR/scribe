@@ -504,11 +504,14 @@ agents            = []            # optional allowlist; empty = every agent
 min_closing_chars = 800           # below this, fall back (see below)
 ```
 
-**Off by default.** The block quotes the final turn's last text between
-`<!-- scribe:verbatim -->` and `<!-- /scribe:verbatim -->`, under a line saying it is the
-agent's own statement and not a scribe summary. Markdown headings and HTML-comment lines in
-it are backslash-escaped, so a quoted `## Summary` cannot open a section for the journal
-preview and a quoted anchor cannot be read as a block boundary. Below it, the rollup: the
+**Off by default.** The block quotes the final turn's last text as a markdown blockquote
+between `<!-- scribe:verbatim -->` and `<!-- /scribe:verbatim -->`, under a `#### Closing
+statement` subhead and a line saying it is the agent's own statement and not a scribe summary.
+Being a blockquote, it never reaches the SessionStart journal preview, which keeps only
+headings and `- ` bullets; the subheads tell the preview's reader whose text is whose.
+Markdown headings, setext underlines and HTML-comment lines in it are backslash-escaped, so a
+quoted `## Summary` cannot open a section and a quoted anchor cannot be read as a block
+boundary. Below it, under a `#### Rollup` subhead, the rollup: the
 same `Artifacts` and `Tickets` sections and caps as an LLM digest, then `PRs` (kept apart from
 tickets), `Commits` (from `git_commit` results and `git commit` output), `Tasks` (queue tasks
 with the last status the session set) and `Agents` (subagents with type, background and

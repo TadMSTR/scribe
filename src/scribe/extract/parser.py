@@ -523,6 +523,10 @@ def extract(
                     st.raw_content_chars += len(text)
                     _notified(obj, text)
                     turn = _ensure_turn(str(obj.get("uuid", "")), ts)
+                    # SECURITY[accepted]: retention widening -- the event log, kept indefinitely,
+                    # now holds mid-turn queued text: background subagents' <result> text and
+                    # peer prompts, through the redactor. The build's purpose, approved by the
+                    # operator. Audit: 2026-11-01/scribe-headless-digest-2026-11 (F-03b).
                     turn.queued_input.append(red.digest(text, text_chars))
                 continue
             if rtype == "system" and obj.get("subtype") == "compact_boundary":
