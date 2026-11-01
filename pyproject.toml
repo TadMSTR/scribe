@@ -52,14 +52,14 @@ telemetry = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.45.1,<2",
 ]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.2.0",
     "pytest-cov>=5.0",
     # Pinned exactly, not >=. `ruff format --check` is a CI gate and two patch releases can
     # disagree about whitespace, which turns an unrelated PR red for a reason nobody
     # changed. Taking a bump is a decision, not a default. Keep it on the same version as
     # the other repos in the fleet, so a shared bump moves together; the version is not
     # restated here because a comment naming it goes stale on the first bump.
-    "ruff==0.16.10",
+    "ruff==0.17.3",
 ]
 
 [project.scripts]
