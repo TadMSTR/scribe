@@ -83,6 +83,26 @@ The document is a list of turns. Each turn carries the user's message, the assis
 
 That rollup is what makes a summary checkable. A digest claiming a file was edited can be tested against `files_written` — deterministically, with no second model involved.
 
+Since 0.18.0 (event-log `schema_version` 2) the document also records:
+
+- **`entrypoint`** — `sdk-cli` for `claude -p`, `sdk-ts` for an SDK host, `cli` for the terminal.
+- **`subagents`** — one entry per Agent call: `subagent_type`, `description`, `background`,
+  `agent_id`, `status` (the result's own, or the background task-notification's), and the
+  path of the subagent's transcript with whether it existed at extraction. The subagent's
+  transcript itself is never read.
+- **`compactions`** — one entry per compact boundary: `ts`, `turn_index`, `trigger`,
+  `pre_tokens`, `post_tokens`. The post-compaction recap is still excluded from the text.
+- **`background_pending`** — background tasks launched in the final turn with no
+  task-notification yet.
+- **`queued_input`** on a turn — a `<task-notification>` the harness delivered while the
+  turn was running (a `queued_command` attachment), counted in `stats.queued_commands`.
+  Earlier versions dropped these, so a background subagent's result that arrived mid-turn
+  never reached the event log.
+
+A version-1 log reads back with `subagents`, `compactions` and `background_pending` as
+`null` — **not recorded** — never as an empty list, which would claim there were none. A log
+with a newer `schema_version` than the build understands is refused.
+
 Without `--json` you get a readable rendering of the same thing.
 
 ## Install
@@ -172,7 +192,8 @@ python -m scribe journal             # SessionStart hook payload for this agent
 python -m scribe recover             # report sessions whose digest was never written
 python -m scribe recover --apply     # reopen them, so the next run redoes them
 python -m scribe index --rebuild     # regenerate index.jsonl from the digests on disk
-python -m scribe index --check       # exits non-zero if index.jsonl has drifted
+python -m scribe index --check       # exits non-zero on drift, or on a session with >1 block
+python -m scribe session SESSION_ID --brief   # everything scribe holds about one session
 ```
 
 **`run` defaults to a dry run.** It discovers finished sessions, extracts them and reports —
@@ -273,6 +294,38 @@ written `0600` inside a `0700` directory, like everything else derived from a tr
 Retention is settled: **keep everything.** The measured corpus is 429 sessions in ~39 MB,
 growing at roughly 0.46 GB/year. There is no pruning and none is planned.
 
+### Looking up one session: `scribe session`
+
+```bash
+python -m scribe session 61ec60fe-1be6-4dcf-8ba6-39236367d397 --brief
+python -m scribe session 61ec60fe-1be6-4dcf-8ba6-39236367d397 --json | jq '.eventlog.subagents'
+```
+
+One read-only JSON object with everything scribe holds about a session, so nobody has to
+join the transcript, the state DB, the event log, the digests and the run records by hand.
+**The shape is a contract**, versioned in its `schema` field (`scribe.session/1`):
+
+| field | what |
+|---|---|
+| `session_id`, `agent`, `entrypoint`, `started_at`, `ended_at` | identity |
+| `found` | whether scribe has any trace of the session |
+| `transcript` | `path`, `exists`, `size_bytes`, `last_write`, `expires` (from `[discovery] transcript_retention_days`, else `"unknown"`) |
+| `state` | the state-DB row: `status`, `attempts`, `last_error` (redacted), offsets |
+| `eventlog` | `path`, `schema_version`, `stats`, `subagents`, `compactions`, `background_pending` (`"not recorded"` on a version-1 log) |
+| `blocks` | every digest block: `file`, `turn_uuid`, `provisional`, `render_mode`, `chars`, `current` |
+| `runs` | the session's run records, a fixed set of fields |
+| `closing_statement` | the text the headless path would quote, its `chars`, `source` and `turn_index`; or `null` with `closing_statement_reason` |
+
+Two rules hold for every field. **It writes nothing:** the state DB is opened read-only, and
+nothing calls a provider. (SQLite itself updates the WAL `-shm` index on any read; it holds no
+database content.) **It prints no content beyond the redacted event log:** paths, ids,
+counts and statuses are fine; text appears only where the event log already holds it. Run
+records pass through a fixed field list, so a record's ungrounded `claims` and its
+`contamination_excerpt` never appear. Exit codes: `0` found, `1` no trace, `2` usage or
+config, `3` the lookup failed or a source could not be read (named in `errors`). A missing
+transcript is not an error; it is what a session older than the retention
+period looks like.
+
 ### Using a different indexer
 
 scribe does not depend on any indexer. It writes plain markdown and leaves indexing to
@@ -328,7 +381,16 @@ The manifest is **derived state**. Every field except `written_at` can be recomp
 digests themselves. `scribe index --rebuild` regenerates it from the files, which is how
 digests written before the manifest existed get added to it. `scribe index --check` does the
 same rebuild in memory and exits `1` on any missing, stale, changed or malformed line, so a
-manifest that has drifted from the digests gets caught. Run `--rebuild` when no sweep
+manifest that has drifted from the digests gets caught. It also enforces **one block per
+session**: a session with more than one final block anywhere in the corpus is named with its
+blocks. That is not drift, `--rebuild` cannot fix it, and it exits `4` (drift, `1`, takes
+precedence when both are present).
+
+**A superseded block gets a tombstone line.** From 0.18.0 a block for a session that already
+has blocks in the file replaces them, except a stand-in beside a real digest (see [When a digest is not written](#when-a-digest-is-not-written)),
+and each removed `(path, turn_uuid)` gets a line with `provisional: "superseded"`, `sha256: ""`
+and an extra `superseded_by` naming the turn that replaced it. A consumer filtering on
+`provisional == ""` skips it without knowing about it; one that tracks records drops the key. Run `--rebuild` when no sweep
 is in progress. A line appended during the rebuild can be lost, and `--check` will then
 report it as missing.
 
@@ -400,19 +462,90 @@ line, which names the directory it looked in.
 
 ### When a digest is not written
 
-Not every run produces a digest. Two outcomes write a block that is *not* a summary, and both
-are marked as such in the block's own anchor:
+Not every run produces a digest. Three outcomes write a block that is *not* a summary, and
+each is marked as such in the block's own anchor:
 
 | body | anchor | meaning |
 |---|---|---|
-| a digest | no `provisional:` attribute | final; never overwritten |
+| a digest | no `provisional:` attribute | final; never overwritten by a block for the same turn, and replaced only by a later block for the same session (below) |
 | `render_failure` placeholder | `provisional:placeholder` | the model call or the schema failed (an outage writes nothing instead; see [When the provider is down](#when-the-provider-is-down)) |
 | suppression note | `provisional:suppressed` | the contamination guard fired |
 
+| headless rollup only | `provisional:pending` | a headless session was still waiting on work it started (see below) |
+
 A provisional block is **replaced in place** by the first real digest that arrives for the
-same turn, and its session is offered again for a bounded number of sweeps
-(`state.MAX_PROVISIONAL_ATTEMPTS`). A final block is never overwritten by anything, including
-by a later placeholder for the same turn.
+same turn, and a placeholder's or suppression's session is offered again for a bounded number
+of sweeps (`state.MAX_PROVISIONAL_ATTEMPTS`). A final block is never overwritten by a block
+for the same turn, including by a later placeholder.
+
+**A later block for the same session replaces the earlier ones.** A sweep summarizes the whole
+session every time, so when a session was still active at one sweep and quiet at a later one,
+the later block is a cumulative re-summary of everything the first said. Before 0.18.0 both
+stayed: 46 of 681 sessions since 2026-10-01 had 2–5 blocks (64 across the whole corpus), and
+qmd indexed every version.
+Developer session 808a51cf's first block said 136 tests passed, and its second said 198. Now
+the new block takes the first block's place in the daily file (heading kept, anchor moved to
+the new last turn) and the others are removed, in one atomic replace. The exception is a
+stand-in: when the later sweep fails or the contamination guard suppresses it, its
+`placeholder` or `suppressed` block is appended beside the real digest rather than replacing
+it, and the next real render replaces both. The run record counts
+them in `superseded_blocks`, and `index.jsonl` gets a tombstone for each.
+
+### Headless sessions: the agent's own closing statement
+
+For a session nobody was watching — a dispatcher's `claude -p` run — the agent ends by writing
+a report for whoever reads it later, and that report is better evidence than a model's summary
+of it. Measured on one writer run, the LLM digest made six errors the closing statement did
+not: a drafter's interim state shown as final, a caveat recorded as a decision, PR numbers
+listed as tickets. So for these sessions scribe writes the closing statement **verbatim**,
+plus a rollup generated from the event log, and calls no provider:
+
+```toml
+[summarize.headless]
+entrypoints       = ["sdk-cli"]   # which entrypoints count as headless; empty = feature off
+agents            = []            # optional allowlist; empty = every agent
+min_closing_chars = 800           # below this, fall back (see below)
+```
+
+**Off by default.** The block quotes the final turn's last text as a markdown blockquote
+between `<!-- scribe:verbatim -->` and `<!-- /scribe:verbatim -->`, under a `#### Closing
+statement` subhead and a line saying it is the agent's own statement and not a scribe summary.
+Being a blockquote, it never reaches the SessionStart journal preview, which keeps only
+headings and `- ` bullets; the subheads tell the preview's reader whose text is whose.
+Markdown headings, setext underlines and HTML-comment lines in it are backslash-escaped, so a
+quoted `## Summary` cannot open a section and a quoted anchor cannot be read as a block
+boundary. Below it, under a `#### Rollup` subhead, the rollup: the
+same `Artifacts` and `Tickets` sections and caps as an LLM digest, then `PRs` (kept apart from
+tickets), `Commits` (from `git_commit` results and `git commit` output), `Tasks` (queue tasks
+with the last status the session set) and `Agents` (subagents with type, background and
+status). The closing statement is read from the event log, so `scribe recover` can rebuild the
+block after the transcript has aged out.
+
+Each way out is recorded in the run record's `render_mode`:
+
+| `render_mode` | when |
+|---|---|
+| `verbatim` | the final turn's text, or the previous turn's when the final one is under `min_closing_chars` (a session that ends on a background task's notification often writes its real summary one turn earlier) |
+| `verbatim-fallback-llm` | both are short, or the contamination guard fires on the statement; the normal digest is written. `closing_reason` says which |
+| `pending` | the final turn launched background work that has not reported back, or holds a tool call with no result. A rollup-only `provisional:pending` block is written, and the session's next block replaces it |
+| `llm` | the session is not headless |
+
+A pending block is marked summarized rather than provisional, so it spends no retry budget
+while a session waits on a two-hour CI run, and its final turn is left unprocessed so that the
+notification's arrival re-renders it even when it lands in the same turn. A session killed
+while waiting keeps the rollup-only block.
+
+The contamination guard and the post-render redaction run over the quotation as over a
+model's digest, because it reaches the same index and the same SessionStart injection. The
+quotation and the rollup items are redacted before they are prefixed, with their line breaks
+normalized first: a `> ` or `- ` prefix, or a break other than `\n`, would hide a `key: value`
+line from the line-anchored rules. Their hits count in `post_render_redactions` with the rest,
+with one exception the guard has for every block: a matched value that already contains a
+`«redacted»` marker is replaced but not counted (it is indistinguishable from the residue of an
+earlier redaction), so such a session reads 0 although nothing reaches disk.
+Measured over 222 writer and security sessions: 219 rendered verbatim, 2 fell back on a guard
+fire (both sessions *about* the `n/N` notation), 1 on a short final text, and none came near
+the 8,000-character cap on assistant text.
 
 ### Why a long field does not become a placeholder
 
@@ -515,6 +648,11 @@ contract rather than a convenience:
 | `4` | **the tool failed** — it did not assess the corpus, so this says nothing about loss |
 | `5` | the state DB is newer than this build understands — upgrade scribe, don't edit the DB |
 
+`index --check`: `0` clean, `1` drift, `2` config, `3` I/O, `4` the manifest is clean but a
+session has more than one final block, `5` the check itself failed (`4` and `5` added in
+0.18.0; it also prints a count of `provisional:pending` blocks). `session`: `0` found, `1` no
+trace, `2` usage or config, `3` the lookup failed.
+
 **`4` and `5` were added in 0.4.0; `0`–`3` did not move.** Before `4` existed, an unhandled
 exception — a corrupt state DB, say — exited `1`, which is the code meaning "repairable loss".
 A crashed tool was indistinguishable from a real finding, and the only thing preventing an
@@ -582,6 +720,14 @@ and the measurement that kept it out is re-runnable.
 
 #### Tracking it over time: the run record and `qc-report`
 
+**`qc-report` judges model-written blocks only** (`render_mode` `llm` and
+`verbatim-fallback-llm`; a record from before 0.18.0 counts as `llm`). A headless block's
+quotation is not graded (QC strips the verbatim region before reading claims, and the
+id-conflation rewrite cannot edit it), and its rollup is grounded by construction, so pooling
+it would move the pass rate by the headless share rather than by quality. Every mode is still
+reported apart, under `render_modes` in `--json` and as `[render_mode=…]` lines, and
+`--by render_mode` groups by it.
+
 Every session a `--live` sweep finishes appends one JSON line to the run record
 (`[qc] run_record`, default `~/.local/share/scribe/runs.jsonl`, mode `0600`). The line has the
 QC verdict, coverage, and findings counted by check, by claim kind and by `qc-survey` bucket.
@@ -591,7 +737,8 @@ it. A failed write is counted (`run_record_errors`) and never fails the sweep.
 
 Since 0.15.0 the line also has `post_render_cause`, which says why the write-time redaction
 guard fired. It is a label only, never the value: `""` (it did not fire), `extraction-miss`
-(the value is in the event log, so the model was shown it), `model-output` (it is not),
+(the value is in the event log: extraction missed it, and on the LLM path the model
+was shown it), `model-output` (it is not),
 `undetermined` (no event log to check), or `inconclusive` (every match was too short or generic
 to tell). The digest is redacted in every case. `qc-report` breaks post-render redactions down
 by cause. Records from before 0.15.0 count as `unrecorded`. The line is flagged with `!!`

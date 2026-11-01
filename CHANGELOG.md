@@ -7,6 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-11-01
+
+**Minor.** Headless sessions get the agent's own closing statement instead of an LLM digest,
+mid-turn task notifications reach the event log, a later block for a session replaces the
+ones it supersedes, and `scribe session` returns everything scribe holds about one session
+(vikunja#1347). **Event-log `schema_version` 2.** **`prompt_sha256` changes from `94727aa7…`
+to `b6c29913…`**: the user-prompt framing is hashed over an empty log, and the empty log now
+carries the four new top-level fields. The system prompt, the retry reminder and the cap
+rules are unchanged.
+
+### Added
+
+- **Headless mode, `[summarize.headless]`, off by default.** A session whose `entrypoint` is
+  listed (and whose agent is in `agents`, when that is set) is written as the final turn's
+  last text, quoted verbatim as a blockquote between `<!-- scribe:verbatim -->` markers, under
+  a `#### Closing statement` subhead and a line saying it is the agent's statement, plus a
+  rollup from the event log under its own `#### Rollup` subhead: `Artifacts` and `Tickets` with
+  the LLM digest's caps, then `PRs` (kept apart from tickets), `Commits`, `Tasks` (with the
+  last status set) and `Agents`. No provider call. Under `min_closing_chars` (800) it takes
+  the previous turn's text, then falls back to the LLM digest; a contamination-guard fire on
+  the statement falls back too. A session whose final turn has background work outstanding,
+  or a tool call with no result, gets a rollup-only `provisional:pending` block, marked
+  summarized (no retry budget spent) with its final turn left unprocessed, so the next block
+  replaces it. Headings and HTML-comment lines in the quotation are backslash-escaped.
+- **`render_mode`** (`llm`, `verbatim`, `verbatim-fallback-llm`, `pending`),
+  `closing_chars`, `closing_source`, `closing_reason`, `pending` and `superseded_blocks` in
+  the run record and `scribe run --json`; totals gain `verbatim`, `verbatim_fallback`,
+  `pending` and `superseded_blocks`, and the human run output prints a `headless:` line.
+  `provider` and `model_requested` are `null` on a record no model wrote. The summarize span
+  gains `render_mode`.
+- **Event log schema 2:** `entrypoint`, `subagents` (type, description, background, agent id,
+  status, transcript path and whether it exists), `compactions` (ts, turn, trigger, pre/post
+  tokens), `background_pending`, `Turn.queued_input` and `stats.queued_commands`. A version-1
+  log reads these back as `null`, "not recorded"; a log newer than the build is refused.
+- **`scribe session <id> [--json|--brief]`**, schema `scribe.session/1`: transcript (with
+  expiry from the new `[discovery] transcript_retention_days`), state row, event log stats
+  and fields, every block with which is current, the session's run records (fixed field
+  list) and the closing statement. Read-only, and no content beyond the redacted event log.
+  Exit `0` found, `1` no trace, `2` usage, `3` the lookup failed or could not read a
+  source (named in `errors`).
+- **`scribe index --check` enforces one block per session.** A session with more than one
+  final block is named with its blocks and exits `4` (manifest clean, contract breached);
+  drift still exits `1` and takes precedence; `5` means the check itself failed (an
+  unexpected exception used to exit `1`, the drift code). `4` and `5` are new; `0`–`3` are
+  unchanged. It also prints a count of `provisional:pending` blocks.
+- **`qc-report` splits by `render_mode`.** The headline and the verdict cover model-written
+  blocks only (`llm`, `verbatim-fallback-llm`; records without the key count as `llm`), and
+  every mode is reported apart under `render_modes`. `--by render_mode` is accepted.
+
+### Security
+
+Fixes from the pre-release audit (scribe-headless-digest-2026-11):
+
+- The quoted closing statement no longer reaches the SessionStart preview: it is a
+  blockquote, split on every line separator Python recognizes (a lone `\r` included), which
+  `journal.preview` drops, and the subheads it keeps say whose text is whose; the rollup's
+  subhead marks its items as agent-written data. Quoted `- ` lines were injected into the
+  agent's next sessions unlabelled.
+- A `placeholder` or `suppressed` block never supersedes a real digest; it is appended beside
+  it, and the next final render replaces both.
+- `scribe session` exits `3` for an unreadable event log, an unreadable digest root or
+  directory, an unexpected config-load error, and a failure while writing the report (a real
+  broken pipe included), all of which used to read as "no trace" or success; a
+  subagent log that cannot be statted records `log_exists: null`, not `false`.
+- Rollup and render-mode labels come from structure, never from a search of agent-written
+  text: a task is `update_task`'s `task_id` or the id in `submit_task`'s result (a UUID in a
+  note is not a task), its status the call's own `status` argument (new
+  `ToolEvent.task_status`; a version-1 log lists tasks with no status), and verbatim
+  classification uses the line-anchored marker regex. A commit sha read from Bash output is
+  always labelled `(from command output, unverified)`, and several are listed as ambiguous;
+  git's detached-HEAD line is recognised. Only a `git_commit` result is reported bare.
+- A lone `-` setext underline in the quotation is escaped.
+- The quotation and the rollup items (with a commit's target and a subagent's description
+  scrubbed before the item is composed) are redacted before they are prefixed, through the
+  post-render guard, so their hits count in `post_render_redactions` (except a matched value
+  that already holds a `«redacted»` marker, which is replaced but never counted). The `> ` and `- `
+  prefixes hid a `key: value` line from the line-anchored rules, as did a line break other
+  than `\n`, which mattered for `scribe recover` over an older event log.
+- A `pending` block's rollup carries the same agent-written-data subhead as the verbatim one;
+  the preview drops the pending label and kept its bullets bare.
+- `scribe session` reports a digest root that is not a directory as an error (exit `3`)
+  rather than "no blocks".
+
+### Changed
+
+- **Mid-turn task notifications are captured.** `type: attachment` records whose
+  `attachment.type` is `queued_command` become `queued_input` on the running turn, redacted
+  and budgeted like user text. Every other attachment type is still dropped. This also
+  changes what the LLM digest sees for interactive sessions that use background subagents.
+- **A later block for a session supersedes the earlier ones.** The sweep now writes through
+  `writeback.write_block(..., supersede=True)`: the new block takes the session's first
+  block's place (heading kept, anchor moved), the rest are removed in the same atomic
+  replace, and each removed block gets an `index.jsonl` tombstone (`provisional:
+  "superseded"`, `superseded_by`) that `manifest.read` drops. A `placeholder` or
+  `suppressed` block never supersedes a final one; it is appended beside it until the next
+  final render replaces both. A final block for the same turn still refuses the write. A block for the session in the neighbouring day's file is
+  reported as an error, not superseded.
+- **QC strips the verbatim region** before reading claims (`render.VERBATIM_RE` joins
+  `qc._MARKER_RES`), so the id-conflation rewrite cannot edit a quotation either.
+- **A headless block never counts as the provider answering**, so it cannot clear a
+  suspected outage in `run_once`'s breaker.
+
+### Not changed
+
+- Subagent transcripts are still not discovered. The non-recursive glob is now a stated rule
+  with a test that fails on a recursive one.
+- No historical re-render. The sessions that already hold more than one block (64 across the
+  corpus on 2026-11-01; 46 of 681 since 2026-10-01) keep them until a later sweep of the
+  session replaces them; `index --check` names them.
+
 ## [0.17.0] — 2026-10-24
 
 **Minor.** The contamination guard records what it matched, and a session whose last attempt

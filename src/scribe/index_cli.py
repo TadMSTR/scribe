@@ -13,8 +13,16 @@ A `--rebuild` racing a live sweep can drop the line that sweep appends between t
 walk and its rename. Run it when no sweep is running (forge's cron holds `flock -n`), and
 `--check` afterwards; a dropped line shows up there as missing.
 
+`--check` also enforces the corpus contract "one block per session" (vikunja#1347): a session
+with more than one final block, anywhere in the corpus, is named with its blocks. That is not
+manifest drift -- `--rebuild` cannot fix it, because the manifest is right about what is on
+disk -- so it has its own exit code, and drift takes precedence when both are present.
+
 Exit codes: 0 clean (or rebuilt), 1 drift found, 2 config error, 3 the corpus or manifest
-could not be read or written.
+could not be read or written, 4 the manifest is clean but at least one session has more than
+one final block, 5 the check itself failed. `4` and `5` are additions; the first four are
+unchanged, because a scheduled detector consumes them (`scribe-recover-check.sh` in the
+operator's scripts).
 """
 
 from __future__ import annotations
@@ -31,6 +39,10 @@ EXIT_OK = 0
 EXIT_DRIFT = 1
 EXIT_CONFIG = 2
 EXIT_IO = 3
+EXIT_MULTI_BLOCK = 4
+#: Any failure other than config or I/O. Before this an unexpected exception exited 1, the
+#: drift code (security baseline OV-27).
+EXIT_INTERNAL = 5
 
 
 def _drift_dict(d: Drift) -> dict:
@@ -43,12 +55,34 @@ def _drift_dict(d: Drift) -> dict:
         "stale": [list(k) for k in d.stale],
         "changed": [{"key": list(k), "fields": f} for k, f in d.changed],
         "malformed": [{"line": n, "reason": r} for n, r in d.malformed],
+        "one_block_per_session": d.one_block_per_session,
+        "pending_blocks": [list(k) for k in d.pending_blocks],
+        "pending_oldest": min((Path(p).stem for p, _t in d.pending_blocks), default=None),
+        "multi_block": [
+            {"session_id": sid, "blocks": [list(k) for k in keys]} for sid, keys in d.multi_block
+        ],
     }
 
 
 def _print_drift(d: Drift, path: Path) -> None:
     print(f"manifest: {path}")
     print(f"  {d.expected} block(s) on disk, {d.lines} line(s) in the manifest")
+    # Early, and on one line: the scheduled caller keeps the first 300 characters.
+    if d.multi_block:
+        print(
+            f"  !! {len(d.multi_block)} session(s) with more than one block "
+            "(contract: one block per session)"
+        )
+    # Informational. A headless session killed while waiting keeps its `provisional:pending`
+    # block for good; a count that only grows is how that shows (security baseline OV-32).
+    if d.pending_blocks:
+        # The oldest daily file holding one is the age signal: a pending block several days old
+        # belongs to a session that will not finish (security baseline OV-32).
+        oldest = min(Path(p).stem for p, _turn in d.pending_blocks)
+        print(
+            f"  {len(d.pending_blocks)} pending block(s) (headless sessions still waiting), "
+            f"oldest {oldest}"
+        )
     if d.absent:
         print("  !! no manifest file -- every block is missing from it")
     for path_, turn in d.missing:
@@ -59,10 +93,18 @@ def _print_drift(d: Drift, path: Path) -> None:
         print(f"  changed  {path_} turn:{turn}  ({', '.join(fields)})")
     for n, reason in d.malformed:
         print(f"  malformed line {n}: {reason}")
+    for sid, keys in d.multi_block:
+        where = ", ".join(f"{p} turn:{t}" for p, t in keys)
+        print(f"  multi    session:{sid}  {len(keys)} blocks: {where}")
     if d.clean:
         print("  clean")
     else:
         print("  run `scribe index --rebuild` to regenerate it from the digests")
+    if d.multi_block:
+        print(
+            "  multiple blocks are not drift and a rebuild does not change them; a later "
+            "sweep of the session replaces them, from scribe 0.18.0"
+        )
     print("  (written_at is informational and is not verified)")
 
 
@@ -80,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--check",
         action="store_true",
-        help="rebuild in memory and compare; exit 1 on any difference",
+        help="rebuild in memory and compare; exit 1 on drift, 4 on a session with >1 block",
     )
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--json", action="store_true")
@@ -104,16 +146,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"rebuilt {path}: {len(records)} record(s)")
             return EXIT_OK
         drift = check(cfg)
+        # Inside the guard too: a failure after the `manifest:` line is printed must still
+        # exit 5, not 1, which a caller reads as drift (security baseline OV-27 recheck).
+        if args.json:
+            json.dump({"manifest": str(path), **_drift_dict(drift)}, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            _print_drift(drift, path)
     except OSError as exc:
         print(f"scribe: {exc}", file=sys.stderr)
         return EXIT_IO
+    except Exception as exc:
+        print(f"scribe: index check failed ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return EXIT_INTERNAL
 
-    if args.json:
-        json.dump({"manifest": str(path), **_drift_dict(drift)}, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-    else:
-        _print_drift(drift, path)
-    return EXIT_OK if drift.clean else EXIT_DRIFT
+    if not drift.clean:
+        return EXIT_DRIFT
+    return EXIT_OK if drift.one_block_per_session else EXIT_MULTI_BLOCK
 
 
 if __name__ == "__main__":

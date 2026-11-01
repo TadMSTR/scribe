@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from scribe.extract.__main__ import main
+from scribe.extract.models import SCHEMA_VERSION
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BEARER = str(FIXTURES / "transcript-with-bearer.jsonl")
@@ -21,7 +22,7 @@ BEARER = str(FIXTURES / "transcript-with-bearer.jsonl")
 def test_json_output_is_parseable(capsys) -> None:
     assert main([BEARER, "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc["schema_version"] == 1
+    assert doc["schema_version"] == SCHEMA_VERSION
     assert doc["stats"]["tool_events"] == 2
 
 

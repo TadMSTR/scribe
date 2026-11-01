@@ -15,6 +15,16 @@ outcomes, two of which produce a line:
     a second line for the same `(path, turn_uuid)`;
   * turn absent — appended with a new `turn_uuid`: a line for the same `path`, new key.
 
+Since 0.18.0 there is a fourth outcome: a block for a session that already has blocks in the
+file **supersedes** them (vikunja#1347) -- unless it is a `placeholder` or `suppressed`
+stand-in and the session has a final block, in which case it is appended beside it. The
+superseding block takes the first one's place and the others are removed, so their keys stop
+existing on disk. Each removed key gets a **tombstone** line: `provisional` is `"superseded"`,
+`sha256` is `""`, and an extra field `superseded_by` names the turn that replaced it. A
+consumer filtering on `provisional == ""` skips tombstones without knowing about them; one that
+tracks records drops the key. `read` drops it, so `check` does not report the removed block as
+stale.
+
 So a consumer needs two rules, and they are not the same rule:
 
   * **record identity is `(path, turn_uuid)`; the last line for a key wins;**
@@ -76,6 +86,8 @@ DERIVED_FIELDS = (
     "eventlog_path",
 )
 FIELDS = (*DERIVED_FIELDS, "written_at")
+#: `provisional` on a tombstone line. Not a value any block on disk can carry.
+SUPERSEDED = "superseded"
 
 Key = tuple[str, str]
 
@@ -153,6 +165,43 @@ def append(cfg: Config, record: dict, *, now: datetime | None = None) -> Path:
     return path
 
 
+def tombstone(cfg: Config, md: Path, session_id: str, turn_uuid: str, superseded_by: str) -> dict:
+    """The line recording that `turn_uuid`'s block in `md` was removed by a superseding block.
+
+    Not derived from disk, because there is nothing left on disk to derive it from; `rebuild`
+    never produces one, and `read` drops the key it names, so `check` compares like with like.
+    """
+    rel = md.relative_to(Path(cfg.output_dir).expanduser())
+    return {
+        "path": rel.as_posix(),
+        "sha256": "",
+        "agent": rel.parent.as_posix() if rel.parent != Path(".") else "",
+        "date": md.stem,
+        "session_id": session_id,
+        "turn_uuid": turn_uuid,
+        "provisional": SUPERSEDED,
+        "eventlog_path": "",
+        "written_at": None,
+        "superseded_by": superseded_by,
+    }
+
+
+def append_tombstone(cfg: Config, record: dict, *, now: datetime | None = None) -> Path:
+    """Append one tombstone line. Same write discipline as `append`."""
+    path = cfg.manifest_file()
+    _ensure_parent(path)
+    stamped = dict(record, written_at=(now or datetime.now(UTC)).isoformat(timespec="seconds"))
+    line = json.dumps(
+        {**{k: stamped[k] for k in FIELDS}, "superseded_by": stamped["superseded_by"]}
+    )
+    with secure_append(path) as fh:
+        fh.write(line + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    secure_file(path)
+    return path
+
+
 def append_turn(cfg: Config, md: Path, turn_uuid: str, *, now: datetime | None = None) -> dict:
     """Derive the record for a block just written, and append it. Returns the record."""
     record = record_for_turn(cfg, md, turn_uuid)
@@ -214,6 +263,8 @@ class Current:
     #: `(line number, reason)` for every line that is not a well-formed record.
     malformed: list[tuple[int, str]] = field(default_factory=list)
     lines: int = 0
+    #: Tombstone lines read (superseded blocks). Their keys are not in `records`.
+    tombstones: int = 0
 
 
 def read(path: Path) -> Current:
@@ -236,7 +287,14 @@ def read(path: Path) -> Current:
             if missing:
                 cur.malformed.append((n, f"missing or non-string field(s): {', '.join(missing)}"))
                 continue
-            cur.records[(rec["path"], rec["turn_uuid"])] = rec
+            key = (rec["path"], rec["turn_uuid"])
+            if rec.get("superseded_by"):
+                # A tombstone: the block is gone. Last line wins, as for any key, so a block
+                # later written again under the same key comes back.
+                cur.records.pop(key, None)
+                cur.tombstones += 1
+                continue
+            cur.records[key] = rec
     return cur
 
 
@@ -255,16 +313,49 @@ class Drift:
     absent: bool = False
     expected: int = 0
     lines: int = 0
+    #: Sessions with more than one FINAL block anywhere in the corpus, each with its blocks.
+    #: Not drift -- the manifest can match the disk exactly and still list them -- but a
+    #: breach of the corpus contract "one block per session" (systems/memory-pipeline.md,
+    #: contract 1), which nothing checked before vikunja#1347. Provisional blocks do not
+    #: count: a stand-in is replaced by the next write for its session.
+    multi_block: list[tuple[str, list[Key]]] = field(default_factory=list)
+    #: `provisional:pending` blocks on disk. Informational, not a failure.
+    pending_blocks: list[Key] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
+        """The manifest matches the corpus. Says nothing about `multi_block`."""
         return not (self.missing or self.stale or self.changed or self.malformed or self.absent)
+
+    @property
+    def one_block_per_session(self) -> bool:
+        return not self.multi_block
+
+
+def multi_block_sessions(records: list[dict]) -> list[tuple[str, list[Key]]]:
+    """Sessions holding more than one final block, from `rebuild`'s records, sorted by id."""
+    by_session: dict[str, list[Key]] = {}
+    for r in records:
+        if r["provisional"] == "" and r["session_id"]:
+            by_session.setdefault(r["session_id"], []).append((r["path"], r["turn_uuid"]))
+    return sorted((sid, keys) for sid, keys in by_session.items() if len(keys) > 1)
 
 
 def check(cfg: Config) -> Drift:
-    """Rebuild into memory and compare against the manifest on disk, on `DERIVED_FIELDS`."""
-    expected = {(r["path"], r["turn_uuid"]): r for r in rebuild(cfg)}
-    drift = Drift(expected=len(expected))
+    """Rebuild into memory and compare against the manifest on disk, on `DERIVED_FIELDS`.
+
+    Also reports `multi_block`, which is a property of the corpus rather than of the
+    manifest, so it is computed even when the manifest file is absent.
+    """
+    records = rebuild(cfg)
+    expected = {(r["path"], r["turn_uuid"]): r for r in records}
+    drift = Drift(
+        expected=len(expected),
+        multi_block=multi_block_sessions(records),
+        pending_blocks=sorted(
+            (r["path"], r["turn_uuid"]) for r in records if r["provisional"] == "pending"
+        ),
+    )
     try:
         cur = read(cfg.manifest_file())
     except FileNotFoundError:

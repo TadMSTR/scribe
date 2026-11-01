@@ -55,6 +55,14 @@ QC_THRESHOLD_KEYS = (
 )
 #: An environment variable NAME, as the hook's passthrough list accepts it. Names only: a
 #: pattern or prefix here would be SC-06's glob passthrough by another route.
+#: Below this many characters a closing statement is not treated as a summary: measured over
+#: 435 headless event logs on one deployment, 39 final texts were under 800 and most of those
+#: sessions had nothing to summarize at all (vikunja#1347).
+DEFAULT_MIN_CLOSING_CHARS = 800
+#: Tables under `[summarize]` that are settings rather than stages. Without this a
+#: `[summarize.headless]` table would be read as a stage with no `provider` and refused.
+SUMMARIZE_SETTINGS = ("headless",)
+
 ENV_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -94,6 +102,30 @@ class StageConfig:
 
     provider: str
     model: str = ""
+
+
+@dataclass(frozen=True)
+class HeadlessConfig:
+    """`[summarize.headless]`: which sessions get their closing statement instead of a digest.
+
+    **Off by default** (`entrypoints` empty). The operator names the entrypoints that mean
+    "nobody was watching" -- on one deployment, `sdk-cli`, which is exactly the dispatcher's
+    `claude -p` runs -- and optionally narrows by agent. A session matching both is rendered
+    from its own final message and the event log, with no provider call.
+    """
+
+    entrypoints: tuple[str, ...] = ()
+    agents: tuple[str, ...] = ()
+    min_closing_chars: int = DEFAULT_MIN_CLOSING_CHARS
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.entrypoints)
+
+    def matches(self, entrypoint: str, agent: str) -> bool:
+        if not entrypoint or entrypoint not in self.entrypoints:
+            return False
+        return not self.agents or agent in self.agents
 
 
 @dataclass
@@ -136,6 +168,11 @@ class Config:
     #: written -- see `qc.rewrite_id_conflations`. On by default; turn it off for a tracker
     #: whose `#N` IS its id, where the conflation the gate names cannot happen.
     qc_rewrite_id_conflations: bool = True
+    headless: HeadlessConfig = field(default_factory=HeadlessConfig)
+    #: Claude Code's `cleanupPeriodDays` as this install sets it, so `scribe session` can say
+    #: when a transcript will be deleted. None means not configured, reported as "unknown":
+    #: Claude Code's own default has changed before, and a guessed date is worse than none.
+    transcript_retention_days: int | None = None
 
     def manifest_file(self) -> Path:
         """The digest manifest: `manifest_path` if set, else `<output_dir>/../index.jsonl`.
@@ -283,6 +320,30 @@ def _load_qc(cfg: Config, qc: object) -> None:
             cfg.qc_thresholds[key] = check_threshold(key, qc[key], where="qc.")
 
 
+def _string_list(value: object, key: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+        raise ConfigError(f"summarize.headless.{key} must be a list of non-empty strings")
+    return tuple(value)
+
+
+def _load_headless(block: object) -> HeadlessConfig:
+    """`[summarize.headless]`. Unknown keys are refused, for `_load_qc`'s reason: a misspelt
+    key would load as "feature off" and nobody would find out."""
+    if not isinstance(block, dict):
+        raise ConfigError("summarize.headless: expected a table")
+    unknown = set(block) - {"entrypoints", "agents", "min_closing_chars"}
+    if unknown:
+        raise ConfigError(f"summarize.headless: unknown key(s) {', '.join(sorted(unknown))}")
+    floor = block.get("min_closing_chars", DEFAULT_MIN_CLOSING_CHARS)
+    if isinstance(floor, bool) or not isinstance(floor, int) or floor < 0:
+        raise ConfigError("summarize.headless.min_closing_chars must be a non-negative integer")
+    return HeadlessConfig(
+        entrypoints=_string_list(block.get("entrypoints", []), "entrypoints"),
+        agents=_string_list(block.get("agents", []), "agents"),
+        min_closing_chars=floor,
+    )
+
+
 def check_threshold(key: str, value: object, *, where: str = "") -> float:
     """One threshold, validated. Shared with the CLI flags so both refuse the same values."""
     if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
@@ -321,6 +382,11 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
         cfg.output_dir = str(disc["output_dir"])
     if "eventlog_dir" in disc:
         cfg.eventlog_dir = str(disc["eventlog_dir"])
+    if "transcript_retention_days" in disc:
+        days = disc["transcript_retention_days"]
+        if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+            raise ConfigError("discovery.transcript_retention_days must be a positive integer")
+        cfg.transcript_retention_days = days
     if "emit_frontmatter" in disc:
         if not isinstance(disc["emit_frontmatter"], bool):
             raise ConfigError("discovery.emit_frontmatter must be true or false")
@@ -371,7 +437,12 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
             model=str(block.get("model", "")),
         )
 
-    for stage, block in (data.get("summarize") or {}).items():
+    summarize = data.get("summarize") or {}
+    if "headless" in summarize:
+        cfg.headless = _load_headless(summarize["headless"])
+    for stage, block in summarize.items():
+        if stage in SUMMARIZE_SETTINGS:
+            continue
         if not isinstance(block, dict):
             raise ConfigError(f"summarize.{stage}: expected a table")
         provider = block.get("provider")

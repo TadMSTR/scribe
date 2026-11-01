@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import __version__, corrections, runrecord
@@ -35,19 +35,22 @@ from .eventlog import (
 from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
-from .manifest import append, record_for_turn
+from .manifest import append, append_tombstone, record_for_turn, tombstone
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest, id_conflation_edits
 from .state import STATUS_FAILED, SessionRow, Store
+from .summarize import headless
 from .summarize.prompt import prompt_sha256
 from .summarize.providers import Provider, build
 from .summarize.runner import Outcome, summarize_log
 from .telemetry import SPAN_EXTRACT, SPAN_SUMMARIZE, record_spend, set_span_attributes, span
 from .writeback import (
+    PROVISIONAL_PENDING,
     PROVISIONAL_PLACEHOLDER,
     PROVISIONAL_SUPPRESSED,
-    append_block,
     apply_frontmatter,
     daily_path,
+    session_blocks,
+    write_block,
 )
 
 
@@ -116,10 +119,14 @@ class SessionResult:
     qc_ok: bool | None = None
     qc_coverage: float = 0.0
     qc_findings: list[str] = field(default_factory=list)
-    #: Secrets caught by the last-line re-scrub of the rendered digest. Should always be
-    #: zero -- see `process_session`. Any non-zero value is an extraction-layer miss.
+    #: Secrets caught on the way to disk by the post-render guard: its last-line re-scrub of
+    #: the rendered block, plus, for a headless block, its scrub of the quotation and rollup
+    #: items before they were prefixed (round-3 baseline OV-24). Should always be zero; a
+    #: non-zero value has a cause, recorded in `post_render_cause` -- see `process_session`.
+    #: Not counted: a matched value already holding a `«redacted»` marker, which is replaced
+    #: but excluded as residue (`Redactor._record`; audit R3-01). Zero is not proof of none.
     post_render_redactions: int = 0
-    #: Which cause the fire supports — `extraction-miss`, `model-output` or `undetermined`.
+    #: Which cause the fire supports — one of `CAUSES`.
     #: Empty when nothing fired. Reported so a sweep can be filtered by cause rather than by
     #: reading every error string (vikunja#856).
     post_render_cause: str = ""
@@ -183,6 +190,24 @@ class SessionResult:
     #: Never handed to the provider: an earlier session in this sweep was deferred, and the
     #: sweep stopped calling a provider it had just found down. Untouched, like `deferred`.
     not_attempted: bool = False
+    #: Who wrote the block: `llm`, `verbatim` (a headless session's own closing statement),
+    #: `verbatim-fallback-llm` or `pending` -- see `summarize.headless`. Recorded because the
+    #: QC trend must be read per mode: a headless share that grows would otherwise move the
+    #: pass rate and look like a regression, or hide one.
+    render_mode: str = headless.MODE_LLM
+    #: The closing statement's length, where and why: `closing_source` is `final-turn` or
+    #: `previous-turn`; `closing_reason` says why the verbatim path was not taken.
+    closing_chars: int = 0
+    closing_source: str = ""
+    closing_reason: str = ""
+    #: A rollup-only `provisional:pending` block was written: the headless session is still
+    #: waiting on background work. A fourth term in `written == summarized + suppressed +
+    #: placeholder + pending`, with its own total (invariant 13).
+    pending: bool = False
+    #: Earlier blocks for this session that this block replaced (`writeback.write_block`).
+    #: Not loss: each was a cumulative summary the new one covers. Counted so the claim that
+    #: the corpus holds one block per session is checkable sweep by sweep.
+    superseded_blocks: int = 0
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -228,6 +253,12 @@ class SessionResult:
             "ticket_refs_rewritten": self.ticket_refs_rewritten,
             "deferred": self.deferred,
             "not_attempted": self.not_attempted,
+            "render_mode": self.render_mode,
+            "closing_chars": self.closing_chars,
+            "closing_source": self.closing_source,
+            "closing_reason": self.closing_reason,
+            "pending": self.pending,
+            "superseded_blocks": self.superseded_blocks,
             "errors": self.errors,
         }
 
@@ -278,8 +309,9 @@ def session_when(log: EventLog, fallback: datetime) -> datetime:
     return fallback
 
 
-#: Extraction missed it: the value is in the event log, so the model was shown it. This is
-#: the only case where `redact.py` is the file to look at.
+#: Extraction missed it: the value is in the event log, so on the LLM path the model was shown
+#: it (a headless block calls no model, round-3 baseline OV-24). This is the only case where
+#: `redact.py` is the file to look at.
 CAUSE_EXTRACTION = "extraction-miss"
 #: The model emitted a secret-shaped string that was never in its input. Not an extraction
 #: defect; the digest is still correct on disk because the re-scrub caught it.
@@ -318,6 +350,21 @@ _CAUSE_DETAIL: dict[str, str] = {
         "output, so no cause is claimed — the digest was redacted either way"
     ),
 }
+
+
+def _cause_detail(cause: str, render_mode: str) -> str:
+    """`_CAUSE_DETAIL[cause]`, said right for a block no model wrote.
+
+    A headless block's quotation and rollup come from the event log and no model is called,
+    so its hits classify as an extraction miss but "the model was shown it" is untrue (round-3
+    baseline OV-24).
+    """
+    if cause == CAUSE_EXTRACTION and render_mode not in headless.LLM_MODES:
+        return (
+            "at least one matched value IS present in this session's event log, so extraction "
+            "missed it (a headless block: no model was called) — investigate redact.py"
+        )
+    return _CAUSE_DETAIL[cause]
 
 
 def _is_evidence(value: str) -> bool:
@@ -451,7 +498,12 @@ class AfterWrite:
     hook_error: str = ""
 
 
-def after_write(cfg: Config, path: Path, blocks: Sequence[tuple[str, dict | None]]) -> AfterWrite:
+def after_write(
+    cfg: Config,
+    path: Path,
+    blocks: Sequence[tuple[str, dict | None]],
+    superseded: Sequence[tuple[str, str, str]] = (),
+) -> AfterWrite:
     """Everything that follows blocks reaching disk in one file. None of it can unwrite them.
 
     `blocks` is `(turn_uuid, correction)` per block just written, where `correction` is the
@@ -467,7 +519,9 @@ def after_write(cfg: Config, path: Path, blocks: Sequence[tuple[str, dict | None
 
       1. **Frontmatter**, once per file, because it rewrites the file and a hook must be
          handed the finished file. It does not touch blocks, so no hash below moves.
-      2. **The manifest line**, per block, so `scribe index --check` stays clean.
+      2. **The manifest line**, per block, so `scribe index --check` stays clean -- preceded
+         by a tombstone for each block a superseding write removed, `(session_id,
+         removed_turn, new_turn)` in `superseded`, so the removed key stops being current.
       3. **The ledger record**, per corrected block, after the manifest because its
          `sha256_after` is that line's `sha256` -- the same hash, derived once.
       4. **The hook**, once per file, last: it is the notification and the manifest is the
@@ -480,6 +534,11 @@ def after_write(cfg: Config, path: Path, blocks: Sequence[tuple[str, dict | None
         except OSError as exc:
             done.frontmatter_error = str(exc)
     ledger = cfg.corrections_file()
+    for session_id, gone, by in superseded:
+        try:
+            append_tombstone(cfg, tombstone(cfg, path, session_id, gone, by))
+        except (OSError, ValueError) as exc:
+            done.manifest_errors[gone] = f"tombstone: {exc}"
     for turn_uuid, correction in blocks:
         rec: dict | None = None
         try:
@@ -521,13 +580,17 @@ def _after_write(
     path: Path,
     turn_uuid: str,
     correction: dict | None = None,
+    superseded: Sequence[str] = (),
 ) -> None:
     """`after_write` for the sweep's one block, folded into its `SessionResult`."""
-    done = after_write(cfg, path, [(turn_uuid, correction)])
+    gone = [(result.session_id, old, turn_uuid) for old in superseded]
+    done = after_write(cfg, path, [(turn_uuid, correction)], gone)
     if done.frontmatter_error:
         result.errors.append(f"frontmatter: {done.frontmatter_error}")
     result.manifest_appended = turn_uuid in done.manifest_records
-    result.manifest_error = done.manifest_errors.get(turn_uuid, "")
+    result.manifest_error = "; ".join(
+        err for key, err in done.manifest_errors.items() if key == turn_uuid or key in superseded
+    )
     result.correction_error = done.correction_errors.get(turn_uuid, "")
     result.hook, result.hook_error = done.hook, done.hook_error
 
@@ -677,13 +740,45 @@ def process_session(
     except (OSError, ValueError) as exc:  # ValueError: an unencodable string (audit F-03)
         result.errors.append(f"eventlog: {exc}")
 
+    # Headless sessions (vikunja#1347): the agent's own closing statement and a rollup, with no
+    # provider call -- or a fallback to the digest below, which is recorded as such.
+    choice: headless.Choice | None = None
+    # The post-render guard (see below), made here because the verbatim quotation is scrubbed
+    # through it before it is quoted: the `> ` prefix blinds the line-anchored rules to a
+    # re-scrub of the rendered block (audit R2-01). Its hits count with the rest.
+    guard = Redactor(capture=True)
+    if cfg.headless.enabled and cfg.headless.matches(log.entrypoint, result.agent):
+        choice = headless.choose(
+            log, cfg.headless.min_closing_chars, heading=f"{when:%H:%M}", scrub=guard.scrub
+        )
+        result.render_mode = choice.mode
+        result.closing_chars = choice.closing_chars
+        result.closing_source = choice.closing.source if choice.closing else ""
+        result.closing_reason = choice.reason
+        if not choice.markdown:
+            # A fallback after the quotation was rendered (a rollup guard fire): that block is
+            # never written, so nothing its scrub caught is a post-render redaction.
+            guard.captured.clear()
+            guard = Redactor(capture=True)
+
     # What the post-grading rewrite changed, for the corrections ledger. Empty when it is off
     # or changed nothing, which is what keeps a ledger line off every uncorrected block.
     edits: list[dict] = []
     with span(
         SPAN_SUMMARIZE, session_id=log.session_id, agent=result.agent, events=st.tool_events
     ) as sp:
-        outcome: Outcome = summarize_log(log, provider, heading=f"{when:%H:%M}")
+        if choice is not None and choice.markdown:
+            outcome = Outcome(
+                markdown=choice.markdown,
+                ok=choice.mode == headless.MODE_VERBATIM,
+                pending=choice.mode == headless.MODE_PENDING,
+                reason=choice.reason,
+            )
+            result.truncated_fields = dict(choice.truncated)
+            result.truncated_items = sum(result.truncated_fields.values())
+        else:
+            outcome = summarize_log(log, provider, heading=f"{when:%H:%M}")
+        set_span_attributes(sp, render_mode=result.render_mode)
         if outcome.digest is not None:
             result.truncated_fields = dict(outcome.digest.truncated)
             result.truncated_items = sum(result.truncated_fields.values())
@@ -713,7 +808,8 @@ def process_session(
         # suppression note, but `render_failure`'s marked placeholder. The session's summary is
         # gone. Recorded here so the run totals can say so out loud -- inferring it from
         # `written - summarized` is how 13 lost sessions would have read as a clean backfill.
-        result.placeholder = not outcome.ok and not outcome.suppressed
+        result.placeholder = not outcome.ok and not outcome.suppressed and not outcome.pending
+        result.pending = outcome.pending
         result.errors.extend(outcome.errors)
         if outcome.input_tokens or outcome.output_tokens:
             record_spend(
@@ -732,6 +828,7 @@ def process_session(
             # hours of outage would retire every pending session until a manual `recover`.
             # Leaving the row alone is what makes the next sweep re-offer it for free.
             set_span_attributes(sp, deferred=True)
+            guard.captured.clear()
             result.deferred = True
             result.placeholder = False
             result.errors.append(
@@ -747,7 +844,8 @@ def process_session(
         #
         # It is also a DETECTOR, and a fire here has TWO possible causes (vikunja#856):
         #
-        #   * extraction missed it — the value was in the event log and went to the model, or
+        #   * extraction missed it — the value was in the event log (and, on the LLM path, went
+        #     to the model; a headless block calls none), or
         #   * the model emitted it — a secret-shaped string that was never in its input.
         #
         # This comment used to say a fire "can only mean extraction missed something", and the
@@ -757,10 +855,11 @@ def process_session(
         # which an input-side cause cannot produce. Separately, all three persisted logs scrubbed
         # field-by-field fired 0 times across 1,797 string leaves.
         #
-        # So ask the log rather than asserting. `capture=True` is used ONLY here and the captured
-        # plaintext never leaves this block — in particular it is never put in `result.errors`,
+        # So ask the log rather than asserting. `capture=True` is used ONLY by this guard, which
+        # also scrubbed a headless block's quotation and rollup items before they were prefixed
+        # (made above, before `headless.choose`), and the captured plaintext never leaves this
+        # function — in particular it is never put in `result.errors`,
         # which is an unredacted sink that reaches the JSON report and the CLI.
-        guard = Redactor(capture=True)
         markdown = guard.scrub(outcome.markdown)
         if guard.count:
             result.post_render_redactions = guard.count
@@ -772,7 +871,7 @@ def process_session(
             guard.captured.clear()
             result.errors.append(
                 f"post-render redaction fired {guard.count}x — a secret was caught at write "
-                f"time; {_CAUSE_DETAIL[result.post_render_cause]}"
+                f"time; {_cause_detail(result.post_render_cause, result.render_mode)}"
             )
 
         # The QC gate runs on whatever was produced, including a placeholder: a run report that
@@ -819,12 +918,17 @@ def process_session(
     # before it existed, `append_block` refused the replacement and the digest was discarded.
     if outcome.ok:
         provisional = ""
+    elif outcome.pending:
+        provisional = PROVISIONAL_PENDING
     elif outcome.suppressed:
         provisional = PROVISIONAL_SUPPRESSED
     else:
         provisional = PROVISIONAL_PLACEHOLDER
 
-    result.written = append_block(
+    # `supersede=True`: this block was rendered from the whole session, so it replaces any
+    # earlier block for the session rather than sitting beside it (vikunja#1347) -- except a
+    # placeholder or suppressed stand-in, which `write_block` appends beside a final block.
+    wrote = write_block(
         path,
         body=markdown,
         session_id=log.session_id,
@@ -832,8 +936,19 @@ def process_session(
         transcript_path=row.transcript_path,
         when=when,
         provisional=provisional,
+        supersede=True,
     )
-    # A digest that was produced and NOT written. `append_block` returns False for a turn that
+    result.written = wrote.written
+    result.superseded_blocks = len(wrote.superseded)
+    # Superseding works within one daily file. A session is filed under its `started_at`, so
+    # every block it gets lands in the same file -- unless the transcript had no usable
+    # timestamp and the clock chose the date. Refuse loudly rather than leave a stale copy
+    # unremarked; `scribe index --check` names it too.
+    for other in _other_day_files(cfg, result.agent, when, log.session_id, result.errors):
+        result.errors.append(
+            f"session also has a block in {other.name}, which this write did not supersede"
+        )
+    # A digest that was produced and NOT written. `write_block` returns False for a turn that
     # is already final, and the one thing that must never happen quietly is for that to swallow
     # a real summary -- it did, 30 times, and the run totals said `summarized` each time. The
     # replace path should make this unreachable for a stand-in; counting it is how we find out
@@ -855,19 +970,34 @@ def process_session(
                 "edits": edits,
                 "sha256_before": None,
             }
-        _after_write(cfg, result, path, _last_turn_uuid(log), correction)
+        _after_write(cfg, result, path, _last_turn_uuid(log), correction, wrote.superseded)
     if cfg.qc_run_record and qc is not None:
         result.run_record_error = runrecord.append(
             cfg.qc_run_record,
             _run_record(result, row, log, outcome, provider, qc, digest=_relative(cfg, path)),
         )
 
-    if outcome.ok:
+    if outcome.ok or outcome.pending:
+        # A pending block is marked summarized, not provisional, deliberately. Provisional
+        # spends `MAX_PROVISIONAL_ATTEMPTS` and is re-offered every sweep, and a session that
+        # is waiting on a two-hour CI run would burn the budget re-rendering the same rollup.
+        # It needs no retry: when the work reports back the transcript grows, the unread
+        # bytes re-offer it, and its new block replaces this one.
+        #
+        # **Except its final turn, which is left unprocessed.** A session is re-summarized
+        # only for a turn it has not processed, and a notification that arrives mid-turn adds
+        # bytes to the SAME turn -- so a pending block whose turn was marked done would never
+        # be replaced. Leaving that one turn out is what makes the growth count. A session
+        # killed while waiting is not re-offered (its offset moved) and keeps the rollup-only
+        # block, which is the honest record of a run that never finished.
+        done_turns = pending
+        if outcome.pending:
+            done_turns = [t for t in pending if t != _last_turn_uuid(log)]
         store.mark_summarized(
             row.transcript_path,
             offset=st.raw_file_bytes,
             last_turn_uuid=_last_turn_uuid(log),
-            turn_uuids=pending,
+            turn_uuids=done_turns,
             session_id=log.session_id,
         )
     else:
@@ -885,6 +1015,29 @@ def process_session(
         )
         result.errors.append(f"attempt {attempts}: {outcome.reason}")
     return result
+
+
+def _other_day_files(
+    cfg: Config, agent: str, when: datetime, session_id: str, errors: list[str]
+) -> list[Path]:
+    """The day before's and the day after's file, where either holds a block for the session.
+
+    A file that is there and cannot be read is recorded in `errors`: "could not look" is not
+    "no stray block" (security baseline OV-39).
+    """
+    out = []
+    for delta in (-1, 1):
+        other = daily_path(cfg.output_dir, agent, when + timedelta(days=delta))
+        try:
+            text = other.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append(f"could not check {other.name} for another block: {exc}")
+            continue
+        if session_blocks(text, session_id):
+            out.append(other)
+    return out
 
 
 def _relative(cfg: Config, path: Path) -> str:
@@ -912,6 +1065,7 @@ def _run_record(
     the transcript's last write before it aged out, which is still the true lag.
     """
     lag = round(datetime.now(UTC).timestamp() - row.mtime_ns / 1e9, 1) if row.mtime_ns else None
+    llm = result.render_mode in headless.LLM_MODES
     return {
         "record_version": runrecord.RECORD_VERSION,
         "ts": runrecord._now(),
@@ -919,8 +1073,10 @@ def _run_record(
         "graded_by": __version__,
         "scribe_version": __version__,
         "prompt_sha256": prompt_sha256(),
-        "provider": outcome.provider or provider.name,
-        "model_requested": getattr(provider, "model", "") or None,
+        # No provider for a block no model wrote. "mistral" on a verbatim record would claim a
+        # call that never happened.
+        "provider": (outcome.provider or provider.name) if llm else None,
+        "model_requested": (getattr(provider, "model", "") or None) if llm else None,
         # What the response said, or null. Never back-filled from the request: see
         # `Completion.model_resolved`.
         "model_resolved": outcome.model_resolved or None,
@@ -965,6 +1121,12 @@ def _run_record(
         "errors": len(result.errors),
         **qc,
         "ticket_refs_rewritten": result.ticket_refs_rewritten,
+        "render_mode": result.render_mode,
+        "closing_chars": result.closing_chars,
+        "closing_source": result.closing_source,
+        "closing_reason": result.closing_reason,
+        "pending": result.pending,
+        "superseded_blocks": result.superseded_blocks,
         "lag_s": lag,
     }
 
@@ -1075,7 +1237,11 @@ def _provider_answered(result: SessionResult) -> bool:
 
     A session with nothing to summarize, or one whose extraction failed, never called the
     provider, so it says nothing about whether the provider is up and cannot clear a suspect.
+    Nor does a headless block: `verbatim` is `summarized` with no call made, and letting it
+    clear a suspect would re-run a deferred session onto the provisional path during an outage.
     """
+    if result.render_mode not in headless.LLM_MODES:
+        return False
     return result.summarized or result.suppressed or result.placeholder
 
 
@@ -1103,6 +1269,12 @@ def summarize_run(results: list[SessionResult]) -> dict:
         #: Non-zero means summaries were LOST, not merely degraded. Treat it as loud.
         "placeholders": sum(1 for r in results if r.placeholder),
         "discarded": sum(1 for r in results if r.discarded),
+        #: Headless sessions (vikunja#1347), by what they got. `verbatim` sessions are also in
+        #: `summarized`; `pending` is the fourth term of the written identity.
+        "verbatim": sum(1 for r in results if r.render_mode == headless.MODE_VERBATIM),
+        "verbatim_fallback": sum(1 for r in results if r.render_mode == headless.MODE_FALLBACK),
+        "pending": sum(1 for r in results if r.pending),
+        "superseded_blocks": sum(r.superseded_blocks for r in results),
         #: Sessions with at least one truncated field, and the total items dropped across the
         #: sweep. Both, because they answer different questions: the first is how often the
         #: declared cap fails to hold, the second is by how much.

@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -58,6 +59,9 @@ ANCHOR_RE = re.compile(
 PROVISIONAL_PLACEHOLDER = "placeholder"
 #: A block whose body is the contamination guard's suppression note — `render_suppressed`.
 PROVISIONAL_SUPPRESSED = "suppressed"
+#: A headless session's rollup-only block while background work it started is outstanding
+#: (vikunja#1347). Replaced by the block the session gets once it finishes.
+PROVISIONAL_PENDING = "pending"
 #: Written after the body. Its presence is what proves the block was written whole --
 #: see `existing_turns`.
 TERMINATOR_RE = re.compile(r"(?m)^<!--[ \t]*/scribe[ \t]+turn:(\S+)[ \t]*-->[ \t]*$")
@@ -276,6 +280,133 @@ def replace_block(
     return True
 
 
+#: The `## Session HH:MM` heading `append_block` writes above an anchor, with the blank line
+#: after it. Matched immediately before an anchor when a superseded block is removed, so the
+#: heading goes with it and no orphan heading is left behind.
+_HEADING_BEFORE_RE = re.compile(r"(?:^|\n)## Session [0-9]{2}:[0-9]{2}\n\n\Z")
+
+
+@dataclass
+class Written:
+    """What `write_block` did. `written` is `append_block`'s old boolean."""
+
+    written: bool = False
+    #: Turn uuids of earlier blocks for the same session that this block replaced or removed.
+    #: Excludes the block's own turn, which a provisional same-turn replace has always reused.
+    superseded: list[str] = field(default_factory=list)
+
+
+def session_blocks(text: str, session_id: str) -> list[tuple[re.Match[str], re.Match[str]]]:
+    """Every complete block in `text` belonging to `session_id`, in file order."""
+    return [(a, c) for a, c in paired_blocks(text) if a.group(1) == session_id]
+
+
+def _supersede(
+    path: Path, text: str, blocks: list[tuple[re.Match[str], re.Match[str]]], new_block: str
+) -> None:
+    """Put `new_block` where the session's FIRST block is, and remove the rest.
+
+    The first, so the session keeps its place in the day: blocks are appended in the order
+    sessions were first written, and that is the order a reader expects. The heading above it
+    stays, as `replace_block` leaves it -- every block of a session is filed under the same
+    `started_at`, so it is the same heading. Each removed block takes its own heading and the
+    blank lines after it, so the file reads as if only the one block was ever written.
+
+    Spans are applied from the end, so no splice moves an offset not yet used. One
+    `atomic_replace`, so a crash leaves the old file or the new one.
+
+    **Concurrency: this is read-modify-replace with no lock of its own.** A write to the file
+    between `_read` and the rename would be lost. That is safe only because every writer of the
+    digest corpus runs under the sweep's lock -- the cron's `flock -n` around `scribe run`, and
+    `scribe correct --apply`'s `flock(2)` on the same file (invariant 20) -- exactly the
+    premise `replace_block` and `recover`'s stamping already rest on. A new writer of daily
+    files must take that lock. Likewise `os.replace` replaces a symlink or hardlink at `path`
+    rather than writing through it, which is intended here: the daily files live in scribe's
+    own 0700 `output_dir` and are never links (security baseline FW-17/FW-33, 2026-11-01).
+    """
+    first_start, first_end = blocks[0][0].start(), blocks[0][1].end()
+    updated = text
+    for a, c in reversed(blocks[1:]):
+        start, end = a.start(), c.end()
+        heading = _HEADING_BEFORE_RE.search(updated, 0, start)
+        if heading is not None:
+            start = heading.start() + (1 if updated[heading.start()] == "\n" else 0)
+        while end < len(updated) and updated[end] == "\n":
+            end += 1
+        updated = updated[:start] + updated[end:]
+    updated = updated[:first_start] + new_block.rstrip("\n") + updated[first_end:]
+    atomic_replace(path, updated.rstrip("\n") + "\n")
+
+
+#: Provisional kinds that hold no account of the session, only of a failure to write one.
+_STAND_INS = frozenset({PROVISIONAL_PLACEHOLDER, PROVISIONAL_SUPPRESSED})
+
+
+def write_block(
+    path: Path,
+    *,
+    body: str,
+    session_id: str,
+    turn_uuid: str,
+    transcript_path: str,
+    when: datetime,
+    provisional: str = "",
+    supersede: bool = False,
+) -> Written:
+    """`append_block`, plus the supersede path, reporting what it replaced.
+
+    **`supersede=True` means "this block covers the whole session".** It is what the sweep
+    passes, because a sweep always summarizes the session's full extract: `summarize_log` and
+    the headless renderer both take every turn, so a later block for a session is a cumulative
+    re-summary of everything an earlier one said. Measured over 681 sessions since 2026-10-01:
+    46 had 2-5 blocks, and in all 46 every later block restarted at the session's start time.
+    Leaving the earlier block beside it put two versions of the same work in the index --
+    developer session 808a51cf said 136 tests in one and 198 in the other (vikunja#1347).
+
+    So the new block replaces the session's earlier blocks instead of being appended after
+    them. A final block for THIS turn still refuses the write: nothing has changed since it was
+    written, and the rule that a final digest is never overwritten by a block for the same turn
+    stands.
+
+    **A stand-in never replaces a real digest.** A `placeholder` or `suppressed` block says the
+    summary failed, not what the session did, so when the session already has a final block it
+    is appended beside it, as before 0.18.0, and the real digest stays until a final (or
+    `pending`) block replaces both. Without this, a provider failure on a second sweep put a
+    placeholder where the digest was (audit F-02, 2026-11-01). A `pending` block does supersede:
+    it is a rollup of the whole session, rendered because the session is running again.
+    """
+    secure_dir(path.parent)
+    if turn_uuid in existing_turns(path):
+        return Written(False)
+    if supersede:
+        text = _read(path)
+        blocks = session_blocks(text, session_id)
+        if provisional in _STAND_INS and any(not a.group(4) for a, _c in blocks):
+            blocks = []
+        if blocks:
+            new_block = _block(
+                body=body,
+                session_id=session_id,
+                turn_uuid=turn_uuid,
+                transcript_path=transcript_path,
+                provisional=provisional,
+            )
+            _supersede(path, text, blocks, new_block)
+            gone = [a.group(2) for a, _c in blocks if a.group(2) != turn_uuid]
+            return Written(True, list(dict.fromkeys(gone)))
+    return Written(
+        append_block(
+            path,
+            body=body,
+            session_id=session_id,
+            turn_uuid=turn_uuid,
+            transcript_path=transcript_path,
+            when=when,
+            provisional=provisional,
+        )
+    )
+
+
 def append_block(
     path: Path,
     *,
@@ -293,8 +424,9 @@ def append_block(
 
     A turn already on disk as a **provisional** block is replaced rather than skipped — that
     is the write-side half of making a lost digest recoverable. Note the ordering: the final
-    check comes first, so a real digest is never overwritten by anything, including by a later
-    placeholder for the same turn.
+    check comes first, so a real digest is never overwritten by a block for the same turn,
+    including a later placeholder. (`write_block`'s supersede path replaces a session's earlier
+    blocks with a later turn's, but never a final block with a stand-in.)
     """
     # Digests are derived from 0600 transcripts and must not be published wider than
     # their source. See paths.py.

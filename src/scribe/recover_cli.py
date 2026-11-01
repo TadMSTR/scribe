@@ -245,9 +245,12 @@ def superseded_turns(cfg: Config, store: Store, found: list[Found]) -> set[str]:
     """Of `found`, the stand-ins whose material has ALREADY reached a written digest.
 
     A session can leave stand-ins on **more than one turn**, and only one of them is ever
-    reachable. A run writes exactly one block, at `_last_turn_uuid`, and `append_block`
-    replaces only the block whose uuid matches -- so a placeholder on an earlier turn cannot
-    be rewritten by any later run, nor by `--apply`, which only resets state. Counted naively
+    reachable. A run writes exactly one block, at `_last_turn_uuid`, and before 0.18.0
+    `append_block` replaced only the block whose uuid matched -- so a placeholder on an earlier
+    turn could not be rewritten by any later run, nor by `--apply`, which only resets state.
+    (Since 0.18.0 a later FINAL render supersedes every earlier block of the session,
+    `writeback.write_block`; a later stand-in does not. Until that final render lands, the
+    earlier placeholder is still on disk, so this counting still applies.) Counted naively
     it is unrepaired loss forever, and the daily detector pages every morning for something no
     action can fix: the vikunja#398/#848 shape the detector exists to avoid. (vikunja#886.)
 

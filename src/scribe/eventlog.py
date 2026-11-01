@@ -35,7 +35,16 @@ from collections.abc import Iterator
 from dataclasses import MISSING
 from pathlib import Path
 
-from .extract.models import EventLog, Rollup, Stats, ToolEvent, Turn
+from .extract.models import (
+    SCHEMA_VERSION,
+    Compaction,
+    EventLog,
+    Rollup,
+    Stats,
+    Subagent,
+    ToolEvent,
+    Turn,
+)
 from .paths import secure_create, secure_dir
 
 #: A session id usable as a filename verbatim. Deliberately narrower than "no separators":
@@ -271,6 +280,16 @@ def log_from_dict(data: dict) -> EventLog:
     to report what it did. Dropping them there would produce a digest that looks entirely
     normal over a session the state DB then believes it has read nothing of.
     """
+    version = data.get("schema_version", 1)
+    if isinstance(version, int) and not isinstance(version, bool) and version > SCHEMA_VERSION:
+        # The models module has always said a reader should refuse a version it does not
+        # know, and nothing did. A newer log read by an older build would silently lose the
+        # fields it cannot see -- and with schema 2 those are the ones whose absence means
+        # "not recorded", so the loss would read as a fact.
+        raise EventLogError(
+            f"event log schema_version {version} is newer than this build understands "
+            f"({SCHEMA_VERSION}); upgrade scribe"
+        )
     turns = []
     for t in data.get("turns") or []:
         turn: Turn = _rebuild(Turn, t, rollup=_rebuild(Rollup, t.get("rollup") or {}), events=[])
@@ -283,7 +302,31 @@ def log_from_dict(data: dict) -> EventLog:
         turns=turns,
         rollup=_rebuild(Rollup, data.get("rollup") or {}),
         stats=_rebuild(Stats, data.get("stats") or {}),
+        subagents=_records(Subagent, data, "subagents"),
+        compactions=_records(Compaction, data, "compactions"),
+        background_pending=_strings(data, "background_pending"),
     )
+
+
+def _records(cls, data: dict, key: str) -> list | None:
+    """A schema-2 list of records, or None when the log predates it or never recorded it.
+
+    **None, never `[]`.** A version-1 log was written before scribe looked for subagents or
+    compactions, so an empty list would assert the session had none -- a claim the log
+    cannot support. `scribe session` reports None as "not recorded".
+    """
+    raw = data.get(key)
+    if not isinstance(raw, list):
+        return None
+    return [_rebuild(cls, item) for item in raw if isinstance(item, dict)]
+
+
+def _strings(data: dict, key: str) -> list[str] | None:
+    """A schema-2 list of strings, or None when it was not recorded. See `_records`."""
+    raw = data.get(key)
+    if not isinstance(raw, list):
+        return None
+    return [str(x) for x in raw]
 
 
 def load_eventlog(path: str | Path) -> EventLog:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from pathlib import Path
 
 from .models import (
@@ -31,7 +32,9 @@ from .models import (
     KIND_OTHER,
     KIND_SEARCH,
     KIND_WEB,
+    Compaction,
     EventLog,
+    Subagent,
     ToolEvent,
     Turn,
 )
@@ -117,6 +120,49 @@ _MCP_TARGET_KEYS = (
     "project_id",
     "name",
 )
+
+
+#: The parts of a `<task-notification>` the subagent and background-task fields read. Matched on
+#: the RAW text, before `Redactor.digest` can cut it, and only the ids and the status are kept.
+_NOTIFY_TASK_RE = re.compile(r"<task-id>([A-Za-z0-9_-]{1,64})</task-id>")
+_NOTIFY_TOOL_RE = re.compile(r"<tool-use-id>([A-Za-z0-9_-]{1,128})</tool-use-id>")
+_NOTIFY_STATUS_RE = re.compile(r"<status>([a-z_-]{1,32})</status>")
+#: The result-text form of a subagent's id, for a result without a structured `agentId`.
+_AGENT_ID_TEXT_RE = re.compile(r"\bagentId:\s*([A-Za-z0-9]{1,64})\b")
+#: An id used as a path component. No separators, no dots, so it cannot leave the directory.
+_SAFE_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+
+
+def _from_harness(obj: dict) -> bool:
+    """Whether a record is a task-notification the HARNESS wrote, not text that looks like one.
+
+    The `<task-notification>` syntax is plain text, so a typed or dispatched prompt can carry
+    it. Believed, it could mark background work done (rendering a waiting session's progress
+    note as its closing statement) or forge a subagent's status (security baseline IV-32,
+    2026-11-01). Claude Code marks its own: a user record's `origin.kind`, a queued command's
+    `commandMode`, both `task-notification` -- measured on every one of 257 records across 300
+    recent transcripts. A `queued_command` from a peer (`commandMode: prompt`) is still input
+    to the turn; it is just never read as a notification.
+    """
+    origin = obj.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") == "task-notification":
+        return True
+    att = obj.get("attachment")
+    return isinstance(att, dict) and att.get("commandMode") == "task-notification"
+
+
+def _notification(text: str) -> tuple[str, str, str] | None:
+    """`(task_id, tool_use_id, status)` from a `<task-notification>`, or None if it is not one."""
+    if "<task-notification>" not in text:
+        return None
+    task = _NOTIFY_TASK_RE.search(text)
+    tool = _NOTIFY_TOOL_RE.search(text)
+    status = _NOTIFY_STATUS_RE.search(text)
+    return (
+        task.group(1) if task else "",
+        tool.group(1) if tool else "",
+        status.group(1) if status else "",
+    )
 
 
 def _is_injected(text: str) -> bool:
@@ -218,6 +264,11 @@ def _classify(tool: str, args: dict) -> tuple[str, str]:
                 return KIND_MCP, str(args[key])
         return KIND_MCP, ""
     return KIND_OTHER, ""
+
+
+#: Task-queue tools whose `status` argument the headless rollup reports (`ToolEvent.task_status`).
+_TASK_STATUS_TOOLS = ("update_task", "submit_task")
+_TASK_STATUS_RE = re.compile(r"\A[a-z_-]{1,32}\Z")
 
 
 def _args_summary(args: dict, skip_key: str | None) -> str:
@@ -358,6 +409,54 @@ def extract(
     current: Turn | None = None
     pending: dict[str, ToolEvent] = {}
     seq = 0
+    subagents: list[Subagent] = []
+    compactions: list[Compaction] = []
+    #: tool_use id -> the Subagent it launched, so its result and notification can find it.
+    by_tool_use: dict[str, Subagent] = {}
+    #: tool_use ids of `run_in_background` Bash calls, until their result names the task id.
+    bg_bash: set[str] = set()
+    #: Background task id -> index of the turn that launched it.
+    bg_launched: dict[str, int] = {}
+    bg_done: set[str] = set()
+
+    def _notified(obj: dict, text: str) -> None:
+        """Record what a task-notification says: the task is done, and how it ended."""
+        if not _from_harness(obj):
+            return
+        note = _notification(text)
+        if note is None:
+            return
+        task_id, tool_use_id, status = note
+        if task_id:
+            bg_done.add(task_id)
+        sub = by_tool_use.get(tool_use_id)
+        if sub is not None and status:
+            sub.status = red.digest(status, 32)
+
+    def _launched(tool_use_id: str, block: dict, tool_use_result: object) -> None:
+        """Read a subagent's id and status, or a background Bash task's id, off its result."""
+        tur = tool_use_result if isinstance(tool_use_result, dict) else {}
+        sub = by_tool_use.get(tool_use_id)
+        if sub is not None:
+            agent_id = str(tur.get("agentId", "") or "")
+            if not agent_id:
+                # The LAST match: the harness writes its `agentId:` line after the subagent's
+                # own output, which could carry a decoy line of the same shape (baseline IV-73).
+                found = _AGENT_ID_TEXT_RE.findall(_result_text(block, None))
+                agent_id = found[-1] if found else ""
+            sub.agent_id = red.digest(agent_id, 64)
+            asynchronous = bool(tur.get("isAsync")) or tur.get("status") == "async_launched"
+            sub.background = sub.background or asynchronous
+            if sub.status == "":
+                own = red.digest(str(tur.get("status", "") or ""), 32)
+                sub.status = "running" if asynchronous else own
+            if asynchronous and agent_id:
+                bg_launched.setdefault(agent_id, sub.turn_index)
+            return
+        if tool_use_id in bg_bash:
+            task = str(tur.get("backgroundTaskId", "") or "")
+            if task and current is not None:
+                bg_launched.setdefault(task, current.index)
 
     def _ensure_turn(uuid: str, ts: str) -> Turn:
         """Open a turn for assistant activity that precedes any real user message.
@@ -392,7 +491,12 @@ def extract(
 
             if not log.session_id and obj.get("sessionId"):
                 log.session_id = str(obj["sessionId"])
-            for attr, key in (("cwd", "cwd"), ("git_branch", "gitBranch"), ("version", "version")):
+            for attr, key in (
+                ("cwd", "cwd"),
+                ("git_branch", "gitBranch"),
+                ("version", "version"),
+                ("entrypoint", "entrypoint"),
+            ):
                 if not getattr(log, attr) and obj.get(key):
                     setattr(log, attr, str(obj[key]))
 
@@ -403,17 +507,48 @@ def extract(
                 log.ended_at = ts
 
             rtype = obj.get("type")
+            attachment = obj.get("attachment")
+            if (
+                rtype == "attachment"
+                and isinstance(attachment, dict)
+                and attachment.get("type") == "queued_command"
+            ):
+                # A mid-turn `<task-notification>`: the harness queues it as an attachment rather
+                # than starting a turn, and the turn that is running consumes it. So it is input
+                # to THAT turn, never a new one (vikunja#1347's finding 1). Every other attachment
+                # type is harness bookkeeping and stays dropped, below.
+                prompt = attachment.get("prompt")
+                text = prompt if isinstance(prompt, str) else ""
+                if text.strip():
+                    st.queued_commands += 1
+                    st.raw_content_chars += len(text)
+                    _notified(obj, text)
+                    turn = _ensure_turn(str(obj.get("uuid", "")), ts)
+                    # SECURITY[accepted]: retention widening -- the event log, kept indefinitely,
+                    # now holds mid-turn queued text: background subagents' <result> text and
+                    # peer prompts, through the redactor. The build's purpose, approved by the
+                    # operator. Audit: 2026-11-01/scribe-headless-digest-2026-11 (F-03b).
+                    turn.queued_input.append(red.digest(text, text_chars))
+                continue
+            if rtype == "system" and obj.get("subtype") == "compact_boundary":
+                meta = obj.get("compactMetadata")
+                meta = meta if isinstance(meta, dict) else {}
+                compactions.append(
+                    Compaction(
+                        ts=red.digest(ts, 64),
+                        turn_index=current.index if current is not None else 0,
+                        trigger=red.digest(str(meta.get("trigger", "") or ""), 32),
+                        pre_tokens=_int(meta.get("preTokens")),
+                        post_tokens=_int(meta.get("postTokens")),
+                    )
+                )
+                continue
             if rtype not in ("user", "assistant"):
-                # Claude Code writes TWO records at a compact boundary, and this filter is
-                # where the first one goes: `type: system, subtype: compact_boundary`. Its
-                # payload is a fixed string ("Conversation compacted") plus a
-                # `compactMetadata` dict — a marker, not conversation — so dropping it loses
-                # no session content and the drop is deliberate, not incidental.
-                #
-                # It is the only record that marks WHERE the boundary fell. If the compact
-                # summary is ever captured as a first-class event-log field (deferred in
-                # vikunja#893), this is the record that supplies the position, and this
-                # branch is what has to change. The second record is handled below.
+                # Claude Code writes TWO records at a compact boundary. The first,
+                # `type: system, subtype: compact_boundary`, is a marker, not conversation, and
+                # since 0.18.0 the branch above records its position and token counts as a
+                # `Compaction` (the field vikunja#893 deferred). Its payload never becomes text.
+                # The second record, the recap, is handled below.
                 #
                 # Deliberately NOT covered by a test. One was written and removed 2026-09-18:
                 # it could not be made to fail. Widening this filter to admit `type: system`
@@ -459,10 +594,12 @@ def extract(
                 if results:
                     for block in results:
                         st.tool_results += 1
-                        ev = pending.pop(str(block.get("tool_use_id", "")), None)
+                        tool_use_id = str(block.get("tool_use_id", ""))
+                        ev = pending.pop(tool_use_id, None)
                         if ev is None:
                             st.orphan_results += 1
                             continue
+                        _launched(tool_use_id, block, obj.get("toolUseResult"))
                         is_err = block.get("is_error")
                         body = _result_text(block, obj.get("toolUseResult"))
                         ev.result_chars = len(body)
@@ -488,6 +625,7 @@ def extract(
                 if _is_injected(text):
                     st.skipped_injected += 1
                     continue
+                _notified(obj, text)
 
                 st.raw_content_chars += len(text)
                 current = Turn(
@@ -547,11 +685,40 @@ def extract(
                         target=red.digest(target, target_chars),
                         args_digest=red.digest(_args_summary(args, skip), args_chars),
                     )
+                    status = args.get("status")
+                    if (
+                        tool.endswith(_TASK_STATUS_TOOLS)
+                        and isinstance(status, str)
+                        and _TASK_STATUS_RE.match(status)
+                    ):
+                        ev.task_status = status
                     seq += 1
                     turn.events.append(ev)
-                    pending[str(block.get("id", ""))] = ev
+                    tool_use_id = str(block.get("id", ""))
+                    pending[tool_use_id] = ev
+                    if tool in ("Agent", "Task"):
+                        sub = Subagent(
+                            turn_index=turn.index,
+                            seq=ev.seq,
+                            subagent_type=red.digest(str(args.get("subagent_type", "") or ""), 120),
+                            description=red.digest(str(args.get("description", "") or ""), 300),
+                            background=bool(args.get("run_in_background")),
+                        )
+                        subagents.append(sub)
+                        by_tool_use[tool_use_id] = sub
+                    elif tool == "Bash" and args.get("run_in_background"):
+                        bg_bash.add(tool_use_id)
 
     log.turns = turns
+    log.subagents = subagents
+    log.compactions = compactions
+    _locate_subagent_logs(log, p)
+    final = turns[-1].index if turns else -1
+    log.background_pending = [
+        red.digest(task, 64)
+        for task, turn_index in bg_launched.items()
+        if turn_index == final and task not in bg_done
+    ]
     # Re-resolved now that the records have been read. `cwd` is exact where the flattened
     # directory name is ambiguous, and it is only available after parsing -- so the
     # assignment above is a provisional one that this supersedes whenever it can.
@@ -559,6 +726,44 @@ def extract(
     _build_rollups(log)
     _finalise(log, red, max_session_chars)
     return log
+
+
+def _int(value: object) -> int:
+    """An integer field from a record, or 0. Never quotes what it could not parse."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: `json.loads` accepts `Infinity`, and `int(inf)` raises it.
+        return 0
+
+
+def _locate_subagent_logs(log: EventLog, transcript: Path) -> None:
+    """Fill in where each subagent's transcript lives, and whether it is there now.
+
+    `<project>/<session_id>/subagents/agent-<agent_id>.jsonl`, next to the parent transcript.
+    Only a stat: the file is never opened (subagent transcripts are kept, not digested -- see
+    `discovery.iter_transcripts`). Both ids come from the transcript, so either one failing
+    the bare-identifier check leaves the path empty rather than built from it.
+    """
+    sid = log.session_id or transcript.stem
+    if not _SAFE_ID_RE.match(sid):
+        return
+    for sub in log.subagents or []:
+        if not _SAFE_ID_RE.match(sub.agent_id):
+            continue
+        path = transcript.parent / sid / "subagents" / f"agent-{sub.agent_id}.jsonl"
+        sub.log_path = str(path)
+        # An explicit stat, not `Path.is_file()`: from Python 3.14 `is_file` returns False on
+        # ANY OSError, so a permission failure would again be recorded as "absent" (audit F-05,
+        # round-2 baseline SH-15). Only "no such file" is absence; anything else is unknown.
+        try:
+            sub.log_exists = stat.S_ISREG(os.stat(path).st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            sub.log_exists = False
+        except (OSError, ValueError):
+            sub.log_exists = None
 
 
 def _build_rollups(log: EventLog) -> None:

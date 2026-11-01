@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .extract.models import EventLog
-from .summarize.render import TRUNCATION_RE, WITHHELD_RE
+from .summarize.render import TRUNCATION_RE, VERBATIM_RE, WITHHELD_RE
 from .writeback import ANCHOR_RE, TERMINATOR_RE
 
 #: Below this share of the session's non-trivial events, a digest is a FAIL rather than a
@@ -394,7 +394,7 @@ def grounding_terms(log: EventLog) -> dict[str, set[str]]:
 #: ones `strip_scribe_markers` removes before grading, for the same reason: they are written by
 #: scribe, not asserted by the model, so nothing in them is a claim to correct. One tuple for
 #: both, so a new marker cannot reach one and miss the other.
-_MARKER_RES = (ANCHOR_RE, TERMINATOR_RE, TRUNCATION_RE, WITHHELD_RE)
+_MARKER_RES = (ANCHOR_RE, TERMINATOR_RE, TRUNCATION_RE, WITHHELD_RE, VERBATIM_RE)
 
 
 def strip_scribe_markers(text: str) -> str:
@@ -422,6 +422,12 @@ def strip_scribe_markers(text: str) -> str:
 
     `WITHHELD_RE` likewise: the contamination guard's marker for dropped items is scribe's
     prose (vikunja#1216), and grading it would put a finding on every degraded digest.
+
+    `VERBATIM_RE` removes a REGION, not a line: a headless block's closing statement is the
+    agent's own message, quoted (vikunja#1347). It is not model output scribe asked for, so
+    it is not graded, and since the region is replaced whole, nothing inside it -- a path, a
+    `#N`, a backticked command -- is read as a claim. The rollup beside it is graded as usual,
+    and it is grounded by construction because it is built from the event log.
     """
     for rx in _MARKER_RES:
         text = rx.sub(" ", text)

@@ -37,6 +37,7 @@ from .qc_report import (
     build,
     parse_ts,
 )
+from .summarize.headless import LLM_MODES
 
 #: A crash mid-append can tear the last line, so a small number of bad lines is survivable.
 #: More than this share of the file (and more than one line) is a record the report cannot
@@ -256,7 +257,8 @@ def _section(label: str, s: dict) -> list[str]:
         lines.append(f"  !! {s['discarded']} digest(s) produced but not written")
     if s["post_render_redactions"]:
         # Only `model-output` positively says extraction was fine, so it alone goes unflagged.
-        # `extraction-miss` means the model was shown a secret, and `undetermined`,
+        # `extraction-miss` means a secret got past extraction (and on the LLM path the model
+        # was shown it; a headless block calls none), and `undetermined`,
         # `inconclusive` and `unrecorded` cannot rule that out: `inconclusive` is what a real
         # secret under 8 characters reports (audit F-02, scribe-redaction-guard-2026-10).
         # SECURITY[deferred]: no cause changes the exit code, so even `extraction-miss` never
@@ -269,7 +271,7 @@ def _section(label: str, s: dict) -> list[str]:
         line = f"{s['post_render_redactions']} post-render redaction(s) by cause: {causes}"
         notes = []
         if missed:
-            notes.append(f"{missed} matched a value in the event log the model was shown")
+            notes.append(f"{missed} matched a value in the event log (extraction missed it)")
         if open_:
             notes.append(f"{open_} cannot rule a leak out")
         if notes:
@@ -286,6 +288,17 @@ def _print(report: dict, code: int) -> None:
     if report["previous"] is not None:
         for line in _section("previous", report["previous"]):
             print(line)
+    modes = report.get("render_modes") or {}
+    if set(modes) - {"llm"}:
+        # Said whenever a headless mode is present, because it changes what the lines above
+        # count: they are model-written blocks only.
+        headless = sum(m["sessions"] for k, m in modes.items() if k not in LLM_MODES)
+        print(f"  above: model-written blocks only; {headless} headless block(s) reported apart")
+        for mode, m in modes.items():
+            print(
+                f"  [render_mode={mode}] {m['sessions']} session(s), {m['graded']} graded, "
+                f"pass {_pct(m['pass_rate'])}, coverage {_pct(m['coverage_mean'])}"
+            )
     for grp in report["groups"]:
         key = ", ".join(
             f"{k}={(str(v)[:12] if k == 'prompt' and v else v)}" for k, v in grp["key"].items()

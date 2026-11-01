@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from scribe.__main__ import main as dispatch
+from scribe.extract.models import SCHEMA_VERSION
 from scribe.run_cli import main as run_main
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -183,7 +184,7 @@ def test_a_config_error_raised_during_the_sweep_exits_2(workspace, capsys, monke
 
 def test_dispatch_routes_extract(capsys) -> None:
     assert dispatch(["extract", str(FIXTURES / "transcript-structural.jsonl"), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["schema_version"] == 1
+    assert json.loads(capsys.readouterr().out)["schema_version"] == SCHEMA_VERSION
 
 
 def test_dispatch_routes_qc(capsys) -> None:

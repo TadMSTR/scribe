@@ -100,6 +100,9 @@ class Outcome:
     #: that this session's input is at fault. The pipeline leaves such a session pending and
     #: spends none of its retry budget; see `pipeline.process_session`.
     provider_unavailable: bool = False
+    #: A headless session still waiting on background work (`headless.MODE_PENDING`): a
+    #: rollup-only stand-in, written `provisional:pending`. Neither a digest nor a failure.
+    pending: bool = False
     errors: list[str] = field(default_factory=list)
 
 
