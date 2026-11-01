@@ -95,6 +95,7 @@ LIVE_FIELDS = {
     "closing_source",
     "closing_reason",
     "pending",
+    "superseded_blocks",
 }
 
 

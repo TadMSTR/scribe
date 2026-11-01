@@ -24,10 +24,12 @@ Three ways out of the verbatim path, each recorded in the run record as `render_
     ends on a background task's notification writes its real summary one turn earlier);
   * that is short too, or the contamination guard fires on it: the normal LLM digest
     (`verbatim-fallback-llm`, with `closing_reason` saying why);
-  * the final turn launched background work that has not reported back: the session is
-    waiting, so its last message is not a closing statement. A rollup-only block is written,
-    anchored `provisional:pending`, and the next sweep's block replaces it once the session
-    finishes (vikunja#1347 handoff question 1).
+  * the session is still mid-flight: the final turn launched background work that has not
+    reported back, or holds a tool call with no result (a foreground subagent running past the
+    quiet period). Its last message is not a closing statement, so a rollup-only block is
+    written, anchored `provisional:pending`, and the block the session gets once it finishes
+    replaces it (vikunja#1347 handoff question 1). See `pipeline` for why the final turn is
+    then left unprocessed.
 """
 
 from __future__ import annotations
@@ -59,8 +61,8 @@ CLOSING_LABEL = (
     "summary._"
 )
 PENDING_LABEL = (
-    "_Session still running: background work it started has not reported back, so there is "
-    "no closing statement yet. This block is replaced when the session finishes._"
+    "_Session still running: work it started has not reported back, so there is no closing "
+    "statement yet. This block is replaced when the session finishes._"
 )
 
 #: A line that would be structure in the daily file rather than text: a markdown heading,
@@ -228,6 +230,18 @@ def render_verbatim(log: EventLog, closing: Closing, *, heading: str = "") -> Ch
     )
 
 
+def outstanding(log: EventLog) -> list[str]:
+    """What the session is still waiting on: background task ids, then unanswered tool calls.
+
+    Read from the event log, so a replay sees what the extract saw. A version-1 log has no
+    `background_pending` and contributes only its unanswered calls.
+    """
+    waiting = list(log.background_pending or [])
+    if log.turns:
+        waiting += [f"{ev.tool} (no result)" for ev in log.turns[-1].events if ev.ok is None]
+    return waiting
+
+
 def render_pending(log: EventLog, *, heading: str = "") -> Choice:
     lines: list[str] = []
     if heading:
@@ -235,11 +249,11 @@ def render_pending(log: EventLog, *, heading: str = "") -> Choice:
     lines.append(PENDING_LABEL)
     rollup, truncated = _render_rollup(log)
     lines += rollup
-    waiting = ", ".join(f"`{t}`" for t in log.background_pending or [])
+    waiting = ", ".join(f"`{t}`" for t in outstanding(log))
     return Choice(
         mode=MODE_PENDING,
         markdown="\n".join(lines) + "\n",
-        reason=f"background work outstanding: {waiting}",
+        reason=f"still waiting on: {waiting}",
         truncated=truncated,
     )
 
@@ -252,7 +266,7 @@ def choose(log: EventLog, min_chars: int, *, heading: str = "") -> Choice:
     and the same index. On a fire the session falls back to the LLM digest, whose own guard
     and retry handle it. The post-render redaction in `pipeline` runs over either.
     """
-    if log.background_pending:
+    if outstanding(log):
         return render_pending(log, heading=heading)
     closing, why = closing_statement(log, min_chars)
     if closing is None:

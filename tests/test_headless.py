@@ -493,3 +493,63 @@ def test_qc_report_judges_model_written_blocks_and_reports_every_mode() -> None:
     assert report["current"]["pass_rate"] == 1.0
     assert set(report["render_modes"]) == {"llm", "verbatim", "verbatim-fallback-llm"}
     assert report["render_modes"]["verbatim"]["graded"] == 6
+
+
+def test_a_pending_block_is_replaced_once_the_work_reports_back(env) -> None:
+    """Handoff question 1: an early sweep's rollup-only block is provisional, and the sweep
+    after the session finishes writes the verbatim block in its place."""
+    recs = _session(pending=True)
+    cfg, store = env(recs, entrypoints=("sdk-cli",))
+    first = _run(cfg, store, Counting())
+    assert first.pending
+
+    recs += [
+        {
+            "type": "attachment",
+            "uuid": "att9",
+            "timestamp": "2026-11-01T01:30:00Z",
+            "sessionId": "sess-subagents",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "<task-notification>\n<task-id>bfakewait1</task-id>\n"
+                "<status>completed</status>\n</task-notification>",
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "a9",
+            "timestamp": "2026-11-01T01:30:10Z",
+            "sessionId": "sess-subagents",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": CLOSING}]},
+        },
+    ]
+    later = NOW + 10_000
+    (target,) = Path(cfg.project_globs[0].rstrip("/").rstrip("*")).rglob("*.jsonl")
+    _write(target, recs)
+    os.utime(target, (later - 3600, later - 3600))
+    (second,) = run_once(cfg, store, now=later, provider_factory=Counting)
+    assert second.render_mode == headless.MODE_VERBATIM
+    assert second.superseded_blocks == 0  # same final turn: the provisional is replaced in place
+    ((anchor, _c),) = paired_blocks(_digest(cfg))
+    assert anchor.group(4) is None
+    assert VERBATIM_START in _digest(cfg)
+
+
+def test_an_unanswered_call_in_the_final_turn_is_pending(tmp_path) -> None:
+    """A foreground subagent running past the quiet period: the transcript is silent, the
+    call has no result yet, and the text before it is a progress note, not a report."""
+    recs = _session()
+    for r in recs:
+        if r.get("uuid") == "a6":
+            r["message"]["content"].append(
+                {
+                    "type": "tool_use",
+                    "id": "tu_long",
+                    "name": "Agent",
+                    "input": {"subagent_type": "doc-drafter", "description": "long draft"},
+                }
+            )
+    log = extract(_write(tmp_path / "s.jsonl", recs))
+    choice = headless.choose(log, 800)
+    assert choice.mode == headless.MODE_PENDING
+    assert "Agent (no result)" in choice.reason

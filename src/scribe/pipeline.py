@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import __version__, corrections, runrecord
@@ -35,7 +35,7 @@ from .eventlog import (
 from .extract import extract
 from .extract.models import EventLog
 from .extract.redact import Redactor
-from .manifest import append, record_for_turn
+from .manifest import append, append_tombstone, record_for_turn, tombstone
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest, id_conflation_edits
 from .state import STATUS_FAILED, SessionRow, Store
 from .summarize import headless
@@ -47,9 +47,10 @@ from .writeback import (
     PROVISIONAL_PENDING,
     PROVISIONAL_PLACEHOLDER,
     PROVISIONAL_SUPPRESSED,
-    append_block,
     apply_frontmatter,
     daily_path,
+    session_blocks,
+    write_block,
 )
 
 
@@ -199,6 +200,10 @@ class SessionResult:
     #: waiting on background work. A fourth term in `written == summarized + suppressed +
     #: placeholder + pending`, with its own total (invariant 13).
     pending: bool = False
+    #: Earlier blocks for this session that this block replaced (`writeback.write_block`).
+    #: Not loss: each was a cumulative summary the new one covers. Counted so the claim that
+    #: the corpus holds one block per session is checkable sweep by sweep.
+    superseded_blocks: int = 0
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -249,6 +254,7 @@ class SessionResult:
             "closing_source": self.closing_source,
             "closing_reason": self.closing_reason,
             "pending": self.pending,
+            "superseded_blocks": self.superseded_blocks,
             "errors": self.errors,
         }
 
@@ -472,7 +478,12 @@ class AfterWrite:
     hook_error: str = ""
 
 
-def after_write(cfg: Config, path: Path, blocks: Sequence[tuple[str, dict | None]]) -> AfterWrite:
+def after_write(
+    cfg: Config,
+    path: Path,
+    blocks: Sequence[tuple[str, dict | None]],
+    superseded: Sequence[tuple[str, str, str]] = (),
+) -> AfterWrite:
     """Everything that follows blocks reaching disk in one file. None of it can unwrite them.
 
     `blocks` is `(turn_uuid, correction)` per block just written, where `correction` is the
@@ -488,7 +499,9 @@ def after_write(cfg: Config, path: Path, blocks: Sequence[tuple[str, dict | None
 
       1. **Frontmatter**, once per file, because it rewrites the file and a hook must be
          handed the finished file. It does not touch blocks, so no hash below moves.
-      2. **The manifest line**, per block, so `scribe index --check` stays clean.
+      2. **The manifest line**, per block, so `scribe index --check` stays clean -- preceded
+         by a tombstone for each block a superseding write removed, `(session_id,
+         removed_turn, new_turn)` in `superseded`, so the removed key stops being current.
       3. **The ledger record**, per corrected block, after the manifest because its
          `sha256_after` is that line's `sha256` -- the same hash, derived once.
       4. **The hook**, once per file, last: it is the notification and the manifest is the
@@ -501,6 +514,11 @@ def after_write(cfg: Config, path: Path, blocks: Sequence[tuple[str, dict | None
         except OSError as exc:
             done.frontmatter_error = str(exc)
     ledger = cfg.corrections_file()
+    for session_id, gone, by in superseded:
+        try:
+            append_tombstone(cfg, tombstone(cfg, path, session_id, gone, by))
+        except (OSError, ValueError) as exc:
+            done.manifest_errors[gone] = f"tombstone: {exc}"
     for turn_uuid, correction in blocks:
         rec: dict | None = None
         try:
@@ -542,13 +560,17 @@ def _after_write(
     path: Path,
     turn_uuid: str,
     correction: dict | None = None,
+    superseded: Sequence[str] = (),
 ) -> None:
     """`after_write` for the sweep's one block, folded into its `SessionResult`."""
-    done = after_write(cfg, path, [(turn_uuid, correction)])
+    gone = [(result.session_id, old, turn_uuid) for old in superseded]
+    done = after_write(cfg, path, [(turn_uuid, correction)], gone)
     if done.frontmatter_error:
         result.errors.append(f"frontmatter: {done.frontmatter_error}")
     result.manifest_appended = turn_uuid in done.manifest_records
-    result.manifest_error = done.manifest_errors.get(turn_uuid, "")
+    result.manifest_error = "; ".join(
+        err for key, err in done.manifest_errors.items() if key == turn_uuid or key in superseded
+    )
     result.correction_error = done.correction_errors.get(turn_uuid, "")
     result.hook, result.hook_error = done.hook, done.hook_error
 
@@ -869,7 +891,9 @@ def process_session(
     else:
         provisional = PROVISIONAL_PLACEHOLDER
 
-    result.written = append_block(
+    # `supersede=True`: this block was rendered from the whole session, so it replaces any
+    # earlier block for the session rather than sitting beside it (vikunja#1347).
+    wrote = write_block(
         path,
         body=markdown,
         session_id=log.session_id,
@@ -877,7 +901,18 @@ def process_session(
         transcript_path=row.transcript_path,
         when=when,
         provisional=provisional,
+        supersede=True,
     )
+    result.written = wrote.written
+    result.superseded_blocks = len(wrote.superseded)
+    # Superseding works within one daily file. A session is filed under its `started_at`, so
+    # every block it gets lands in the same file -- unless the transcript had no usable
+    # timestamp and the clock chose the date. Refuse loudly rather than leave a stale copy
+    # unremarked; `scribe index --check` names it too.
+    for other in _other_day_files(cfg, result.agent, when, log.session_id):
+        result.errors.append(
+            f"session also has a block in {other.name}, which this write did not supersede"
+        )
     # A digest that was produced and NOT written. `append_block` returns False for a turn that
     # is already final, and the one thing that must never happen quietly is for that to swallow
     # a real summary -- it did, 30 times, and the run totals said `summarized` each time. The
@@ -900,7 +935,7 @@ def process_session(
                 "edits": edits,
                 "sha256_before": None,
             }
-        _after_write(cfg, result, path, _last_turn_uuid(log), correction)
+        _after_write(cfg, result, path, _last_turn_uuid(log), correction, wrote.superseded)
     if cfg.qc_run_record and qc is not None:
         result.run_record_error = runrecord.append(
             cfg.qc_run_record,
@@ -911,15 +946,23 @@ def process_session(
         # A pending block is marked summarized, not provisional, deliberately. Provisional
         # spends `MAX_PROVISIONAL_ATTEMPTS` and is re-offered every sweep, and a session that
         # is waiting on a two-hour CI run would burn the budget re-rendering the same rollup.
-        # It needs no retry: when the background work reports back the transcript grows, the
-        # unread bytes re-offer it, and its new block replaces this one (`append_block`'s
-        # supersede path). A session killed while waiting keeps the rollup-only block, which
-        # is the honest record of a run that never finished.
+        # It needs no retry: when the work reports back the transcript grows, the unread
+        # bytes re-offer it, and its new block replaces this one.
+        #
+        # **Except its final turn, which is left unprocessed.** A session is re-summarized
+        # only for a turn it has not processed, and a notification that arrives mid-turn adds
+        # bytes to the SAME turn -- so a pending block whose turn was marked done would never
+        # be replaced. Leaving that one turn out is what makes the growth count. A session
+        # killed while waiting is not re-offered (its offset moved) and keeps the rollup-only
+        # block, which is the honest record of a run that never finished.
+        done_turns = pending
+        if outcome.pending:
+            done_turns = [t for t in pending if t != _last_turn_uuid(log)]
         store.mark_summarized(
             row.transcript_path,
             offset=st.raw_file_bytes,
             last_turn_uuid=_last_turn_uuid(log),
-            turn_uuids=pending,
+            turn_uuids=done_turns,
             session_id=log.session_id,
         )
     else:
@@ -937,6 +980,20 @@ def process_session(
         )
         result.errors.append(f"attempt {attempts}: {outcome.reason}")
     return result
+
+
+def _other_day_files(cfg: Config, agent: str, when: datetime, session_id: str) -> list[Path]:
+    """The day before's and the day after's file, where either holds a block for the session."""
+    out = []
+    for delta in (-1, 1):
+        other = daily_path(cfg.output_dir, agent, when + timedelta(days=delta))
+        try:
+            text = other.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if session_blocks(text, session_id):
+            out.append(other)
+    return out
 
 
 def _relative(cfg: Config, path: Path) -> str:
@@ -1025,6 +1082,7 @@ def _run_record(
         "closing_source": result.closing_source,
         "closing_reason": result.closing_reason,
         "pending": result.pending,
+        "superseded_blocks": result.superseded_blocks,
         "lag_s": lag,
     }
 
@@ -1172,6 +1230,7 @@ def summarize_run(results: list[SessionResult]) -> dict:
         "verbatim": sum(1 for r in results if r.render_mode == headless.MODE_VERBATIM),
         "verbatim_fallback": sum(1 for r in results if r.render_mode == headless.MODE_FALLBACK),
         "pending": sum(1 for r in results if r.pending),
+        "superseded_blocks": sum(r.superseded_blocks for r in results),
         #: Sessions with at least one truncated field, and the total items dropped across the
         #: sweep. Both, because they answer different questions: the first is how often the
         #: declared cap fails to hold, the second is by how much.
