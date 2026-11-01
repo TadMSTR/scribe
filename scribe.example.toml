@@ -22,6 +22,9 @@ output_dir    = "~/.local/share/scribe/digests"
 # search target, and ~39 MB of tool arguments would swamp the digest signal in every
 # semantic query. Nesting them under output_dir is what would quietly undo that.
 eventlog_dir  = "~/.local/share/scribe/eventlogs"
+# Claude Code's `cleanupPeriodDays` as you have set it, so `scribe session` can say when a
+# transcript will be deleted. Unset, it reports "unknown" rather than guessing.
+# transcript_retention_days = 30
 # YAML frontmatter (agent, date, source, session_ids) at the top of each daily digest, for
 # indexers that read it. The per-block anchors are unchanged either way.
 # emit_frontmatter = false
@@ -71,6 +74,14 @@ run_record = "~/.local/share/scribe/runs.jsonl"
 # sufficient and ~10x cheaper than `medium`. It also keeps the GPU free.
 provider = "mistral"
 model    = "mistral-small-latest"
+
+[summarize.headless]
+# Sessions nobody was watching get the agent's own closing statement, quoted verbatim, plus a
+# rollup built from the event log -- no provider call. See README, "Headless sessions".
+# Empty `entrypoints` (the default) turns the feature off. `sdk-cli` is `claude -p`.
+# entrypoints       = ["sdk-cli"]
+# agents            = []      # optional allowlist; empty = every agent
+# min_closing_chars = 800     # shorter: try the previous turn, then the LLM digest
 
 [summarize.daily]
 # Low volume (~1 per agent per day) and the one place cross-session synthesis matters.

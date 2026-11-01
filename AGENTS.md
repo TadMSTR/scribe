@@ -107,13 +107,17 @@ than by hand.
 `render_failure`'s placeholder and the contamination guard's suppression note both occupy a
 turn uuid like a real digest. Before `provisional:` existed, that made them permanent: the
 session retried, the model produced a digest, and `append_block` refused it as a duplicate.
-A final block is never overwritten; a provisional one always is. Note how this coexists with
+A final block is never overwritten by a block for the same turn; a provisional one always is.
+A block for a LATER turn of the same session supersedes every earlier one, final or not
+(`writeback.write_block(supersede=True)`, 0.18.0): a sweep summarizes the whole session, so
+the newer block covers the older, and leaving both indexed two versions of the same work. Note how this coexists with
 invariant 8 — `mark_provisional` *does* advance `last_offset`, because leaving it behind is
 what re-offered a failing session on every sweep forever. What says the session is not done is
 the absence of its turns from `processed_turns`, not the offset.
 
 **13. A counter that can only be inferred from a subtraction will not be noticed.**
-`written == summarized + suppressed + placeholder` exists because "13 lost sessions" once read
+`written == summarized + suppressed + placeholder + pending` exists (`pending` since 0.18.0:
+a headless session's rollup-only stand-in while it waits on work it started) because "13 lost sessions" once read
 as a clean backfill. The same mistake recurred one term along: a digest produced and *not*
 written showed up as `summarized` with `written: False`, and nothing subtracted those either.
 It has its own counter now (`discarded`). If you add an outcome, give it a name in the totals.
@@ -182,7 +186,10 @@ exclusion is kept structural rather than left to a pattern somebody has to maint
 `config.load` refuses a `manifest_path` inside either tree, and checks the *effective* path,
 so a default swallowed by an odd `eventlog_dir` is caught too.
 
-Every `index.jsonl` field except `written_at` is re-derivable from the digests, and
+Every `index.jsonl` field except `written_at` is re-derivable from the digests -- the one
+kind of line that is not is a **tombstone** (`provisional: "superseded"`, `superseded_by`),
+which records a block a superseding write removed, and which `manifest.read` drops so the
+removed key is neither current nor stale -- and
 `scribe index --check` is the proof: if you add a field, `manifest._record` must be able to
 compute it from what is on disk, or `--check` fails on every line forever. That is the
 failure `written_at` would have caused, and it is why `written_at` is excluded from the
