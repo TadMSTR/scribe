@@ -238,3 +238,16 @@ def test_a_session_whose_transcript_still_exists_is_left_to_scan(orphan_env, tmp
     store.reset_for_retry(tpath)
     assert orphaned(cfg, store) == []
     assert [r.transcript_path for r in scan(cfg, store, now=1_000_000.0)] == [tpath]
+
+
+def test_subagent_transcripts_are_not_discovered(tmp_path) -> None:
+    """vikunja#1347: the parent transcript is the record; `<sid>/subagents/*.jsonl` is not a
+    session. This fails if discovery ever switches to a recursive glob."""
+    project = tmp_path / "-home-user--claude-projects-writer"
+    sub = project / "sid-1" / "subagents"
+    sub.mkdir(parents=True)
+    (project / "sid-1.jsonl").write_text("{}\n")
+    (sub / "agent-a1b2c3.jsonl").write_text("{}\n")
+    (sub / "agent-a1b2c3.meta.json").write_text("{}\n")
+    found = [d.path for d in iter_transcripts((str(tmp_path / "*") + "/",))]
+    assert found == [project / "sid-1.jsonl"]

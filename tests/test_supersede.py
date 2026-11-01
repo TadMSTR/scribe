@@ -266,3 +266,78 @@ def test_a_block_left_in_the_next_days_file_is_reported(sweep_env) -> None:
     )
     (r,) = run_once(cfg, store, now=1_000_000.0, provider_factory=lambda: Sequenced("x"))
     assert any("did not supersede" in e and stray.name in e for e in r.errors)
+
+
+# --- Phase 7: `scribe index --check` enforces one block per session -------------------------
+
+
+def _index_main(cfg: Config, tmp_path: Path, *args: str) -> int:
+    from scribe.index_cli import main as index_main
+
+    toml = tmp_path / "idx.toml"
+    toml.write_text(
+        f'[discovery]\noutput_dir = "{cfg.output_dir}"\neventlog_dir = "{cfg.eventlog_dir}"\n'
+    )
+    return index_main(["--check", "--config", str(toml), *args])
+
+
+def _two_blocks(cfg: Config) -> Path:
+    md = Path(cfg.output_dir) / "research" / "2026-10-31.md"
+    _write(md, turn="t6", supersede=False)
+    _write(md, turn="t14", supersede=False)
+    manifest.write(cfg, manifest.rebuild(cfg))
+    return md
+
+
+def test_a_session_with_two_final_blocks_fails_with_its_own_code(tmp_path, capsys) -> None:
+    from scribe.index_cli import EXIT_MULTI_BLOCK
+
+    cfg = _cfg(tmp_path)
+    _two_blocks(cfg)
+    assert manifest.check(cfg).clean  # not drift: the manifest is right about the disk
+    assert _index_main(cfg, tmp_path) == EXIT_MULTI_BLOCK
+    out = capsys.readouterr().out
+    assert out.startswith("manifest:")  # the scheduled caller's contract line
+    assert "1 session(s) with more than one block" in out
+    assert "multi    session:S  2 blocks: research/2026-10-31.md turn:t6" in out
+
+
+def test_the_json_names_the_session_and_its_blocks(tmp_path, capsys) -> None:
+    cfg = _cfg(tmp_path)
+    _two_blocks(cfg)
+    _index_main(cfg, tmp_path, "--json")
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["one_block_per_session"] is False
+    assert doc["multi_block"] == [
+        {
+            "session_id": "S",
+            "blocks": [["research/2026-10-31.md", "t6"], ["research/2026-10-31.md", "t14"]],
+        }
+    ]
+
+
+def test_drift_takes_precedence_over_multiple_blocks(tmp_path) -> None:
+    from scribe.index_cli import EXIT_DRIFT
+
+    cfg = _cfg(tmp_path)
+    _two_blocks(cfg)
+    cfg.manifest_file().unlink()
+    assert _index_main(cfg, tmp_path) == EXIT_DRIFT
+
+
+def test_a_provisional_extra_block_does_not_count(tmp_path) -> None:
+    from scribe.index_cli import EXIT_OK
+
+    cfg = _cfg(tmp_path)
+    md = Path(cfg.output_dir) / "research" / "2026-10-31.md"
+    _write(md, turn="t6", supersede=False, provisional=PROVISIONAL_PLACEHOLDER)
+    _write(md, turn="t14", supersede=False)
+    manifest.write(cfg, manifest.rebuild(cfg))
+    assert _index_main(cfg, tmp_path) == EXIT_OK
+
+
+def test_blocks_in_two_files_count_as_one_session(tmp_path) -> None:
+    cfg = _cfg(tmp_path)
+    for day in ("2026-10-31", "2026-11-01"):
+        _write(Path(cfg.output_dir) / "research" / f"{day}.md", turn=day, supersede=False)
+    assert [sid for sid, _ in manifest.check(cfg).multi_block] == ["S"]

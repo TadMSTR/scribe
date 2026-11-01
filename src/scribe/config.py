@@ -169,6 +169,10 @@ class Config:
     #: whose `#N` IS its id, where the conflation the gate names cannot happen.
     qc_rewrite_id_conflations: bool = True
     headless: HeadlessConfig = field(default_factory=HeadlessConfig)
+    #: Claude Code's `cleanupPeriodDays` as this install sets it, so `scribe session` can say
+    #: when a transcript will be deleted. None means not configured, reported as "unknown":
+    #: Claude Code's own default has changed before, and a guessed date is worse than none.
+    transcript_retention_days: int | None = None
 
     def manifest_file(self) -> Path:
         """The digest manifest: `manifest_path` if set, else `<output_dir>/../index.jsonl`.
@@ -378,6 +382,11 @@ def load(path: str | os.PathLike[str] | None = None) -> Config:
         cfg.output_dir = str(disc["output_dir"])
     if "eventlog_dir" in disc:
         cfg.eventlog_dir = str(disc["eventlog_dir"])
+    if "transcript_retention_days" in disc:
+        days = disc["transcript_retention_days"]
+        if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+            raise ConfigError("discovery.transcript_retention_days must be a positive integer")
+        cfg.transcript_retention_days = days
     if "emit_frontmatter" in disc:
         if not isinstance(disc["emit_frontmatter"], bool):
             raise ConfigError("discovery.emit_frontmatter must be true or false")

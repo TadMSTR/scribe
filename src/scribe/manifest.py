@@ -311,16 +311,41 @@ class Drift:
     absent: bool = False
     expected: int = 0
     lines: int = 0
+    #: Sessions with more than one FINAL block anywhere in the corpus, each with its blocks.
+    #: Not drift -- the manifest can match the disk exactly and still list them -- but a
+    #: breach of the corpus contract "one block per session" (systems/memory-pipeline.md,
+    #: contract 1), which nothing checked before vikunja#1347. Provisional blocks do not
+    #: count: a stand-in is replaced by the next write for its session.
+    multi_block: list[tuple[str, list[Key]]] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
+        """The manifest matches the corpus. Says nothing about `multi_block`."""
         return not (self.missing or self.stale or self.changed or self.malformed or self.absent)
+
+    @property
+    def one_block_per_session(self) -> bool:
+        return not self.multi_block
+
+
+def multi_block_sessions(records: list[dict]) -> list[tuple[str, list[Key]]]:
+    """Sessions holding more than one final block, from `rebuild`'s records, sorted by id."""
+    by_session: dict[str, list[Key]] = {}
+    for r in records:
+        if r["provisional"] == "" and r["session_id"]:
+            by_session.setdefault(r["session_id"], []).append((r["path"], r["turn_uuid"]))
+    return sorted((sid, keys) for sid, keys in by_session.items() if len(keys) > 1)
 
 
 def check(cfg: Config) -> Drift:
-    """Rebuild into memory and compare against the manifest on disk, on `DERIVED_FIELDS`."""
-    expected = {(r["path"], r["turn_uuid"]): r for r in rebuild(cfg)}
-    drift = Drift(expected=len(expected))
+    """Rebuild into memory and compare against the manifest on disk, on `DERIVED_FIELDS`.
+
+    Also reports `multi_block`, which is a property of the corpus rather than of the
+    manifest, so it is computed even when the manifest file is absent.
+    """
+    records = rebuild(cfg)
+    expected = {(r["path"], r["turn_uuid"]): r for r in records}
+    drift = Drift(expected=len(expected), multi_block=multi_block_sessions(records))
     try:
         cur = read(cfg.manifest_file())
     except FileNotFoundError:

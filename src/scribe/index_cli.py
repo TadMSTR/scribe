@@ -13,8 +13,15 @@ A `--rebuild` racing a live sweep can drop the line that sweep appends between t
 walk and its rename. Run it when no sweep is running (forge's cron holds `flock -n`), and
 `--check` afterwards; a dropped line shows up there as missing.
 
+`--check` also enforces the corpus contract "one block per session" (vikunja#1347): a session
+with more than one final block, anywhere in the corpus, is named with its blocks. That is not
+manifest drift -- `--rebuild` cannot fix it, because the manifest is right about what is on
+disk -- so it has its own exit code, and drift takes precedence when both are present.
+
 Exit codes: 0 clean (or rebuilt), 1 drift found, 2 config error, 3 the corpus or manifest
-could not be read or written.
+could not be read or written, 4 the manifest is clean but at least one session has more than
+one final block. `4` is an addition; the first four are unchanged, because a scheduled
+detector consumes them (`scribe-recover-check.sh` in the operator's scripts).
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ EXIT_OK = 0
 EXIT_DRIFT = 1
 EXIT_CONFIG = 2
 EXIT_IO = 3
+EXIT_MULTI_BLOCK = 4
 
 
 def _drift_dict(d: Drift) -> dict:
@@ -43,12 +51,22 @@ def _drift_dict(d: Drift) -> dict:
         "stale": [list(k) for k in d.stale],
         "changed": [{"key": list(k), "fields": f} for k, f in d.changed],
         "malformed": [{"line": n, "reason": r} for n, r in d.malformed],
+        "one_block_per_session": d.one_block_per_session,
+        "multi_block": [
+            {"session_id": sid, "blocks": [list(k) for k in keys]} for sid, keys in d.multi_block
+        ],
     }
 
 
 def _print_drift(d: Drift, path: Path) -> None:
     print(f"manifest: {path}")
     print(f"  {d.expected} block(s) on disk, {d.lines} line(s) in the manifest")
+    # Early, and on one line: the scheduled caller keeps the first 300 characters.
+    if d.multi_block:
+        print(
+            f"  !! {len(d.multi_block)} session(s) with more than one block "
+            "(contract: one block per session)"
+        )
     if d.absent:
         print("  !! no manifest file -- every block is missing from it")
     for path_, turn in d.missing:
@@ -59,10 +77,18 @@ def _print_drift(d: Drift, path: Path) -> None:
         print(f"  changed  {path_} turn:{turn}  ({', '.join(fields)})")
     for n, reason in d.malformed:
         print(f"  malformed line {n}: {reason}")
+    for sid, keys in d.multi_block:
+        where = ", ".join(f"{p} turn:{t}" for p, t in keys)
+        print(f"  multi    session:{sid}  {len(keys)} blocks: {where}")
     if d.clean:
         print("  clean")
     else:
         print("  run `scribe index --rebuild` to regenerate it from the digests")
+    if d.multi_block:
+        print(
+            "  multiple blocks are not drift and a rebuild does not change them; a later "
+            "sweep of the session replaces them, from scribe 0.18.0"
+        )
     print("  (written_at is informational and is not verified)")
 
 
@@ -113,7 +139,9 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write("\n")
     else:
         _print_drift(drift, path)
-    return EXIT_OK if drift.clean else EXIT_DRIFT
+    if not drift.clean:
+        return EXIT_DRIFT
+    return EXIT_OK if drift.one_block_per_session else EXIT_MULTI_BLOCK
 
 
 if __name__ == "__main__":

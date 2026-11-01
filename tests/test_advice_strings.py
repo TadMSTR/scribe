@@ -43,6 +43,7 @@ SUBCOMMANDS = (
     "qc-survey",
     "recover",
     "run",
+    "session",
 )
 
 #: The module that owns each subcommand's parser. A bare `--flag` written inside one of
@@ -60,6 +61,7 @@ OWNERS = {
     "qc_survey_cli.py": "qc-survey",
     "recover_cli.py": "recover",
     "run_cli.py": "run",
+    "session_cli.py": "session",
 }
 
 #: Backticked `--tokens` that are deliberately not advice about this module's own parser.

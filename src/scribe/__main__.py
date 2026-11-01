@@ -7,7 +7,7 @@ import sys
 USAGE = (
     "usage: python -m scribe "
     "{cap-survey|correct|deps-drift|extract|events|index|journal|qc|qc-report|qc-survey|"
-    "recover|run} ..."
+    "recover|run|session} ..."
 )
 
 
@@ -57,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
         from .recover_cli import main as recover_main
 
         return recover_main(args[1:])
+    if args and args[0] == "session":
+        from .session_cli import main as session_main
+
+        return session_main(args[1:])
     if args and args[0] == "run":
         from .run_cli import main as run_main
 
