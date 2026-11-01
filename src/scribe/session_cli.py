@@ -256,7 +256,11 @@ def _blocks(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     # `_present`, not `Path.is_dir()`: from Python 3.14 `is_dir` returns False on any OSError,
     # so a root that cannot be statted would read as "no blocks" (round-2 baseline SH-15).
     st = _present(root, errors, "digest root")
-    if st is None or not stat.S_ISDIR(st.st_mode):
+    if st is None:
+        return out
+    if not stat.S_ISDIR(st.st_mode):
+        # A misconfigured `output_dir` is "could not look", not "no blocks" (audit R2-04).
+        errors.append("digest root: not a directory")
         return out
 
     def unreadable(exc: OSError) -> None:

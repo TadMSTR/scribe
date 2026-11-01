@@ -394,6 +394,18 @@ def test_an_unlistable_digest_dir_is_an_error_not_no_blocks(swept, monkeypatch) 
     assert doc["blocks"]  # the readable directories are still searched
 
 
+def test_a_digest_root_that_is_a_file_is_an_error(swept, tmp_path) -> None:
+    """Audit R2-04: a misconfigured `output_dir` read as "no blocks", so exit 1, not 3."""
+    import dataclasses
+
+    cfg, _ = swept
+    afile = tmp_path / "not-a-dir"
+    afile.write_text("")
+    doc = lookup(dataclasses.replace(cfg, output_dir=str(afile)), SID)
+    assert "digest root: not a directory" in doc["errors"]
+    assert doc["blocks"] == []
+
+
 def test_a_digest_root_that_cannot_be_statted_is_an_error(swept, monkeypatch) -> None:
     """Round-2 baseline SH-15: the root was checked with `Path.is_dir()`, which swallows the
     error on Python 3.14, so an unreachable corpus read as "no blocks"."""
