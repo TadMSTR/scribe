@@ -68,9 +68,9 @@ PENDING_LABEL = (
 #: A line that would be structure in the daily file rather than text: a markdown heading,
 #: which would open a section for the journal preview and for qmd, or an HTML comment, which
 #: could be read as a block anchor or terminator, or a setext underline (`===` / `---` alone on a
-#: line), which turns the line above it into a heading. Escaped with a backslash, which markdown
+#: line, a single `-` included), which turns the line above it into a heading. Escaped with a backslash, which markdown
 #: renders as the literal character, so the quotation still reads as written.
-_STRUCTURAL_RE = re.compile(r"(?m)^([ \t]{0,3})(#|<!--|=+[ \t]*$|-{2,}[ \t]*$)")
+_STRUCTURAL_RE = re.compile(r"(?m)^([ \t]{0,3})(#|<!--|=+[ \t]*$|-+[ \t]*$)")
 
 _GIT_COMMIT_MCP_SHA_RE = re.compile(r'"sha"\s*:\s*"([0-9a-f]{7,40})"')
 _GIT_COMMIT_BASH_SHA_RE = re.compile(r"(?m)^\[[^\]\s]+(?: \([^)]*\))? ([0-9a-f]{7,40})\]")
