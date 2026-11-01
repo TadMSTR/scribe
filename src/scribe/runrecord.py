@@ -45,7 +45,8 @@ from .extract.redact import Redactor
 from .paths import secure_append, secure_dir, secure_file
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
 from .qc_survey import ABSENT, _load, attribute, iter_blocks
-from .writeback import PROVISIONAL_PLACEHOLDER, PROVISIONAL_SUPPRESSED
+from .summarize.render import VERBATIM_START
+from .writeback import PROVISIONAL_PENDING, PROVISIONAL_PLACEHOLDER, PROVISIONAL_SUPPRESSED
 
 #: Bumped when a field changes meaning. Adding a field does not bump it: readers take what
 #: they know and ignore the rest.
@@ -91,6 +92,13 @@ def qc_fields(report: Report, body: str, log: EventLog, *, home: str = "") -> di
             for kind, bucket, claim in attributed[:MAX_CLAIMS]
         ],
     }
+
+
+def _render_mode(block) -> str:
+    """A block's `render_mode`, from what is on disk: its anchor and its verbatim marker."""
+    if block.provisional == PROVISIONAL_PENDING:
+        return "pending"
+    return "verbatim" if VERBATIM_START in block.body else "llm"
 
 
 def absent_count(record: dict) -> int:
@@ -249,6 +257,9 @@ def iter_backfill(
             "withheld_items": None,
             "withheld_fields": None,
             "errors": None,
+            # Read off the block, so qc-report keeps a backfilled headless or pending block out
+            # of the model-written headline, as it does a live one (security baseline IV-25).
+            "render_mode": _render_mode(block),
             **qc_fields(report, block.body, log, home=home),
             # Unknown: a block on disk says nothing about what was rewritten before it got
             # there. `null`, like every other field a backfill cannot observe.

@@ -581,3 +581,23 @@ def test_a_setext_underline_is_escaped_too() -> None:
     out = headless.escape_structure("Summary\n=======\nDetails\n---\n- a bullet\n")
     assert "\\=======" in out and "\\---" in out
     assert "- a bullet" in out
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "true", '"60"'])
+def test_a_bad_transcript_retention_is_refused(tmp_path, value) -> None:
+    """Baseline IV-04: the new key's validation had no bad-input test."""
+    with pytest.raises(ConfigError, match="transcript_retention_days"):
+        load(_toml(tmp_path, f"[discovery]\ntranscript_retention_days = {value}\n"))
+
+
+def test_backfill_reads_render_mode_off_the_block() -> None:
+    """Baseline IV-25: a backfilled pending or verbatim block must not count as `llm`."""
+    from types import SimpleNamespace
+
+    from scribe.runrecord import _render_mode
+
+    assert _render_mode(SimpleNamespace(provisional="pending", body="x")) == "pending"
+    assert _render_mode(SimpleNamespace(provisional="", body=f"a\n{VERBATIM_START}\nb")) == (
+        "verbatim"
+    )
+    assert _render_mode(SimpleNamespace(provisional="", body="**Asked:** x")) == "llm"

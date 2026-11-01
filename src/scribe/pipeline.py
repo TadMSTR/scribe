@@ -909,11 +909,11 @@ def process_session(
     # every block it gets lands in the same file -- unless the transcript had no usable
     # timestamp and the clock chose the date. Refuse loudly rather than leave a stale copy
     # unremarked; `scribe index --check` names it too.
-    for other in _other_day_files(cfg, result.agent, when, log.session_id):
+    for other in _other_day_files(cfg, result.agent, when, log.session_id, result.errors):
         result.errors.append(
             f"session also has a block in {other.name}, which this write did not supersede"
         )
-    # A digest that was produced and NOT written. `append_block` returns False for a turn that
+    # A digest that was produced and NOT written. `write_block` returns False for a turn that
     # is already final, and the one thing that must never happen quietly is for that to swallow
     # a real summary -- it did, 30 times, and the run totals said `summarized` each time. The
     # replace path should make this unreachable for a stand-in; counting it is how we find out
@@ -982,14 +982,23 @@ def process_session(
     return result
 
 
-def _other_day_files(cfg: Config, agent: str, when: datetime, session_id: str) -> list[Path]:
-    """The day before's and the day after's file, where either holds a block for the session."""
+def _other_day_files(
+    cfg: Config, agent: str, when: datetime, session_id: str, errors: list[str]
+) -> list[Path]:
+    """The day before's and the day after's file, where either holds a block for the session.
+
+    A file that is there and cannot be read is recorded in `errors`: "could not look" is not
+    "no stray block" (security baseline OV-39).
+    """
     out = []
     for delta in (-1, 1):
         other = daily_path(cfg.output_dir, agent, when + timedelta(days=delta))
         try:
             text = other.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append(f"could not check {other.name} for another block: {exc}")
             continue
         if session_blocks(text, session_id):
             out.append(other)

@@ -57,6 +57,7 @@ def _drift_dict(d: Drift) -> dict:
         "malformed": [{"line": n, "reason": r} for n, r in d.malformed],
         "one_block_per_session": d.one_block_per_session,
         "pending_blocks": [list(k) for k in d.pending_blocks],
+        "pending_oldest": min((Path(p).stem for p, _t in d.pending_blocks), default=None),
         "multi_block": [
             {"session_id": sid, "blocks": [list(k) for k in keys]} for sid, keys in d.multi_block
         ],
@@ -75,7 +76,13 @@ def _print_drift(d: Drift, path: Path) -> None:
     # Informational. A headless session killed while waiting keeps its `provisional:pending`
     # block for good; a count that only grows is how that shows (security baseline OV-32).
     if d.pending_blocks:
-        print(f"  {len(d.pending_blocks)} pending block(s) (headless sessions still waiting)")
+        # The oldest daily file holding one is the age signal: a pending block several days old
+        # belongs to a session that will not finish (security baseline OV-32).
+        oldest = min(Path(p).stem for p, _turn in d.pending_blocks)
+        print(
+            f"  {len(d.pending_blocks)} pending block(s) (headless sessions still waiting), "
+            f"oldest {oldest}"
+        )
     if d.absent:
         print("  !! no manifest file -- every block is missing from it")
     for path_, turn in d.missing:
@@ -115,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--check",
         action="store_true",
-        help="rebuild in memory and compare; exit 1 on any difference",
+        help="rebuild in memory and compare; exit 1 on drift, 4 on a session with >1 block",
     )
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--json", action="store_true")

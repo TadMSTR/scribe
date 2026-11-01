@@ -363,3 +363,14 @@ def test_pending_blocks_are_counted(tmp_path, capsys) -> None:
     manifest.write(cfg, manifest.rebuild(cfg))
     _index_main(cfg, tmp_path)
     assert "1 pending block(s)" in capsys.readouterr().out
+
+
+def test_pending_blocks_report_the_oldest_day(tmp_path, capsys) -> None:
+    cfg = _cfg(tmp_path)
+    for day in ("2026-10-29", "2026-10-31"):
+        _write(Path(cfg.output_dir) / "writer" / f"{day}.md", turn=day, provisional="pending")
+    manifest.write(cfg, manifest.rebuild(cfg))
+    _index_main(cfg, tmp_path)
+    assert "2 pending block(s) (headless sessions still waiting), oldest 2026-10-29" in (
+        capsys.readouterr().out
+    )

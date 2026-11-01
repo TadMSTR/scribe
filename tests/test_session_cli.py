@@ -328,3 +328,51 @@ def test_a_crash_inside_the_lookup_keeps_the_exit_contract(swept, tmp_path, monk
 
     monkeypatch.setattr(session_cli, "lookup", boom)
     assert main([SID, "--config", str(_toml(cfg, tmp_path))]) == session_cli.EXIT_FAILED
+
+
+def test_a_transcript_that_cannot_be_statted_is_an_error_not_gone(swept, monkeypatch) -> None:
+    """Baseline SH-15: EACCES on the transcript must not read as "expired"."""
+    from pathlib import Path as _P
+
+    cfg, target = swept
+    real = _P.stat
+
+    def denied(self, *a, **k):
+        if self == target:
+            raise PermissionError(13, "Permission denied")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(_P, "stat", denied)
+    doc = lookup(cfg, SID)
+    assert doc["transcript"]["exists"] is False
+    assert "transcript: PermissionError" in doc["errors"]
+
+
+def test_a_found_session_with_an_unreadable_source_exits_three(swept, tmp_path, capsys) -> None:
+    """Baseline OV-01 recheck: a partial answer must not exit 0."""
+    from scribe.session_cli import EXIT_FAILED
+
+    cfg, _ = swept
+    (md,) = Path(cfg.output_dir).rglob("*.md")
+    md.chmod(0)
+    try:
+        if os.access(md, os.R_OK):  # running as root: the chmod cannot deny the read
+            pytest.skip("root reads a 0-mode file")
+        assert main([SID, "--brief", "--config", str(_toml(cfg, tmp_path))]) == EXIT_FAILED
+        assert "!! incomplete -- could not read: digest " in capsys.readouterr().out
+    finally:
+        md.chmod(0o600)
+
+
+def test_containment_is_one_level_not_any_depth(tmp_path) -> None:
+    """Baseline OV-52: `<project>/<sid>/subagents/x.jsonl` is not a transcript location."""
+    from scribe.session_cli import _contained
+
+    proj = tmp_path / "projects" / "p1"
+    (proj / "sid" / "subagents").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    cfg = Config(project_globs=(str(tmp_path / "projects" / "*") + "/",))
+    assert _contained(cfg, proj / "sid.jsonl") == (proj / "sid.jsonl").resolve()
+    assert _contained(cfg, proj / "sid" / "subagents" / "agent-a.jsonl") is None
+    # Baseline IV-21/27/28: `..` through a matching prefix must not escape.
+    assert _contained(cfg, proj / ".." / ".." / "elsewhere" / "f.jsonl") is None

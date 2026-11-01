@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fnmatch
+import glob
 import json
 import os
 import sqlite3
@@ -98,6 +98,22 @@ STATE_FIELDS = (
 )
 
 
+def _present(path: Path, errors: list[str], label: str) -> os.stat_result | None:
+    """`path`'s stat, or None when it is absent -- and an ERROR when it could not be looked at.
+
+    `Path.is_file()` and a bare `except OSError` both read a permission failure as "not
+    there". This command is meant to be wrapped for agents that cannot read scribe's files,
+    so "could not look" must never read as "gone" or "no trace" (security baseline SH-15).
+    """
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:  # ValueError: an embedded NUL
+        errors.append(f"{label}: {type(exc).__name__}")
+        return None
+
+
 def _state_rows(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     """The session's state rows, read-only. [] when the DB or the row is absent.
 
@@ -106,7 +122,7 @@ def _state_rows(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     session (security baseline OV-01).
     """
     db = Path(cfg.state_path).expanduser()
-    if not db.is_file():
+    if _present(db, errors, "state") is None:
         return []
     uri = f"file:{db}?mode=ro"
     try:
@@ -140,7 +156,7 @@ def _state_rows(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     return out
 
 
-def _transcript(cfg: Config, session_id: str, rows: list[dict]) -> dict:
+def _transcript(cfg: Config, session_id: str, rows: list[dict], errors: list[str]) -> dict:
     """Where the transcript is, whether it is still there, and when it will be deleted."""
     path = ""
     if rows:
@@ -153,16 +169,15 @@ def _transcript(cfg: Config, session_id: str, rows: list[dict]) -> dict:
     out: dict = {"path": path or None, "exists": False, "size_bytes": None, "expires": "unknown"}
     if not path:
         return out
-    p = Path(path).expanduser()
-    if not _under_projects(cfg, p):
+    p = _contained(cfg, Path(path).expanduser())
+    if p is None:
         # The path is the state DB's, and the DB is scribe's own -- but it is only stat'd if it
         # is where a transcript can be, so a doctored row cannot probe the filesystem through
         # this command (security baseline IV-21).
         out["outside_project_globs"] = True
         return out
-    try:
-        st = p.stat()
-    except (OSError, ValueError):  # ValueError: an embedded NUL (baseline IV-58)
+    st = _present(p, errors, "transcript")
+    if st is None:
         return out
     out["exists"] = True
     out["size_bytes"] = st.st_size
@@ -175,24 +190,34 @@ def _transcript(cfg: Config, session_id: str, rows: list[dict]) -> dict:
     return out
 
 
-def _under_projects(cfg: Config, path: Path) -> bool:
-    """Whether `path` is a `*.jsonl` directly inside a directory `project_globs` matches."""
-    if path.suffix != ".jsonl":
-        return False
+def _contained(cfg: Config, path: Path) -> Path | None:
+    """`path` resolved, if it is a `*.jsonl` directly inside a directory `project_globs`
+    matches; else None. The caller stats the RESOLVED path, never the one it was given.
+
+    Resolved in full first, then compared with the resolved directories `glob` finds -- whose
+    `*` stops at a separator. Matching the raw path, or using `fnmatch` (whose `*` also matches
+    `/`), let a doctored state row reach any `*.jsonl` on the host through `..` (security
+    baseline IV-21/IV-27/IV-28/OV-52).
+    """
     try:
-        parent = path.parent.resolve(strict=False)
+        resolved = path.resolve(strict=False)
     except (OSError, ValueError):
-        return False
+        return None
+    if resolved.suffix != ".jsonl":
+        return None
     for pattern in cfg.project_globs:
-        base = os.path.expanduser(pattern).rstrip("/")
-        if fnmatch.fnmatchcase(str(parent), base) or fnmatch.fnmatchcase(str(path.parent), base):
-            return True
-    return False
+        for hit in glob.glob(os.path.expanduser(pattern).rstrip("/")):
+            try:
+                if Path(hit).resolve(strict=False) == resolved.parent:
+                    return resolved
+            except (OSError, ValueError):
+                continue
+    return None
 
 
-def _eventlog(cfg: Config, session_id: str) -> tuple[dict | None, object | None]:
+def _eventlog(cfg: Config, session_id: str, errors: list[str]) -> tuple[dict | None, object | None]:
     path = eventlog_path(cfg.eventlog_dir, session_id)
-    if not path.is_file():
+    if _present(path, errors, "eventlog") is None:
         return None, None
     try:
         log = load_eventlog(path)
@@ -259,7 +284,7 @@ def _blocks(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
 
 def _runs(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     path = Path(cfg.qc_run_record).expanduser() if cfg.qc_run_record else None
-    if path is None or not path.is_file():
+    if path is None or _present(path, errors, "runs") is None:
         return []
     out = []
     try:
@@ -282,10 +307,10 @@ def lookup(cfg: Config, session_id: str) -> dict:
     """The whole document for one session. Read-only; see the module docstring."""
     errors: list[str] = []
     rows = _state_rows(cfg, session_id, errors)
-    evlog, log = _eventlog(cfg, session_id)
+    evlog, log = _eventlog(cfg, session_id, errors)
     blocks = _blocks(cfg, session_id, errors)
     runs = _runs(cfg, session_id, errors)
-    transcript = _transcript(cfg, session_id, rows)
+    transcript = _transcript(cfg, session_id, rows, errors)
 
     closing: dict | None = None
     closing_reason = "no event log"
@@ -352,6 +377,8 @@ def _brief(doc: dict) -> list[str]:
         + (f", current {current['file']} ({current['render_mode']})" if current else "")
     )
     lines.append(f"  runs: {len(doc['runs'])}")
+    if doc["errors"]:
+        lines.append(f"  !! incomplete -- could not read: {'; '.join(doc['errors'])}")
     closing = doc["closing_statement"]
     lines.append(
         f"  closing statement: {closing['chars']} chars from the {closing['source']}"
@@ -379,7 +406,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     try:
         cfg = load(args.config)
-    except ConfigError as exc:
+    except (ConfigError, OSError, ValueError) as exc:
+        # OSError/ValueError: an unreadable config or a bad value `load` does not convert.
+        # Either would otherwise exit 1, the "no trace" code (security baseline OV-27).
         print(f"scribe: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
@@ -393,10 +422,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
         sys.stdout.write("\n")
+    if doc["errors"]:
+        # A partial answer is not a complete one, found or not (security baseline OV-01).
+        print(f"scribe: could not look everywhere: {'; '.join(doc['errors'])}", file=sys.stderr)
+        return EXIT_FAILED
     if not doc["found"]:
-        if doc["errors"]:
-            print(f"scribe: could not look everywhere: {'; '.join(doc['errors'])}", file=sys.stderr)
-            return EXIT_FAILED
         print(f"scribe: no trace of session {args.session_id!r}", file=sys.stderr)
         return EXIT_UNKNOWN
     return EXIT_FOUND
