@@ -94,6 +94,10 @@ def preview(text: str, max_lines: int = DEFAULT_MAX_LINES) -> str:
             has_body = True
     flush()
 
+    # SECURITY[deferred]: the tail cut can start mid-block, so kept bullets show without the
+    # subhead that labels them (e.g. the headless rollup's agent-written-data label). The fix
+    # must change tests/reference/recent_memory_preview.awk identically. Ticket vikunja#1355.
+    # Audit: 2026-11-01/scribe-headless-digest-2026-11 (R2-05).
     return "\n".join(out[-max_lines:])
 
 
