@@ -305,6 +305,77 @@ def test_a_decoy_after_gits_own_line_is_ambiguous_too(tmp_path) -> None:
     assert "`1a2b3c4` / `deadbeef` (ambiguous: command output)" in commits
 
 
+def test_a_decoy_beside_a_detached_head_commit_is_ambiguous(tmp_path) -> None:
+    """Round-2 baseline IV-73: git's detached-HEAD line did not match, so a decoy alone was
+    reported as the commit."""
+    log = _log(tmp_path)
+    from scribe.extract.models import ToolEvent
+
+    log.turns[-1].events.append(
+        ToolEvent(
+            seq=97,
+            tool="Bash",
+            kind="bash",
+            target="git commit -m y; echo '[x deadbeef] z'",
+            result_digest="[detached HEAD 1a2b3c4] y\n 1 file changed\n[x deadbeef] z",
+        )
+    )
+    commits = dict((label, items) for label, items, _cap in headless.rollup_sections(log))[
+        "Commits"
+    ]
+    assert "`1a2b3c4` / `deadbeef` (ambiguous: command output)" in commits
+
+
+def test_tasks_come_from_the_task_id_and_the_submit_result_only(tmp_path) -> None:
+    """Round-2 baseline IV-73: every UUID in the arguments, a note included, was a task."""
+    log = _log(tmp_path)
+    from scribe.extract.models import ToolEvent
+
+    decoy = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    moved = "c48974f3-a35e-4488-85dd-28a87476a786"
+    made = "e48974f3-a35e-4488-85dd-28a87476a786"
+    log.turns[-1].events += [
+        ToolEvent(
+            seq=98,
+            tool="mcp__scoped-mcp__task-queue-mcp_update_task",
+            kind="mcp",
+            target=moved,
+            args_digest=f"status=completed note=see {decoy}",
+            task_status="completed",
+        ),
+        ToolEvent(
+            seq=99,
+            tool="mcp__scoped-mcp__task-queue-mcp_submit_task",
+            kind="mcp",
+            args_digest=f"originating_task_id={decoy} summary=x",
+            result_digest=f'{{"task_id": "{made}", "status": "approved"}}',
+        ),
+    ]
+    tasks = dict((label, items) for label, items, _cap in headless.rollup_sections(log))["Tasks"]
+    assert f"`{moved}` completed" in tasks
+    assert f"`{made}`" in tasks
+    assert not any(decoy in item for item in tasks)
+
+
+def test_a_version_one_log_lists_tasks_without_a_text_derived_status(tmp_path) -> None:
+    """Round-2 baseline IV-81: the v1 fallback searched agent-written text for `status=`."""
+    log = _log(tmp_path)
+    log.subagents = None
+    from scribe.extract.models import ToolEvent
+
+    log.turns[-1].events.append(
+        ToolEvent(
+            seq=100,
+            tool="mcp__scoped-mcp__task-queue-mcp_update_task",
+            kind="mcp",
+            target="c48974f3-a35e-4488-85dd-28a87476a786",
+            args_digest="note=x status=completed",
+        )
+    )
+    tasks = dict((label, items) for label, items, _cap in headless.rollup_sections(log))["Tasks"]
+    assert "`c48974f3-a35e-4488-85dd-28a87476a786`" in tasks
+
+
 @pytest.mark.parametrize("bad", ["completed\n- injected", "**done**", "x" * 33, 7, None, ""])
 def test_a_status_outside_the_pattern_is_not_recorded(tmp_path, bad) -> None:
     """Round-2 baseline IV-04: the status guard had no bad-input test."""

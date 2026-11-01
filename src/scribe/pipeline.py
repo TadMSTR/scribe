@@ -892,7 +892,8 @@ def process_session(
         provisional = PROVISIONAL_PLACEHOLDER
 
     # `supersede=True`: this block was rendered from the whole session, so it replaces any
-    # earlier block for the session rather than sitting beside it (vikunja#1347).
+    # earlier block for the session rather than sitting beside it (vikunja#1347) -- except a
+    # placeholder or suppressed stand-in, which `write_block` appends beside a final block.
     wrote = write_block(
         path,
         body=markdown,

@@ -16,12 +16,14 @@ outcomes, two of which produce a line:
   * turn absent — appended with a new `turn_uuid`: a line for the same `path`, new key.
 
 Since 0.18.0 there is a fourth outcome: a block for a session that already has blocks in the
-file **supersedes** them (vikunja#1347). The new block takes the first one's place and the
-others are removed, so their keys stop existing on disk. Each removed key gets a
-**tombstone** line: `provisional` is `"superseded"`, `sha256` is `""`, and an extra field
-`superseded_by` names the turn that replaced it. A consumer filtering on `provisional == ""`
-skips tombstones without knowing about them; one that tracks records drops the key. `read`
-drops it, so `check` does not report the removed block as stale.
+file **supersedes** them (vikunja#1347) -- unless it is a `placeholder` or `suppressed`
+stand-in and the session has a final block, in which case it is appended beside it. The
+superseding block takes the first one's place and the others are removed, so their keys stop
+existing on disk. Each removed key gets a **tombstone** line: `provisional` is `"superseded"`,
+`sha256` is `""`, and an extra field `superseded_by` names the turn that replaced it. A
+consumer filtering on `provisional == ""` skips tombstones without knowing about them; one that
+tracks records drops the key. `read` drops it, so `check` does not report the removed block as
+stale.
 
 So a consumer needs two rules, and they are not the same rule:
 

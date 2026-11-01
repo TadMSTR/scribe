@@ -387,7 +387,7 @@ blocks. That is not drift, `--rebuild` cannot fix it, and it exits `4` (drift, `
 precedence when both are present).
 
 **A superseded block gets a tombstone line.** From 0.18.0 a block for a session that already
-has blocks in the file replaces them (see [When a digest is not written](#when-a-digest-is-not-written)),
+has blocks in the file replaces them, except a stand-in beside a real digest (see [When a digest is not written](#when-a-digest-is-not-written)),
 and each removed `(path, turn_uuid)` gets a line with `provisional: "superseded"`, `sha256: ""`
 and an extra `superseded_by` naming the turn that replaced it. A consumer filtering on
 `provisional == ""` skips it without knowing about it; one that tracks records drops the key. Run `--rebuild` when no sweep

@@ -35,6 +35,7 @@ import glob
 import json
 import os
 import sqlite3
+import stat
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -252,7 +253,10 @@ def _blocks(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     """Every complete block for the session in the corpus, with which one is current."""
     root = Path(cfg.output_dir).expanduser()
     out: list[dict] = []
-    if not root.is_dir():
+    # `_present`, not `Path.is_dir()`: from Python 3.14 `is_dir` returns False on any OSError,
+    # so a root that cannot be statted would read as "no blocks" (round-2 baseline SH-15).
+    st = _present(root, errors, "digest root")
+    if st is None or not stat.S_ISDIR(st.st_mode):
         return out
 
     def unreadable(exc: OSError) -> None:

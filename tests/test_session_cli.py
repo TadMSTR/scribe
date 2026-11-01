@@ -394,6 +394,26 @@ def test_an_unlistable_digest_dir_is_an_error_not_no_blocks(swept, monkeypatch) 
     assert doc["blocks"]  # the readable directories are still searched
 
 
+def test_a_digest_root_that_cannot_be_statted_is_an_error(swept, monkeypatch) -> None:
+    """Round-2 baseline SH-15: the root was checked with `Path.is_dir()`, which swallows the
+    error on Python 3.14, so an unreachable corpus read as "no blocks"."""
+    from pathlib import Path as _P
+
+    cfg, _ = swept
+    root = _P(cfg.output_dir)
+    real = _P.stat
+
+    def denied(self, *a, **k):
+        if self == root:
+            raise PermissionError(13, "Permission denied")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(_P, "stat", denied)
+    doc = lookup(cfg, SID)
+    assert "digest root: PermissionError" in doc["errors"]
+    assert doc["blocks"] == []
+
+
 def test_a_failure_writing_the_report_keeps_the_exit_contract(swept, tmp_path, monkeypatch) -> None:
     """Audit F-05 (3): output ran outside the guard, so a crash exited 1 ("no trace")."""
     from scribe import session_cli
