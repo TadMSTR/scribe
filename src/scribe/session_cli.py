@@ -453,6 +453,11 @@ def main(argv: list[str] | None = None) -> int:
         # Either would otherwise exit 1, the "no trace" code (security baseline OV-27).
         _say(f"scribe: {exc}")
         return EXIT_USAGE
+    except Exception as exc:
+        # A wrongly typed value `load` does not validate (a table where a list belongs) raised
+        # TypeError/AttributeError and exited 1, the "no trace" code (round-2 baseline OV-27).
+        _say(f"scribe: could not load the config ({type(exc).__name__})")
+        return EXIT_FAILED
 
     try:
         doc = lookup(cfg, args.session_id)

@@ -430,6 +430,17 @@ def test_a_failure_writing_the_report_keeps_the_exit_contract(swept, tmp_path, m
     assert main([SID, "--config", str(_toml(cfg, tmp_path))]) == session_cli.EXIT_FAILED
 
 
+def test_an_unexpected_config_error_keeps_the_exit_contract(tmp_path, monkeypatch) -> None:
+    """Round-2 baseline OV-27: a TypeError inside `load` exited 1, the "no trace" code."""
+    from scribe import session_cli
+
+    def bad(*a, **k):
+        raise TypeError("'int' object is not iterable")
+
+    monkeypatch.setattr(session_cli, "load", bad)
+    assert main(["some-session"]) == session_cli.EXIT_FAILED
+
+
 def test_a_real_broken_pipe_exits_three_not_one_twenty(swept, tmp_path) -> None:
     """Round-2 baseline OV-27: after a failed write the buffered bytes made the interpreter's
     shutdown flush fail too, and the process exited 120 instead of the 3 it returned."""

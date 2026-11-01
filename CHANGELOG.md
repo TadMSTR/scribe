@@ -62,16 +62,22 @@ Fixes from the pre-release audit (scribe-headless-digest-2026-11):
 
 - The quoted closing statement no longer reaches the SessionStart preview: it is a
   blockquote, split on every line separator Python recognizes (a lone `\r` included), which
-  `journal.preview` drops, and the subheads it keeps say whose text is whose. Quoted `- ` lines were injected into the agent's next sessions unlabelled.
+  `journal.preview` drops, and the subheads it keeps say whose text is whose; the rollup's
+  subhead marks its items as agent-written data. Quoted `- ` lines were injected into the
+  agent's next sessions unlabelled.
 - A `placeholder` or `suppressed` block never supersedes a real digest; it is appended beside
   it, and the next final render replaces both.
-- `scribe session` exits `3` for an unreadable event log, an unlistable digest directory and
-  a failure while writing the report, all of which used to read as "no trace" or success; a
+- `scribe session` exits `3` for an unreadable event log, an unreadable digest root or
+  directory, an unexpected config-load error, and a failure while writing the report (a real
+  broken pipe included), all of which used to read as "no trace" or success; a
   subagent log that cannot be statted records `log_exists: null`, not `false`.
-- Rollup and render-mode labels come from structure: a task's status from the call's own
-  `status` argument (new `ToolEvent.task_status`), and verbatim classification from the
-  line-anchored marker regex. A Bash `git commit` whose output holds more than one
-  `[branch sha]` line lists every candidate as ambiguous instead of picking one.
+- Rollup and render-mode labels come from structure, never from a search of agent-written
+  text: a task is `update_task`'s `task_id` or the id in `submit_task`'s result (a UUID in a
+  note is not a task), its status the call's own `status` argument (new
+  `ToolEvent.task_status`; a version-1 log lists tasks with no status), and verbatim
+  classification uses the line-anchored marker regex. A commit sha read from Bash output is
+  always labelled `(from command output, unverified)`, and several are listed as ambiguous;
+  git's detached-HEAD line is recognised. Only a `git_commit` result is reported bare.
 - A lone `-` setext underline in the quotation is escaped.
 
 ### Changed
