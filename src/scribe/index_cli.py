@@ -146,6 +146,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"rebuilt {path}: {len(records)} record(s)")
             return EXIT_OK
         drift = check(cfg)
+        # Inside the guard too: a failure after the `manifest:` line is printed must still
+        # exit 5, not 1, which a caller reads as drift (security baseline OV-27 recheck).
+        if args.json:
+            json.dump({"manifest": str(path), **_drift_dict(drift)}, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            _print_drift(drift, path)
     except OSError as exc:
         print(f"scribe: {exc}", file=sys.stderr)
         return EXIT_IO
@@ -153,11 +160,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"scribe: index check failed ({type(exc).__name__}: {exc})", file=sys.stderr)
         return EXIT_INTERNAL
 
-    if args.json:
-        json.dump({"manifest": str(path), **_drift_dict(drift)}, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-    else:
-        _print_drift(drift, path)
     if not drift.clean:
         return EXIT_DRIFT
     return EXIT_OK if drift.one_block_per_session else EXIT_MULTI_BLOCK

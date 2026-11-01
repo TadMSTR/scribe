@@ -374,3 +374,15 @@ def test_pending_blocks_report_the_oldest_day(tmp_path, capsys) -> None:
     assert "2 pending block(s) (headless sessions still waiting), oldest 2026-10-29" in (
         capsys.readouterr().out
     )
+
+
+def test_a_failure_while_printing_the_report_is_not_drift(tmp_path, monkeypatch) -> None:
+    from scribe import index_cli
+
+    cfg = _cfg(tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(index_cli, "_print_drift", boom)
+    assert _index_main(cfg, tmp_path) == index_cli.EXIT_INTERNAL
