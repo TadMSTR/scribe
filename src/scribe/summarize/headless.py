@@ -329,9 +329,10 @@ def choose(log: EventLog, min_chars: int, *, heading: str = "") -> Choice:
     """The headless rendering for `log`, or a `MODE_FALLBACK` choice with no markdown.
 
     The contamination guard runs over the closing statement before it is accepted, exactly
-    as it runs over a model's digest: the quotation reaches the same SessionStart injection
-    and the same index. On a fire the session falls back to the LLM digest, whose own guard
-    and retry handle it. The post-render redaction in `pipeline` runs over either.
+    as it runs over a model's digest: the quotation reaches the same index and the same daily
+    file, though as a blockquote the SessionStart preview drops it (audit F-01). On a fire
+    the session falls back to the LLM digest, whose own guard and retry handle it. The
+    post-render redaction in `pipeline` runs over either.
     """
     if outstanding(log):
         pending = render_pending(log, heading=heading)
