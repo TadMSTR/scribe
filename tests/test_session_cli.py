@@ -364,6 +364,51 @@ def test_a_found_session_with_an_unreadable_source_exits_three(swept, tmp_path, 
         md.chmod(0o600)
 
 
+def test_an_unreadable_event_log_exits_three_not_no_trace(swept, tmp_path, capsys) -> None:
+    """Audit F-05 (1): a corrupt event log was only a field, so the command exited 0."""
+    from scribe.eventlog import eventlog_path
+    from scribe.session_cli import EXIT_FAILED
+
+    cfg, _ = swept
+    eventlog_path(cfg.eventlog_dir, SID).write_text("{not json")
+    assert main([SID, "--config", str(_toml(cfg, tmp_path))]) == EXIT_FAILED
+    doc = json.loads(capsys.readouterr().out)
+    assert any(e.startswith("eventlog: ") for e in doc["errors"])
+    assert doc["closing_statement_reason"] == "event log unreadable"
+
+
+def test_an_unlistable_digest_dir_is_an_error_not_no_blocks(swept, monkeypatch) -> None:
+    """Audit F-05 (2): `rglob` skipped a directory it could not list without a word."""
+    from scribe import session_cli
+
+    cfg, _ = swept
+    real = os.walk
+
+    def walk(top, onerror=None, **kw):
+        onerror(PermissionError(13, "Permission denied", os.path.join(top, "security")))
+        yield from real(top, onerror=onerror, **kw)
+
+    monkeypatch.setattr(session_cli.os, "walk", walk)
+    doc = lookup(cfg, SID)
+    assert "digest dir security: PermissionError" in doc["errors"]
+    assert doc["blocks"]  # the readable directories are still searched
+
+
+def test_a_failure_writing_the_report_keeps_the_exit_contract(
+    swept, tmp_path, monkeypatch
+) -> None:
+    """Audit F-05 (3): output ran outside the guard, so a crash exited 1 ("no trace")."""
+    from scribe import session_cli
+
+    cfg, _ = swept
+
+    def broken(*a, **k):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(session_cli.json, "dump", broken)
+    assert main([SID, "--config", str(_toml(cfg, tmp_path))]) == session_cli.EXIT_FAILED
+
+
 def test_containment_is_one_level_not_any_depth(tmp_path) -> None:
     """Baseline OV-52: `<project>/<sid>/subagents/x.jsonl` is not a transcript location."""
     from scribe.session_cli import _contained

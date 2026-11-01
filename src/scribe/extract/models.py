@@ -210,7 +210,8 @@ class Subagent:
     a foreground call (`completed`), and for a background one the `<status>` of its
     task-notification, or `running` when none arrived. The subagent's transcript is never read
     here: `log_path` is where Claude Code keeps it, and `log_exists` whether it was there when
-    this log was extracted.
+    this log was extracted -- None when it could not be looked at (audit F-05), so "could not
+    stat" is never recorded as "absent".
     """
 
     turn_index: int
@@ -221,7 +222,7 @@ class Subagent:
     agent_id: str = ""
     status: str = ""
     log_path: str = ""
-    log_exists: bool = False
+    log_exists: bool | None = False
 
     def to_dict(self) -> dict:
         return asdict(self)

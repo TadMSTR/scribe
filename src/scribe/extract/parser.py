@@ -741,7 +741,7 @@ def _locate_subagent_logs(log: EventLog, transcript: Path) -> None:
         try:
             sub.log_exists = path.is_file()
         except OSError:
-            sub.log_exists = False
+            sub.log_exists = None  # unknown, not absent (audit F-05)
 
 
 def _build_rollups(log: EventLog) -> None:

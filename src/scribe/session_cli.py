@@ -223,6 +223,9 @@ def _eventlog(cfg: Config, session_id: str, errors: list[str]) -> tuple[dict | N
         log = load_eventlog(path)
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (EventLogError, OSError, ValueError) as exc:
+        # In `errors` too, so the command exits 3: an unreadable log is "could not look", not
+        # "no event log" (audit F-05).
+        errors.append(f"eventlog: {type(exc).__name__}")
         return {"path": str(path), "error": type(exc).__name__}, None
     not_recorded = "not recorded"
     return {
@@ -251,7 +254,17 @@ def _blocks(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     out: list[dict] = []
     if not root.is_dir():
         return out
-    for md in sorted(root.rglob("*.md")):
+
+    def unreadable(exc: OSError) -> None:
+        # `Path.rglob` skips a directory it cannot list without a word, which read as "no
+        # blocks" (audit F-05). `os.walk` reports it here instead.
+        where = os.path.relpath(exc.filename, root) if exc.filename else "?"
+        errors.append(f"digest dir {where}: {type(exc).__name__}")
+
+    found: list[Path] = []
+    for dirpath, _dirs, files in os.walk(root, onerror=unreadable):
+        found += [Path(dirpath) / f for f in files if f.endswith(".md")]
+    for md in sorted(found):
         try:
             text = md.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
@@ -313,7 +326,7 @@ def lookup(cfg: Config, session_id: str) -> dict:
     transcript = _transcript(cfg, session_id, rows, errors)
 
     closing: dict | None = None
-    closing_reason = "no event log"
+    closing_reason = "event log unreadable" if evlog and "error" in evlog else "no event log"
     if log is not None:
         found, why = closing_statement(log, cfg.headless.min_closing_chars)
         if found is not None:
@@ -362,7 +375,7 @@ def _brief(doc: dict) -> list[str]:
         f"  transcript: {'present' if t['exists'] else 'gone'}"
         + (f", expires {t['expires']}" if t["exists"] else "")
         + (f"  {t['path']}" if t["path"] else ""),
-        f"  state: {st.get('status', 'no row')}" + (f", attempts {st['attempts']}" if st else ""),
+        f"  state: {st.get('status', 'no row')}" + (f", attempts {st.get('attempts', '?')}" if st else ""),
         f"  event log: {ev.get('path', 'none')}",
     ]
     if ev:
@@ -417,11 +430,18 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # the contract must hold whatever goes wrong inside the join
         print(f"scribe: session lookup failed ({type(exc).__name__})", file=sys.stderr)
         return EXIT_FAILED
-    if args.brief:
-        print("\n".join(_brief(doc)))
-    else:
-        json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
-        sys.stdout.write("\n")
+    try:
+        # Inside a guard too: a crash here (a state row missing a column, a broken pipe, an
+        # encode error) used to exit 1, the "no trace" code (audit F-05).
+        if args.brief:
+            print("\n".join(_brief(doc)))
+        else:
+            json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    except Exception as exc:
+        print(f"scribe: could not write the report ({type(exc).__name__})", file=sys.stderr)
+        return EXIT_FAILED
     if doc["errors"]:
         # A partial answer is not a complete one, found or not (security baseline OV-01).
         print(f"scribe: could not look everywhere: {'; '.join(doc['errors'])}", file=sys.stderr)

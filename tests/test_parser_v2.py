@@ -157,6 +157,24 @@ def test_subagent_log_path_is_beside_the_parent_transcript(tmp_path) -> None:
     assert "{}" not in json.dumps([t.to_dict() for t in log.turns])
 
 
+def test_a_subagent_log_that_cannot_be_statted_is_unknown_not_absent(
+    tmp_path, monkeypatch
+) -> None:
+    """Audit F-05: an OSError on the stat was persisted as `log_exists: false`."""
+    transcript = tmp_path / "sess-subagents.jsonl"
+    shutil.copy(SUBAGENTS, transcript)
+    real = Path.is_file
+
+    def denied(self):
+        if "subagents" in self.parts:
+            raise PermissionError(13, "Permission denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    log = extract(transcript)
+    assert log.subagents and all(s.log_exists is None for s in log.subagents if s.log_path)
+
+
 def test_an_unsafe_agent_id_builds_no_path(tmp_path) -> None:
     recs = _records()
     for r in recs:
