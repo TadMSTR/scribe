@@ -123,6 +123,8 @@ class SessionResult:
     #: the rendered block, plus, for a headless block, its scrub of the quotation and rollup
     #: items before they were prefixed (round-3 baseline OV-24). Should always be zero; a
     #: non-zero value has a cause, recorded in `post_render_cause` -- see `process_session`.
+    #: Not counted: a matched value already holding a `«redacted»` marker, which is replaced
+    #: but excluded as residue (`Redactor._record`; audit R3-01). Zero is not proof of none.
     post_render_redactions: int = 0
     #: Which cause the fire supports — one of `CAUSES`.
     #: Empty when nothing fired. Reported so a sweep can be filtered by cause rather than by

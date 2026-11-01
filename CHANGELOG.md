@@ -81,7 +81,8 @@ Fixes from the pre-release audit (scribe-headless-digest-2026-11):
 - A lone `-` setext underline in the quotation is escaped.
 - The quotation and the rollup items (with a commit's target and a subagent's description
   scrubbed before the item is composed) are redacted before they are prefixed, through the
-  post-render guard, so their hits count in `post_render_redactions`. The `> ` and `- `
+  post-render guard, so their hits count in `post_render_redactions` (except a matched value
+  that already holds a `«redacted»` marker, which is replaced but never counted). The `> ` and `- `
   prefixes hid a `key: value` line from the line-anchored rules, as did a line break other
   than `\n`, which mattered for `scribe recover` over an older event log.
 - A `pending` block's rollup carries the same agent-written-data subhead as the verbatim one;

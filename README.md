@@ -539,7 +539,10 @@ The contamination guard and the post-render redaction run over the quotation as 
 model's digest, because it reaches the same index and the same SessionStart injection. The
 quotation and the rollup items are redacted before they are prefixed, with their line breaks
 normalized first: a `> ` or `- ` prefix, or a break other than `\n`, would hide a `key: value`
-line from the line-anchored rules. Their hits count in `post_render_redactions` with the rest.
+line from the line-anchored rules. Their hits count in `post_render_redactions` with the rest,
+with one exception the guard has for every block: a matched value that already contains a
+`«redacted»` marker is replaced but not counted (it is indistinguishable from the residue of an
+earlier redaction), so such a session reads 0 although nothing reaches disk.
 Measured over 222 writer and security sessions: 219 rendered verbatim, 2 fell back on a guard
 fire (both sessions *about* the `n/N` notation), 1 on a short final text, and none came near
 the 8,000-character cap on assistant text.
