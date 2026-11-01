@@ -265,6 +265,11 @@ def _classify(tool: str, args: dict) -> tuple[str, str]:
     return KIND_OTHER, ""
 
 
+#: Task-queue tools whose `status` argument the headless rollup reports (`ToolEvent.task_status`).
+_TASK_STATUS_TOOLS = ("update_task", "submit_task")
+_TASK_STATUS_RE = re.compile(r"\A[a-z_-]{1,32}\Z")
+
+
 def _args_summary(args: dict, skip_key: str | None) -> str:
     """A compact `k=v` rendering of the arguments not already shown as the target.
 
@@ -675,6 +680,13 @@ def extract(
                         target=red.digest(target, target_chars),
                         args_digest=red.digest(_args_summary(args, skip), args_chars),
                     )
+                    status = args.get("status")
+                    if (
+                        tool.endswith(_TASK_STATUS_TOOLS)
+                        and isinstance(status, str)
+                        and _TASK_STATUS_RE.match(status)
+                    ):
+                        ev.task_status = status
                     seq += 1
                     turn.events.append(ev)
                     tool_use_id = str(block.get("id", ""))

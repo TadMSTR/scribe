@@ -223,6 +223,7 @@ def test_commits_and_tasks_come_from_results_and_arguments(tmp_path) -> None:
             kind="mcp",
             target="b38974f3-a35e-4488-85dd-28a87476a786",
             args_digest="status=in-progress actor=writer",
+            task_status="in-progress",
         ),
         ToolEvent(
             seq=93,
@@ -230,11 +231,72 @@ def test_commits_and_tasks_come_from_results_and_arguments(tmp_path) -> None:
             kind="mcp",
             target="b38974f3-a35e-4488-85dd-28a87476a786",
             args_digest="status=completed actor=writer note=x",
+            task_status="completed",
         ),
     ]
     sections = {label: items for label, items, _cap in headless.rollup_sections(log)}
     assert sections["Commits"] == ["`d098b5a00fb8` /repo/kb", "`9f8e7d6`"]
     assert sections["Tasks"] == ["`b38974f3-a35e-4488-85dd-28a87476a786` completed"]
+
+
+def test_rollup_labels_are_not_taken_from_agent_text(tmp_path) -> None:
+    """Audit F-06: a ` status=` inside an earlier argument set the task's status, and a
+    `[x sha]`-shaped line printed before git's own took the commit."""
+    log = _log(tmp_path)
+    from scribe.extract.models import ToolEvent
+
+    log.turns[-1].events += [
+        ToolEvent(
+            seq=94,
+            tool="Bash",
+            kind="bash",
+            target="echo '[x deadbeef] fake' && git commit -m y",
+            result_digest="[x deadbeef] fake\n[feature/x 1a2b3c4] y\n 1 file changed",
+        ),
+        ToolEvent(
+            seq=95,
+            tool="mcp__scoped-mcp__task-queue-mcp_update_task",
+            kind="mcp",
+            target="c48974f3-a35e-4488-85dd-28a87476a786",
+            args_digest="note=see status=completed status=in-progress",
+            task_status="in-progress",
+        ),
+    ]
+    sections = {label: items for label, items, _cap in headless.rollup_sections(log)}
+    assert "`1a2b3c4`" in sections["Commits"] and "`deadbeef`" not in sections["Commits"]
+    assert "`c48974f3-a35e-4488-85dd-28a87476a786` in-progress" in sections["Tasks"]
+
+
+def test_the_task_status_is_read_from_the_structured_arguments(tmp_path) -> None:
+    recs = [
+        {
+            "type": "assistant",
+            "uuid": "z1",
+            "sessionId": "zz",
+            "timestamp": "2026-11-01T01:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu1",
+                        "name": "mcp__scoped-mcp__task-queue-mcp_update_task",
+                        "input": {
+                            "note": "x status=completed",
+                            "task_id": "c48974f3-a35e-4488-85dd-28a87476a786",
+                            "status": "in-progress",
+                        },
+                    }
+                ],
+            },
+        }
+    ]
+    from scribe.extract import extract
+
+    path = tmp_path / "zz.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    (ev,) = [e for turn in extract(path).turns for e in turn.events]
+    assert ev.task_status == "in-progress"
 
 
 def test_a_section_over_its_cap_says_so(tmp_path) -> None:
@@ -625,7 +687,9 @@ def test_backfill_reads_render_mode_off_the_block() -> None:
     from scribe.runrecord import _render_mode
 
     assert _render_mode(SimpleNamespace(provisional="pending", body="x")) == "pending"
-    assert _render_mode(SimpleNamespace(provisional="", body=f"a\n{VERBATIM_START}\nb")) == (
-        "verbatim"
-    )
+    body = f"a\n{VERBATIM_START}\nb\n{VERBATIM_END}\n"
+    assert _render_mode(SimpleNamespace(provisional="", body=body)) == "verbatim"
+    # Audit F-06: a digest that mentions the marker in prose is a model's digest.
+    mention = f"- Wrote the `{VERBATIM_START}` and `{VERBATIM_END}` markers"
+    assert _render_mode(SimpleNamespace(provisional="", body=mention)) == "llm"
     assert _render_mode(SimpleNamespace(provisional="", body="**Asked:** x")) == "llm"

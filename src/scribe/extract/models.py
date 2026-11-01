@@ -52,6 +52,10 @@ class ToolEvent:
     error: str = ""
     result_digest: str = ""
     result_chars: int = 0
+    #: A task-queue call's own `status` argument, read from the structured arguments. The
+    #: headless rollup used to search `args_digest` for `status=`, which a value earlier in the
+    #: same call could fake (audit F-06). Empty for every other tool.
+    task_status: str = ""
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v not in ("", None) or k == "ok"}

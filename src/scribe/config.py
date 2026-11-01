@@ -56,8 +56,8 @@ QC_THRESHOLD_KEYS = (
 #: An environment variable NAME, as the hook's passthrough list accepts it. Names only: a
 #: pattern or prefix here would be SC-06's glob passthrough by another route.
 #: Below this many characters a closing statement is not treated as a summary: measured over
-#: 435 headless event logs on one deployment, 39 final texts were under 800 and most of those sessions
-#: had nothing to summarize at all (vikunja#1347).
+#: 435 headless event logs on one deployment, 39 final texts were under 800 and most of those
+#: sessions had nothing to summarize at all (vikunja#1347).
 DEFAULT_MIN_CLOSING_CHARS = 800
 #: Tables under `[summarize]` that are settings rather than stages. Without this a
 #: `[summarize.headless]` table would be read as a stage with no `provider` and refused.
@@ -109,9 +109,9 @@ class HeadlessConfig:
     """`[summarize.headless]`: which sessions get their closing statement instead of a digest.
 
     **Off by default** (`entrypoints` empty). The operator names the entrypoints that mean
-    "nobody was watching" -- on one deployment, `sdk-cli`, which is exactly the dispatcher's `claude -p`
-    runs -- and optionally narrows by agent. A session matching both is rendered from its own
-    final message and the event log, with no provider call.
+    "nobody was watching" -- on one deployment, `sdk-cli`, which is exactly the dispatcher's
+    `claude -p` runs -- and optionally narrows by agent. A session matching both is rendered
+    from its own final message and the event log, with no provider call.
     """
 
     entrypoints: tuple[str, ...] = ()

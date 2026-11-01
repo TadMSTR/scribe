@@ -157,9 +157,7 @@ def test_subagent_log_path_is_beside_the_parent_transcript(tmp_path) -> None:
     assert "{}" not in json.dumps([t.to_dict() for t in log.turns])
 
 
-def test_a_subagent_log_that_cannot_be_statted_is_unknown_not_absent(
-    tmp_path, monkeypatch
-) -> None:
+def test_a_subagent_log_that_cannot_be_statted_is_unknown_not_absent(tmp_path, monkeypatch) -> None:
     """Audit F-05: an OSError on the stat was persisted as `log_exists: false`."""
     transcript = tmp_path / "sess-subagents.jsonl"
     shutil.copy(SUBAGENTS, transcript)

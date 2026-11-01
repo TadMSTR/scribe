@@ -45,7 +45,7 @@ from .extract.redact import Redactor
 from .paths import secure_append, secure_dir, secure_file
 from .qc import DEFAULT_COVERAGE_FLOOR, Report, check_digest
 from .qc_survey import ABSENT, _load, attribute, iter_blocks
-from .summarize.render import VERBATIM_START
+from .summarize.render import VERBATIM_RE
 from .writeback import PROVISIONAL_PENDING, PROVISIONAL_PLACEHOLDER, PROVISIONAL_SUPPRESSED
 
 #: Bumped when a field changes meaning. Adding a field does not bump it: readers take what
@@ -98,7 +98,8 @@ def _render_mode(block) -> str:
     """A block's `render_mode`, from what is on disk: its anchor and its verbatim marker."""
     if block.provisional == PROVISIONAL_PENDING:
         return "pending"
-    return "verbatim" if VERBATIM_START in block.body else "llm"
+    # Line-anchored: an LLM digest that mentions the marker in prose is not verbatim (F-06).
+    return "verbatim" if VERBATIM_RE.search(block.body) else "llm"
 
 
 def absent_count(record: dict) -> int:

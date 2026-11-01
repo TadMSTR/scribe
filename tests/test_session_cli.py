@@ -394,9 +394,7 @@ def test_an_unlistable_digest_dir_is_an_error_not_no_blocks(swept, monkeypatch) 
     assert doc["blocks"]  # the readable directories are still searched
 
 
-def test_a_failure_writing_the_report_keeps_the_exit_contract(
-    swept, tmp_path, monkeypatch
-) -> None:
+def test_a_failure_writing_the_report_keeps_the_exit_contract(swept, tmp_path, monkeypatch) -> None:
     """Audit F-05 (3): output ran outside the guard, so a crash exited 1 ("no trace")."""
     from scribe import session_cli
 

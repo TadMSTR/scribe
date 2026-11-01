@@ -62,8 +62,8 @@ def iter_transcripts(
         base = os.path.expanduser(pattern)
         # NON-recursive, and that is a rule, not an accident (vikunja#1347). Subagent
         # transcripts live one level down, at `<session>/subagents/agent-<id>.jsonl` (431 files,
-        # 134 MB on one deployment in 2026-11), and they are not digested: the parent transcript is the
-        # record -- the Agent call, its result and its task-notification are all in it -- and
+        # 134 MB on one deployment in 2026-11), and they are not digested: the parent transcript
+        # is the record -- the Agent call, its result and its task-notification are all in it -- and
         # the event log's `subagents` field and agent-bus's lifecycle events point at each file
         # for anyone who needs to read one. A recursive glob would summarize every subagent as
         # a session of its own. `test_subagent_transcripts_are_not_discovered` holds this.

@@ -12,9 +12,9 @@ So the block is two parts:
 
   * **The closing statement**, quoted verbatim as a blockquote between `VERBATIM_START` and
     `VERBATIM_END`, under a subhead and a line saying it is the agent's statement and not
-    scribe's summary. The blockquote keeps it out of the SessionStart preview (audit F-01). Taken from the
-    event log, not the transcript, so `scribe recover` can rebuild the block after the
-    transcript has aged out.
+    scribe's summary. The blockquote keeps it out of the SessionStart preview (audit F-01).
+    Taken from the event log, not the transcript, so `scribe recover` can rebuild the block
+    after the transcript has aged out.
   * **A rollup** generated from the event log: the same `Artifacts` and `Tickets` sections and
     caps as an LLM digest, so qmd and the journal parser see the same structure, plus PRs
     (kept apart from tickets, which the LLM digest mixed), commits, queue tasks and subagents.
@@ -75,8 +75,9 @@ PENDING_LABEL = (
 #: A line that would be structure in the daily file rather than text: a markdown heading,
 #: which would open a section for the journal preview and for qmd, or an HTML comment, which
 #: could be read as a block anchor or terminator, or a setext underline (`===` / `---` alone on a
-#: line, a single `-` included), which turns the line above it into a heading. Escaped with a backslash, which markdown
-#: renders as the literal character, so the quotation still reads as written.
+#: line, a single `-` included), which turns the line above it into a heading. Escaped with a
+#: backslash, which markdown renders as the literal character, so the quotation still reads as
+#: written.
 _STRUCTURAL_RE = re.compile(r"(?m)^([ \t]{0,3})(#|<!--|=+[ \t]*$|-+[ \t]*$)")
 
 _GIT_COMMIT_MCP_SHA_RE = re.compile(r'"sha"\s*:\s*"([0-9a-f]{7,40})"')
@@ -167,14 +168,21 @@ def _commits(log: EventLog) -> list[str]:
                 if m:
                     out.append(f"`{m.group(1)}` {ev.target}".rstrip())
             elif ev.tool == "Bash" and _GIT_COMMIT_CMD_RE.search(ev.target):
-                m = _GIT_COMMIT_BASH_SHA_RE.search(ev.result_digest)
-                if m:
-                    out.append(f"`{m.group(1)}`")
+                # The LAST `[branch sha]` line: git prints its own after anything a hook or an
+                # earlier command in the same call printed (audit F-06).
+                shas = _GIT_COMMIT_BASH_SHA_RE.findall(ev.result_digest)
+                if shas:
+                    out.append(f"`{shas[-1]}`")
     return list(dict.fromkeys(out))
 
 
 def _tasks(log: EventLog) -> list[str]:
-    """Queue tasks the session moved, each with the last status it set, in first-seen order."""
+    """Queue tasks the session moved, each with the last status it set, in first-seen order.
+
+    The status is the call's own `status` argument (`ToolEvent.task_status`). A version-1 log
+    predates that field, so only there is it searched for in `args_digest`.
+    """
+    structured = log.subagents is not None
     last: dict[str, str] = {}
     for turn in log.turns:
         for ev in turn.events:
@@ -183,10 +191,14 @@ def _tasks(log: EventLog) -> list[str]:
             ids = _UUID_RE.findall(f"{ev.target} {ev.args_digest}")
             if ev.tool.endswith("submit_task"):
                 ids += _UUID_RE.findall(ev.result_digest)
-            status = _STATUS_ARG_RE.search(ev.args_digest)
+            if structured:
+                status = ev.task_status
+            else:
+                m = _STATUS_ARG_RE.search(ev.args_digest)
+                status = m.group(1) if m else ""
             for task in ids:
                 if status:
-                    last[task] = status.group(1)
+                    last[task] = status
                 else:
                     last.setdefault(task, "")
     return [f"`{t}` {s}".rstrip() for t, s in last.items()]

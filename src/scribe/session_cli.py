@@ -44,7 +44,7 @@ from .discovery import iter_transcripts
 from .eventlog import SAFE_STEM_RE, EventLogError, eventlog_path, load_eventlog
 from .extract.redact import Redactor
 from .summarize.headless import MODE_LLM, MODE_VERBATIM, closing_statement
-from .summarize.render import VERBATIM_START
+from .summarize.render import VERBATIM_RE
 from .writeback import paired_blocks
 
 #: The document's version. Bump it when a field is removed or changes meaning.
@@ -277,7 +277,7 @@ def _blocks(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
                 continue
             body = text[a.end() : c.start()]
             provisional = a.group(4) or ""
-            mode = provisional or (MODE_VERBATIM if VERBATIM_START in body else MODE_LLM)
+            mode = provisional or (MODE_VERBATIM if VERBATIM_RE.search(body) else MODE_LLM)
             out.append(
                 {
                     "file": md.relative_to(root).as_posix(),
@@ -375,7 +375,8 @@ def _brief(doc: dict) -> list[str]:
         f"  transcript: {'present' if t['exists'] else 'gone'}"
         + (f", expires {t['expires']}" if t["exists"] else "")
         + (f"  {t['path']}" if t["path"] else ""),
-        f"  state: {st.get('status', 'no row')}" + (f", attempts {st.get('attempts', '?')}" if st else ""),
+        f"  state: {st.get('status', 'no row')}"
+        + (f", attempts {st.get('attempts', '?')}" if st else ""),
         f"  event log: {ev.get('path', 'none')}",
     ]
     if ev:
