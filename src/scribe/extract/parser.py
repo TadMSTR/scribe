@@ -132,6 +132,24 @@ _AGENT_ID_TEXT_RE = re.compile(r"\bagentId:\s*([A-Za-z0-9]{1,64})\b")
 _SAFE_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 
 
+def _from_harness(obj: dict) -> bool:
+    """Whether a record is a task-notification the HARNESS wrote, not text that looks like one.
+
+    The `<task-notification>` syntax is plain text, so a typed or dispatched prompt can carry
+    it. Believed, it could mark background work done (rendering a waiting session's progress
+    note as its closing statement) or forge a subagent's status (security baseline IV-32,
+    2026-11-01). Claude Code marks its own: a user record's `origin.kind`, a queued command's
+    `commandMode`, both `task-notification` -- measured on every one of 257 records across 300
+    recent transcripts. A `queued_command` from a peer (`commandMode: prompt`) is still input
+    to the turn; it is just never read as a notification.
+    """
+    origin = obj.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") == "task-notification":
+        return True
+    att = obj.get("attachment")
+    return isinstance(att, dict) and att.get("commandMode") == "task-notification"
+
+
 def _notification(text: str) -> tuple[str, str, str] | None:
     """`(task_id, tool_use_id, status)` from a `<task-notification>`, or None if it is not one."""
     if "<task-notification>" not in text:
@@ -395,8 +413,10 @@ def extract(
     bg_launched: dict[str, int] = {}
     bg_done: set[str] = set()
 
-    def _notified(text: str) -> None:
+    def _notified(obj: dict, text: str) -> None:
         """Record what a task-notification says: the task is done, and how it ended."""
+        if not _from_harness(obj):
+            return
         note = _notification(text)
         if note is None:
             return
@@ -414,8 +434,10 @@ def extract(
         if sub is not None:
             agent_id = str(tur.get("agentId", "") or "")
             if not agent_id:
-                m = _AGENT_ID_TEXT_RE.search(_result_text(block, None))
-                agent_id = m.group(1) if m else ""
+                # The LAST match: the harness writes its `agentId:` line after the subagent's
+                # own output, which could carry a decoy line of the same shape (baseline IV-73).
+                found = _AGENT_ID_TEXT_RE.findall(_result_text(block, None))
+                agent_id = found[-1] if found else ""
             sub.agent_id = red.digest(agent_id, 64)
             asynchronous = bool(tur.get("isAsync")) or tur.get("status") == "async_launched"
             sub.background = sub.background or asynchronous
@@ -494,7 +516,7 @@ def extract(
                 if text.strip():
                     st.queued_commands += 1
                     st.raw_content_chars += len(text)
-                    _notified(text)
+                    _notified(obj, text)
                     turn = _ensure_turn(str(obj.get("uuid", "")), ts)
                     turn.queued_input.append(red.digest(text, text_chars))
                 continue
@@ -593,7 +615,7 @@ def extract(
                 if _is_injected(text):
                     st.skipped_injected += 1
                     continue
-                _notified(text)
+                _notified(obj, text)
 
                 st.raw_content_chars += len(text)
                 current = Turn(
@@ -695,7 +717,8 @@ def _int(value: object) -> int:
         return 0
     try:
         return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: `json.loads` accepts `Infinity`, and `int(inf)` raises it.
         return 0
 
 

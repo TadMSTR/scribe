@@ -20,8 +20,9 @@ disk -- so it has its own exit code, and drift takes precedence when both are pr
 
 Exit codes: 0 clean (or rebuilt), 1 drift found, 2 config error, 3 the corpus or manifest
 could not be read or written, 4 the manifest is clean but at least one session has more than
-one final block. `4` is an addition; the first four are unchanged, because a scheduled
-detector consumes them (`scribe-recover-check.sh` in the operator's scripts).
+one final block, 5 the check itself failed. `4` and `5` are additions; the first four are
+unchanged, because a scheduled detector consumes them (`scribe-recover-check.sh` in the
+operator's scripts).
 """
 
 from __future__ import annotations
@@ -39,6 +40,9 @@ EXIT_DRIFT = 1
 EXIT_CONFIG = 2
 EXIT_IO = 3
 EXIT_MULTI_BLOCK = 4
+#: Any failure other than config or I/O. Before this an unexpected exception exited 1, the
+#: drift code (security baseline OV-27).
+EXIT_INTERNAL = 5
 
 
 def _drift_dict(d: Drift) -> dict:
@@ -52,6 +56,7 @@ def _drift_dict(d: Drift) -> dict:
         "changed": [{"key": list(k), "fields": f} for k, f in d.changed],
         "malformed": [{"line": n, "reason": r} for n, r in d.malformed],
         "one_block_per_session": d.one_block_per_session,
+        "pending_blocks": [list(k) for k in d.pending_blocks],
         "multi_block": [
             {"session_id": sid, "blocks": [list(k) for k in keys]} for sid, keys in d.multi_block
         ],
@@ -67,6 +72,10 @@ def _print_drift(d: Drift, path: Path) -> None:
             f"  !! {len(d.multi_block)} session(s) with more than one block "
             "(contract: one block per session)"
         )
+    # Informational. A headless session killed while waiting keeps its `provisional:pending`
+    # block for good; a count that only grows is how that shows (security baseline OV-32).
+    if d.pending_blocks:
+        print(f"  {len(d.pending_blocks)} pending block(s) (headless sessions still waiting)")
     if d.absent:
         print("  !! no manifest file -- every block is missing from it")
     for path_, turn in d.missing:
@@ -133,6 +142,9 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"scribe: {exc}", file=sys.stderr)
         return EXIT_IO
+    except Exception as exc:
+        print(f"scribe: index check failed ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return EXIT_INTERNAL
 
     if args.json:
         json.dump({"manifest": str(path), **_drift_dict(drift)}, sys.stdout, indent=2)

@@ -44,10 +44,13 @@ rules are unchanged.
   expiry from the new `[discovery] transcript_retention_days`), state row, event log stats
   and fields, every block with which is current, the session's run records (fixed field
   list) and the closing statement. Read-only, and no content beyond the redacted event log.
-  Exit `0` found, `1` no trace, `2` usage.
+  Exit `0` found, `1` no trace, `2` usage, `3` the lookup failed or could not read a
+  source (named in `errors`).
 - **`scribe index --check` enforces one block per session.** A session with more than one
   final block is named with its blocks and exits `4` (manifest clean, contract breached);
-  drift still exits `1` and takes precedence. `4` is new; `0`–`3` are unchanged.
+  drift still exits `1` and takes precedence; `5` means the check itself failed (an
+  unexpected exception used to exit `1`, the drift code). `4` and `5` are new; `0`–`3` are
+  unchanged. It also prints a count of `provisional:pending` blocks.
 - **`qc-report` splits by `render_mode`.** The headline and the verdict cover model-written
   blocks only (`llm`, `verbatim-fallback-llm`; records without the key count as `llm`), and
   every mode is reported apart under `render_modes`. `--by render_mode` is accepted.
@@ -74,8 +77,9 @@ rules are unchanged.
 
 - Subagent transcripts are still not discovered. The non-recursive glob is now a stated rule
   with a test that fails on a recursive one.
-- No historical re-render. The 64 sessions that already hold more than one block keep them
-  until a later sweep of the session replaces them; `index --check` names them.
+- No historical re-render. The sessions that already hold more than one block (64 across the
+  corpus on 2026-11-01; 46 of 681 since 2026-10-01) keep them until a later sweep of the
+  session replaces them; `index --check` names them.
 
 ## [0.17.0] — 2026-10-24
 

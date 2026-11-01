@@ -314,6 +314,15 @@ def _supersede(
 
     Spans are applied from the end, so no splice moves an offset not yet used. One
     `atomic_replace`, so a crash leaves the old file or the new one.
+
+    **Concurrency: this is read-modify-replace with no lock of its own.** A write to the file
+    between `_read` and the rename would be lost. That is safe only because every writer of the
+    digest corpus runs under the sweep's lock -- the cron's `flock -n` around `scribe run`, and
+    `scribe correct --apply`'s `flock(2)` on the same file (invariant 20) -- exactly the
+    premise `replace_block` and `recover`'s stamping already rest on. A new writer of daily
+    files must take that lock. Likewise `os.replace` replaces a symlink or hardlink at `path`
+    rather than writing through it, which is intended here: the daily files live in scribe's
+    own 0700 `output_dir` and are never links (security baseline FW-17/FW-33, 2026-11-01).
     """
     first_start, first_end = blocks[0][0].start(), blocks[0][1].end()
     updated = text

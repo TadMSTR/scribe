@@ -317,11 +317,13 @@ join the transcript, the state DB, the event log, the digests and the run record
 | `closing_statement` | the text the headless path would quote, its `chars`, `source` and `turn_index`; or `null` with `closing_statement_reason` |
 
 Two rules hold for every field. **It writes nothing:** the state DB is opened read-only, and
-nothing calls a provider. **It prints no content beyond the redacted event log:** paths, ids,
+nothing calls a provider. (SQLite itself updates the WAL `-shm` index on any read; it holds no
+database content.) **It prints no content beyond the redacted event log:** paths, ids,
 counts and statuses are fine; text appears only where the event log already holds it. Run
 records pass through a fixed field list, so a record's ungrounded `claims` and its
 `contamination_excerpt` never appear. Exit codes: `0` found, `1` no trace, `2` usage or
-config. A missing transcript is not an error; it is what a session older than the retention
+config, `3` the lookup failed or a source could not be read (named in `errors`). A missing
+transcript is not an error; it is what a session older than the retention
 period looks like.
 
 ### Using a different indexer
@@ -460,12 +462,12 @@ line, which names the directory it looked in.
 
 ### When a digest is not written
 
-Not every run produces a digest. Two outcomes write a block that is *not* a summary, and both
-are marked as such in the block's own anchor:
+Not every run produces a digest. Three outcomes write a block that is *not* a summary, and
+each is marked as such in the block's own anchor:
 
 | body | anchor | meaning |
 |---|---|---|
-| a digest | no `provisional:` attribute | final; never overwritten |
+| a digest | no `provisional:` attribute | final; never overwritten by a block for the same turn, and replaced only by a later block for the same session (below) |
 | `render_failure` placeholder | `provisional:placeholder` | the model call or the schema failed (an outage writes nothing instead; see [When the provider is down](#when-the-provider-is-down)) |
 | suppression note | `provisional:suppressed` | the contamination guard fired |
 
@@ -479,7 +481,8 @@ for the same turn, including by a later placeholder.
 **A later block for the same session replaces the earlier ones.** A sweep summarizes the whole
 session every time, so when a session was still active at one sweep and quiet at a later one,
 the later block is a cumulative re-summary of everything the first said. Before 0.18.0 both
-stayed: 46 of 681 sessions over a month had 2–5 blocks, and qmd indexed every version.
+stayed: 46 of 681 sessions since 2026-10-01 had 2–5 blocks (64 across the whole corpus), and
+qmd indexed every version.
 Developer session 808a51cf's first block said 136 tests passed, and its second said 198. Now
 the new block takes the first block's place in the daily file (heading kept, anchor moved to
 the new last turn) and the others are removed, in one atomic replace. The run record counts
@@ -634,8 +637,9 @@ contract rather than a convenience:
 | `5` | the state DB is newer than this build understands — upgrade scribe, don't edit the DB |
 
 `index --check`: `0` clean, `1` drift, `2` config, `3` I/O, `4` the manifest is clean but a
-session has more than one final block (added in 0.18.0). `session`: `0` found, `1` no trace,
-`2` usage or config.
+session has more than one final block, `5` the check itself failed (`4` and `5` added in
+0.18.0; it also prints a count of `provisional:pending` blocks). `session`: `0` found, `1` no
+trace, `2` usage or config, `3` the lookup failed.
 
 **`4` and `5` were added in 0.4.0; `0`–`3` did not move.** Before `4` existed, an unhandled
 exception — a corrupt state DB, say — exited `1`, which is the code meaning "repairable loss".

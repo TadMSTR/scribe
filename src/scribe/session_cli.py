@@ -12,7 +12,9 @@ document carries `schema` (`SCHEMA`), and a field changes meaning only with a ne
 Two rules hold for every field, and `tests/test_session_cli.py` holds them:
 
   1. **Read-only.** The state DB is opened `mode=ro` through sqlite's URI form -- never via
-     `Store`, which stamps `user_version` on open. Nothing calls a provider. Nothing writes.
+     `Store`, which stamps `user_version` on open. Nothing calls a provider. Nothing writes,
+     with one exception that is SQLite's, not scribe's: in WAL mode every reader updates the
+     `-shm` shared-memory index, read-only or not. It holds no database content.
   2. **No content beyond the redacted event log.** Paths, ids, counts, statuses and lengths
      are fine. Text appears only where the event log already holds it, redacted at extraction:
      the closing statement and the subagent descriptions. A run record's `claims` and
@@ -20,15 +22,18 @@ Two rules hold for every field, and `tests/test_session_cli.py` holds them:
      fields that excludes them. The state row's `last_error` goes through `Redactor` first.
 
 Exit codes: 0 found, 1 no trace of the session anywhere scribe looks, 2 a usage or config
-problem. A missing transcript is not an error: it is the normal state of a session older than
-the retention period, and the event log is what remains.
+problem, 3 the lookup failed or could not read a source (`errors` names it). A missing
+transcript is not an error: it is the normal state of a session older than the retention
+period, and the event log is what remains.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import fnmatch
 import json
+import os
 import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
@@ -48,6 +53,9 @@ SCHEMA = "scribe.session/1"
 EXIT_FOUND = 0
 EXIT_UNKNOWN = 1
 EXIT_USAGE = 2
+#: The tool failed, or could not read a source it needed to answer "no trace". Distinct from
+#: 1 so a wrapper never reads a crash as an unknown session (security baseline OV-27).
+EXIT_FAILED = 3
 
 #: The run-record fields `runs` carries. A fixed list rather than "everything minus a
 #: denylist", so a field added to the record later is not exposed until someone decides to.
@@ -90,23 +98,34 @@ STATE_FIELDS = (
 )
 
 
-def _state_rows(cfg: Config, session_id: str) -> list[dict]:
-    """The session's state rows, read-only. [] when the DB or the row is absent."""
+def _state_rows(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
+    """The session's state rows, read-only. [] when the DB or the row is absent.
+
+    A DB that is there and cannot be read is recorded in `errors` (exception type only), so it
+    never reads as "no state row" -- which would make an unreadable DB look like an unknown
+    session (security baseline OV-01).
+    """
     db = Path(cfg.state_path).expanduser()
     if not db.is_file():
         return []
     uri = f"file:{db}?mode=ro"
     try:
         conn = sqlite3.connect(uri, uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        errors.append(f"state: {type(exc).__name__}")
         return []
     try:
         conn.row_factory = sqlite3.Row
+        # `_` is a LIKE wildcard and SAFE_STEM_RE admits it, so it is escaped; and an exact
+        # `session_id` match sorts first, so `rows[0]` is never another session's row.
+        like = session_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         rows = conn.execute(
-            "SELECT * FROM sessions WHERE session_id = ? OR transcript_path LIKE ?",
-            (session_id, f"%/{session_id}.jsonl"),
+            "SELECT * FROM sessions WHERE session_id = ? OR transcript_path LIKE ? ESCAPE '\\' "
+            "ORDER BY (session_id = ?) DESC, updated_at DESC",
+            (session_id, f"%/{like}.jsonl", session_id),
         ).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        errors.append(f"state: {type(exc).__name__}")
         return []
     finally:
         conn.close()
@@ -135,9 +154,15 @@ def _transcript(cfg: Config, session_id: str, rows: list[dict]) -> dict:
     if not path:
         return out
     p = Path(path).expanduser()
+    if not _under_projects(cfg, p):
+        # The path is the state DB's, and the DB is scribe's own -- but it is only stat'd if it
+        # is where a transcript can be, so a doctored row cannot probe the filesystem through
+        # this command (security baseline IV-21).
+        out["outside_project_globs"] = True
+        return out
     try:
         st = p.stat()
-    except OSError:
+    except (OSError, ValueError):  # ValueError: an embedded NUL (baseline IV-58)
         return out
     out["exists"] = True
     out["size_bytes"] = st.st_size
@@ -148,6 +173,21 @@ def _transcript(cfg: Config, session_id: str, rows: list[dict]) -> dict:
         # moves whenever the session resumes.
         out["expires"] = (mtime + timedelta(days=cfg.transcript_retention_days)).date().isoformat()
     return out
+
+
+def _under_projects(cfg: Config, path: Path) -> bool:
+    """Whether `path` is a `*.jsonl` directly inside a directory `project_globs` matches."""
+    if path.suffix != ".jsonl":
+        return False
+    try:
+        parent = path.parent.resolve(strict=False)
+    except (OSError, ValueError):
+        return False
+    for pattern in cfg.project_globs:
+        base = os.path.expanduser(pattern).rstrip("/")
+        if fnmatch.fnmatchcase(str(parent), base) or fnmatch.fnmatchcase(str(path.parent), base):
+            return True
+    return False
 
 
 def _eventlog(cfg: Config, session_id: str) -> tuple[dict | None, object | None]:
@@ -180,7 +220,7 @@ def _eventlog(cfg: Config, session_id: str) -> tuple[dict | None, object | None]
     }, log
 
 
-def _blocks(cfg: Config, session_id: str) -> list[dict]:
+def _blocks(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     """Every complete block for the session in the corpus, with which one is current."""
     root = Path(cfg.output_dir).expanduser()
     out: list[dict] = []
@@ -189,7 +229,8 @@ def _blocks(cfg: Config, session_id: str) -> list[dict]:
     for md in sorted(root.rglob("*.md")):
         try:
             text = md.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as exc:
+            errors.append(f"digest {md.relative_to(root).as_posix()}: {type(exc).__name__}")
             continue
         if session_id not in text:
             continue
@@ -216,12 +257,17 @@ def _blocks(cfg: Config, session_id: str) -> list[dict]:
     return out
 
 
-def _runs(cfg: Config, session_id: str) -> list[dict]:
+def _runs(cfg: Config, session_id: str, errors: list[str]) -> list[dict]:
     path = Path(cfg.qc_run_record).expanduser() if cfg.qc_run_record else None
     if path is None or not path.is_file():
         return []
     out = []
-    with path.open(encoding="utf-8", errors="replace") as fh:
+    try:
+        fh = path.open(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        errors.append(f"runs: {type(exc).__name__}")
+        return out
+    with fh:
         for line in fh:
             if session_id not in line:
                 continue
@@ -234,10 +280,11 @@ def _runs(cfg: Config, session_id: str) -> list[dict]:
 
 def lookup(cfg: Config, session_id: str) -> dict:
     """The whole document for one session. Read-only; see the module docstring."""
-    rows = _state_rows(cfg, session_id)
+    errors: list[str] = []
+    rows = _state_rows(cfg, session_id, errors)
     evlog, log = _eventlog(cfg, session_id)
-    blocks = _blocks(cfg, session_id)
-    runs = _runs(cfg, session_id)
+    blocks = _blocks(cfg, session_id, errors)
+    runs = _runs(cfg, session_id, errors)
     transcript = _transcript(cfg, session_id, rows)
 
     closing: dict | None = None
@@ -272,6 +319,9 @@ def lookup(cfg: Config, session_id: str) -> dict:
         "runs": runs,
         "closing_statement": closing,
         "closing_statement_reason": closing_reason or None,
+        # What could not be read, by source and exception type. Non-empty means a section above
+        # may be incomplete; `found: false` with errors is "could not look", not "no trace".
+        "errors": errors,
     }
 
 
@@ -333,13 +383,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"scribe: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    doc = lookup(cfg, args.session_id)
+    try:
+        doc = lookup(cfg, args.session_id)
+    except Exception as exc:  # the contract must hold whatever goes wrong inside the join
+        print(f"scribe: session lookup failed ({type(exc).__name__})", file=sys.stderr)
+        return EXIT_FAILED
     if args.brief:
         print("\n".join(_brief(doc)))
     else:
         json.dump(doc, sys.stdout, indent=2, ensure_ascii=False)
         sys.stdout.write("\n")
     if not doc["found"]:
+        if doc["errors"]:
+            print(f"scribe: could not look everywhere: {'; '.join(doc['errors'])}", file=sys.stderr)
+            return EXIT_FAILED
         print(f"scribe: no trace of session {args.session_id!r}", file=sys.stderr)
         return EXIT_UNKNOWN
     return EXIT_FOUND

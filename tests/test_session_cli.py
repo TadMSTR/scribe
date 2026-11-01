@@ -267,3 +267,64 @@ def test_no_content_beyond_the_redacted_event_log(swept) -> None:
     assert "ghp_NOTREAL" not in blob
     assert "SKILL LISTING NEVER EXTRACTED" in target.read_text()
     assert "SKILL LISTING NEVER EXTRACTED" not in blob
+
+
+def test_an_underscore_in_the_id_is_not_a_wildcard(tmp_path) -> None:
+    """`_` is a LIKE wildcard; `a_b` must not pick up the row for transcript `aXb.jsonl`."""
+    db = tmp_path / "state.sqlite3"
+    Store(db).upsert_observed("/p/aXb.jsonl", size_bytes=1, mtime_ns=1, agent="x")
+    cfg = Config(
+        state_path=str(db),
+        output_dir=str(tmp_path / "out"),
+        eventlog_dir=str(tmp_path / "ev"),
+        project_globs=(str(tmp_path / "none") + "/",),
+        qc_run_record="",
+    )
+    assert lookup(cfg, "a_b")["state"] is None
+    assert lookup(cfg, "aXb")["state"]["transcript_path"] == "/p/aXb.jsonl"
+
+
+def test_a_state_row_outside_the_project_globs_is_not_statted(tmp_path) -> None:
+    db = tmp_path / "state.sqlite3"
+    Store(db).upsert_observed("/etc/passwd", size_bytes=1, mtime_ns=1, agent="x")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE sessions SET session_id = 'probe'")
+    cfg = Config(
+        state_path=str(db),
+        output_dir=str(tmp_path / "out"),
+        eventlog_dir=str(tmp_path / "ev"),
+        project_globs=(str(tmp_path / "projects" / "*") + "/",),
+        qc_run_record="",
+    )
+    t = lookup(cfg, "probe")["transcript"]
+    assert t["exists"] is False and t["size_bytes"] is None
+    assert t["outside_project_globs"] is True
+
+
+def test_an_unreadable_state_db_is_an_error_not_an_unknown_session(tmp_path, capsys) -> None:
+    """Baseline OV-01/OV-27: a DB that cannot be read must not read as "no trace"."""
+    from scribe.session_cli import EXIT_FAILED
+
+    db = tmp_path / "state.sqlite3"
+    db.write_bytes(b"not a sqlite database at all, just bytes" * 10)
+    toml = tmp_path / "scribe.toml"
+    toml.write_text(
+        f'[discovery]\nstate_path = "{db}"\noutput_dir = "{tmp_path / "out"}"\n'
+        f'eventlog_dir = "{tmp_path / "ev"}"\nproject_globs = ["{tmp_path / "none"}/"]\n'
+        '[qc]\nrun_record = ""\n'
+    )
+    assert main(["some-session", "--config", str(toml)]) == EXIT_FAILED
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["errors"] and doc["errors"][0].startswith("state: ")
+
+
+def test_a_crash_inside_the_lookup_keeps_the_exit_contract(swept, tmp_path, monkeypatch) -> None:
+    from scribe import session_cli
+
+    cfg, _ = swept
+
+    def boom(*a, **k):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(session_cli, "lookup", boom)
+    assert main([SID, "--config", str(_toml(cfg, tmp_path))]) == session_cli.EXIT_FAILED

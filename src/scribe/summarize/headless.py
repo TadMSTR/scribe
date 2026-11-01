@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 
 from ..extract.models import EventLog, Turn
 from .contamination import explain_contamination
-from .render import VERBATIM_END, VERBATIM_START, _bullet, _truncation_note
+from .render import VERBATIM_END, VERBATIM_RE, VERBATIM_START, _bullet, _truncation_note
 from .schema import MAX_ROLLUP_ITEMS, caps_for
 
 #: `render_mode` values. `llm` is every session the feature does not apply to.
@@ -267,13 +267,30 @@ def choose(log: EventLog, min_chars: int, *, heading: str = "") -> Choice:
     and retry handle it. The post-render redaction in `pipeline` runs over either.
     """
     if outstanding(log):
-        return render_pending(log, heading=heading)
+        pending = render_pending(log, heading=heading)
+        rest = pending.markdown.replace(PENDING_LABEL, "")
+        if explain_contamination(rest, log.grounding_text()) is not None:
+            return Choice(mode=MODE_FALLBACK, reason="contamination (pending rollup)")
+        return pending
     closing, why = closing_statement(log, min_chars)
     if closing is None:
         return Choice(mode=MODE_FALLBACK, reason=why)
-    detection = explain_contamination(closing.text, log.grounding_text())
+    corpus = log.grounding_text()
+    detection = explain_contamination(closing.text, corpus)
     if detection is not None:
         return Choice(
             mode=MODE_FALLBACK, closing=closing, reason=f"contamination: {detection.signal}"
         )
-    return render_verbatim(log, closing, heading=heading)
+    choice = render_verbatim(log, closing, heading=heading)
+    # The rollup too: subagent descriptions and commit targets are agent-written and reach the
+    # same injection (security baseline IV-24). Run over the block minus the quotation, which
+    # was checked above. 0 of 220 measured rollups fired.
+    rest = VERBATIM_RE.sub("", choice.markdown).replace(CLOSING_LABEL, "")
+    detection = explain_contamination(rest, corpus)
+    if detection is not None:
+        return Choice(
+            mode=MODE_FALLBACK,
+            closing=closing,
+            reason=f"contamination (rollup): {detection.signal}",
+        )
+    return choice

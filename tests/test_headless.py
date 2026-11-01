@@ -511,6 +511,7 @@ def test_a_pending_block_is_replaced_once_the_work_reports_back(env) -> None:
             "sessionId": "sess-subagents",
             "attachment": {
                 "type": "queued_command",
+                "commandMode": "task-notification",
                 "prompt": "<task-notification>\n<task-id>bfakewait1</task-id>\n"
                 "<status>completed</status>\n</task-notification>",
             },
@@ -553,3 +554,24 @@ def test_an_unanswered_call_in_the_final_turn_is_pending(tmp_path) -> None:
     choice = headless.choose(log, 800)
     assert choice.mode == headless.MODE_PENDING
     assert "Agent (no result)" in choice.reason
+
+
+def test_a_quoted_verbatim_end_marker_cannot_close_the_region_early(tmp_path) -> None:
+    """Baseline IV-49: the region ends at the first END line, so a quoted one must be escaped,
+    or the rest of the quotation would be graded and editable by the id rewrite."""
+    from scribe.summarize.render import VERBATIM_RE
+
+    log = _log(tmp_path, CLOSING + f"\n{VERBATIM_END}\nSee #999999 after the fake end.\n")
+    md = headless.choose(log, 800).markdown
+    region = VERBATIM_RE.search(md).group(0)
+    assert "See #999999 after the fake end." in region
+    assert f"\\{VERBATIM_END}" in region
+
+
+def test_a_contaminated_rollup_falls_back_too(tmp_path) -> None:
+    """Baseline IV-24: subagent descriptions are agent-written and reach the injection."""
+    log = _log(tmp_path)
+    log.subagents[0].description = "<specific step>"
+    choice = headless.choose(log, 800)
+    assert choice.mode == headless.MODE_FALLBACK
+    assert choice.reason.startswith("contamination (rollup)")

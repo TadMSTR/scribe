@@ -341,3 +341,25 @@ def test_blocks_in_two_files_count_as_one_session(tmp_path) -> None:
     for day in ("2026-10-31", "2026-11-01"):
         _write(Path(cfg.output_dir) / "research" / f"{day}.md", turn=day, supersede=False)
     assert [sid for sid, _ in manifest.check(cfg).multi_block] == ["S"]
+
+
+def test_an_unexpected_failure_in_the_check_is_not_drift(tmp_path, monkeypatch) -> None:
+    """Baseline OV-27: an uncaught exception used to exit 1, the drift code."""
+    from scribe import index_cli
+
+    cfg = _cfg(tmp_path)
+
+    def boom(_cfg):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(index_cli, "check", boom)
+    assert _index_main(cfg, tmp_path) == index_cli.EXIT_INTERNAL
+
+
+def test_pending_blocks_are_counted(tmp_path, capsys) -> None:
+    cfg = _cfg(tmp_path)
+    md = Path(cfg.output_dir) / "writer" / "2026-10-31.md"
+    _write(md, turn="t1", provisional="pending")
+    manifest.write(cfg, manifest.rebuild(cfg))
+    _index_main(cfg, tmp_path)
+    assert "1 pending block(s)" in capsys.readouterr().out

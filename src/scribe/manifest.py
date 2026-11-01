@@ -317,6 +317,8 @@ class Drift:
     #: contract 1), which nothing checked before vikunja#1347. Provisional blocks do not
     #: count: a stand-in is replaced by the next write for its session.
     multi_block: list[tuple[str, list[Key]]] = field(default_factory=list)
+    #: `provisional:pending` blocks on disk. Informational, not a failure.
+    pending_blocks: list[Key] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -345,7 +347,13 @@ def check(cfg: Config) -> Drift:
     """
     records = rebuild(cfg)
     expected = {(r["path"], r["turn_uuid"]): r for r in records}
-    drift = Drift(expected=len(expected), multi_block=multi_block_sessions(records))
+    drift = Drift(
+        expected=len(expected),
+        multi_block=multi_block_sessions(records),
+        pending_blocks=sorted(
+            (r["path"], r["turn_uuid"]) for r in records if r["provisional"] == "pending"
+        ),
+    )
     try:
         cur = read(cfg.manifest_file())
     except FileNotFoundError:
