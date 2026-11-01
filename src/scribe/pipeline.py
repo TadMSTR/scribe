@@ -305,8 +305,9 @@ def session_when(log: EventLog, fallback: datetime) -> datetime:
     return fallback
 
 
-#: Extraction missed it: the value is in the event log, so the model was shown it. This is
-#: the only case where `redact.py` is the file to look at.
+#: Extraction missed it: the value is in the event log, so on the LLM path the model was shown
+#: it (a headless block calls no model, round-3 baseline OV-24). This is the only case where
+#: `redact.py` is the file to look at.
 CAUSE_EXTRACTION = "extraction-miss"
 #: The model emitted a secret-shaped string that was never in its input. Not an extraction
 #: defect; the digest is still correct on disk because the re-scrub caught it.
@@ -839,7 +840,8 @@ def process_session(
         #
         # It is also a DETECTOR, and a fire here has TWO possible causes (vikunja#856):
         #
-        #   * extraction missed it — the value was in the event log and went to the model, or
+        #   * extraction missed it — the value was in the event log (and, on the LLM path, went
+        #     to the model; a headless block calls none), or
         #   * the model emitted it — a secret-shaped string that was never in its input.
         #
         # This comment used to say a fire "can only mean extraction missed something", and the

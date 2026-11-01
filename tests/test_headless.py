@@ -57,7 +57,7 @@ CLOSING = (
 
 #: A `key: value` secret for the redaction tests, built so no source line is one: a detector
 #: reading this file sees no secret shape (round-3 baseline OV-61).
-KV_SECRET = "pass" + "word: FAKEhunter2-Correct-Horse"
+KV_LINE = "pass" + "word: FAKEhunter2-Correct-Horse"
 
 GOOD = json.dumps(
     {
@@ -523,7 +523,7 @@ def test_a_quoted_key_value_secret_is_redacted(tmp_path) -> None:
     from scribe.extract.redact import Redactor
 
     log = _log(tmp_path)
-    closing = headless.Closing(CLOSING + "\n" + KV_SECRET + "\n", 0, "final-turn")
+    closing = headless.Closing(CLOSING + "\n" + KV_LINE + "\n", 0, "final-turn")
     assert "FAKEhunter2" not in headless.render_verbatim(log, closing).markdown
     guard = Redactor(capture=True)
     md = headless.render_verbatim(log, closing, scrub=guard.scrub).markdown
@@ -538,7 +538,7 @@ def test_a_key_value_secret_in_a_rollup_item_is_redacted(tmp_path, pending) -> N
     from scribe.extract.redact import Redactor
 
     log = _log(tmp_path, pending=pending)
-    log.subagents = [Subagent(turn_index=0, seq=0, description=KV_SECRET)]
+    log.subagents = [Subagent(turn_index=0, seq=0, description=KV_LINE)]
     guard = Redactor(capture=True)
     choice = headless.choose(log, 800, scrub=guard.scrub)
     assert choice.mode == (headless.MODE_PENDING if pending else headless.MODE_VERBATIM)
@@ -551,8 +551,8 @@ def test_a_secret_after_any_line_separator_is_redacted(tmp_path, sep) -> None:
     """Round-3 baseline SC-46: `(?m)^` starts a line only after `\\n`, while `blockquote` and
     `_bullet` split on every separator, so the scrub must see the breaks normalized."""
     log = _log(tmp_path)
-    log.subagents = [Subagent(turn_index=0, seq=0, description=f"done.{sep}{KV_SECRET}")]
-    text = CLOSING + f"\ndone.{sep}{KV_SECRET}\n"
+    log.subagents = [Subagent(turn_index=0, seq=0, description=f"done.{sep}{KV_LINE}")]
+    text = CLOSING + f"\ndone.{sep}{KV_LINE}\n"
     closing = headless.Closing(text, 0, "final-turn")
     assert "FAKEhunter2" not in headless.render_verbatim(log, closing).markdown
 
@@ -710,12 +710,12 @@ def _digest(cfg) -> str:
 def test_a_quoted_secret_counts_as_a_post_render_redaction(env, monkeypatch) -> None:
     """Audit R2-01: the quotation's scrub is the pipeline's guard, so a hit is counted and
     classified with the rest -- and never reaches the daily file."""
-    secret = "\n" + KV_SECRET + "\n"
+    kv = "\n" + KV_LINE + "\n"
     real = headless.closing_statement
 
     def with_secret(log, min_chars):
         closing, why = real(log, min_chars)
-        return headless.Closing(closing.text + secret, closing.turn_index, closing.source), why
+        return headless.Closing(closing.text + kv, closing.turn_index, closing.source), why
 
     monkeypatch.setattr(headless, "closing_statement", with_secret)
     cfg, store = env(_session(), entrypoints=("sdk-cli",))
@@ -730,13 +730,13 @@ def test_a_fallback_does_not_count_the_unwritten_quotations_scrub(env, monkeypat
     still drop that block for the LLM digest: what it caught was never written."""
     from types import SimpleNamespace
 
-    secret = "\n" + KV_SECRET + "\n"
+    kv = "\n" + KV_LINE + "\n"
     real = headless.closing_statement
     calls = []
 
     def with_secret(log, min_chars):
         closing, why = real(log, min_chars)
-        return headless.Closing(closing.text + secret, closing.turn_index, closing.source), why
+        return headless.Closing(closing.text + kv, closing.turn_index, closing.source), why
 
     def fires_on_rollup(text, corpus):
         calls.append(text)

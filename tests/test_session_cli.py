@@ -401,17 +401,17 @@ def test_closing_text_and_descriptions_are_rescrubbed(swept, monkeypatch) -> Non
     from scribe.summarize.headless import Closing
 
     cfg, _ = swept
-    secret = "pass" + "word: FAKEhunter2-Correct-Horse"
+    kv_line = "pass" + "word: FAKEhunter2-Correct-Horse"
     real_load, real_closing = session_cli.load_eventlog, session_cli.closing_statement
 
     def load_with_secret(*a, **k):
         log = real_load(*a, **k)
-        log.subagents[0].description = f"done.\r{secret}"
+        log.subagents[0].description = f"done.\r{kv_line}"
         return log
 
     def closing_with_secret(log, min_chars):
         closing, why = real_closing(log, min_chars)
-        text = closing.text + f"\ndone.\r{secret}"
+        text = closing.text + f"\ndone.\r{kv_line}"
         return Closing(text, closing.turn_index, closing.source), why
 
     monkeypatch.setattr(session_cli, "load_eventlog", load_with_secret)

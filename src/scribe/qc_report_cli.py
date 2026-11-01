@@ -257,7 +257,8 @@ def _section(label: str, s: dict) -> list[str]:
         lines.append(f"  !! {s['discarded']} digest(s) produced but not written")
     if s["post_render_redactions"]:
         # Only `model-output` positively says extraction was fine, so it alone goes unflagged.
-        # `extraction-miss` means the model was shown a secret, and `undetermined`,
+        # `extraction-miss` means a secret got past extraction (and on the LLM path the model
+        # was shown it; a headless block calls none), and `undetermined`,
         # `inconclusive` and `unrecorded` cannot rule that out: `inconclusive` is what a real
         # secret under 8 characters reports (audit F-02, scribe-redaction-guard-2026-10).
         # SECURITY[deferred]: no cause changes the exit code, so even `extraction-miss` never
@@ -270,7 +271,7 @@ def _section(label: str, s: dict) -> list[str]:
         line = f"{s['post_render_redactions']} post-render redaction(s) by cause: {causes}"
         notes = []
         if missed:
-            notes.append(f"{missed} matched a value in the event log the model was shown")
+            notes.append(f"{missed} matched a value in the event log (extraction missed it)")
         if open_:
             notes.append(f"{open_} cannot rule a leak out")
         if notes:
