@@ -119,10 +119,12 @@ class SessionResult:
     qc_ok: bool | None = None
     qc_coverage: float = 0.0
     qc_findings: list[str] = field(default_factory=list)
-    #: Secrets caught by the last-line re-scrub of the rendered digest. Should always be
-    #: zero -- see `process_session`. Any non-zero value is an extraction-layer miss.
+    #: Secrets caught on the way to disk by the post-render guard: its last-line re-scrub of
+    #: the rendered block, plus, for a headless block, its scrub of the quotation and rollup
+    #: items before they were prefixed (round-3 baseline OV-24). Should always be zero; a
+    #: non-zero value has a cause, recorded in `post_render_cause` -- see `process_session`.
     post_render_redactions: int = 0
-    #: Which cause the fire supports — `extraction-miss`, `model-output` or `undetermined`.
+    #: Which cause the fire supports — one of `CAUSES`.
     #: Empty when nothing fired. Reported so a sweep can be filtered by cause rather than by
     #: reading every error string (vikunja#856).
     post_render_cause: str = ""
